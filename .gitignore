@@ -1,0 +1,78 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+build/
+dist/
+wheels/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Packaging / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+.pyre/
+.tox/
+.nox/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Secrets & credentials — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.yaml
+secrets.yml
+robinhood_*.pickle
+.robinhood/
+.aws/
+.strands/
+
+# Local state / ledger databases
+*.db
+*.sqlite
+*.sqlite3
+data/
+state/
+ledger/*.json
+ledger/*.jsonl
+
+# Logs
+*.log
+logs/
+
+# AgentCore / Strands local caches
+.agentcore/
+.strands-cache/
+
+# Build artifacts
+*.pid
