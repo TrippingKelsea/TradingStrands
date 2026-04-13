@@ -1,7 +1,7 @@
 # TradingStrands — Design Specification
 
-**Status:** Draft v0.1
-**Last updated:** 2026-04-12
+**Status:** Draft v0.2
+**Last updated:** 2026-04-13
 
 This is the authoritative design document for TradingStrands. If the code and the spec disagree, the spec is either wrong or out of date — in which case update it.
 
@@ -43,12 +43,30 @@ TradingStrands runs multiple strategy bots concurrently against a **shared real 
 Each strategy bot owns:
 
 - `starting_capital` (fixed at bot launch)
-- `realized_pnl` (closed positions)
-- `unrealized_pnl` (open positions, marked to market)
+- `realized_pnl` (closed positions, fully burdened — inclusive of all fees)
+- `unrealized_pnl` (open positions, marked to market with entry fees already deducted)
 - `equity` = `starting_capital + realized_pnl + unrealized_pnl`
 - `high_water_mark`
-- `open_positions[]` — each with cost basis the bot "paid"
+- `open_positions[]` — each with fully-burdened cost basis (execution price + fees)
 - `order_history[]`
+- `fee_ledger[]` — granular fee breakdown per fill (see §3.4)
+
+### 3.4 Fee tracking
+
+Every fill records a granular fee breakdown as separate line items:
+
+- **Commission** (if applicable)
+- **Regulatory fees** — SEC fee, TAF (Trading Activity Fee), FINRA fee
+- **Options fees** — per-contract, exercise/assignment fees
+- **Crypto costs** — spread cost, network fees
+- **Other** — extensible for broker-specific charges
+
+Fees are accounted for in two ways simultaneously:
+
+1. **Fully burdened cost basis** — positions carry fees in their cost basis so that PnL reflects true win/loss viability. A trade is only profitable if it clears its fees.
+2. **Separate line items** — the `fee_ledger` records each fee component independently, enabling auditing, reconciliation, and fee analysis across strategies.
+
+The broker adapter maintains and exposes its fee schedule to strategy bots so they can factor expected fees into position sizing and entry/exit decisions.
 
 ### 3.2 Risk budget scaling
 
@@ -132,6 +150,13 @@ TradingStrands mirrors the topology of a real-world trading desk:
                       │
                       ▼
                 Real Market
+
+        Auditor (periodic, LLM agent)
+            │
+            ├── reads: Ledger (all bots)
+            ├── reads: Broker Adapter (account state, actual fees)
+            ├── owns: independent fee schedule
+            └── authority: kill-switch (on drift threshold breach)
 ```
 
 ### 5.1 Orchestrator
@@ -189,14 +214,63 @@ An **advisory LLM agent** runs alongside the risk manager (outside the hot path)
 
 ### 5.5 Broker Adapter
 
-Pluggable interface over concrete broker APIs. MVP targets:
+Pluggable interface over concrete broker APIs. The broker adapter defines a **common abstract interface** that all broker implementations must satisfy, ensuring brokers are swappable without changes to upstream components (strategy bots, coordinator, risk manager, auditor).
 
-- **v0: Robinhood** via `robin-stocks` (unofficial). Covers equities, options, BTC/ETH.
-- **v1: Alpaca** via official SDK. Equities + options + crypto (crypto via Alpaca Crypto).
+Planned implementations:
 
-⚠️ Robinhood has no official API. The unofficial library requires username/password + MFA flow and can break on any Robinhood client update. This is an accepted risk for v0 but is a known weak point.
+- **v0: Alpaca** via official SDK. Equities + options + crypto (Alpaca Crypto). Primary development and testing target.
+- **v1: Robinhood** via `robin-stocks` (unofficial). Covers equities, options, BTC/ETH.
+- **vN: additional brokers** — the abstract interface is designed to accommodate future broker integrations without architectural changes.
 
-### 5.6 Market data
+Each broker adapter implementation:
+
+- Implements the common broker interface (order submission, fill reporting, position/account queries, market data passthrough)
+- Maintains an authoritative **fee schedule** for that broker (commission rates, regulatory fee rates, options per-contract fees, etc.)
+- Exposes the fee schedule to strategy bots for pre-trade cost estimation
+- Reports the actual fees charged on each fill back to the ledger
+- Decomposes fees into the granular categories defined in §3.4
+
+⚠️ Robinhood has no official API. The unofficial library requires username/password + MFA flow and can break on any Robinhood client update. This is an accepted risk for v1 but is a known weak point.
+
+### 5.6 Auditor
+
+A **periodic LLM agent** that independently validates system integrity. The auditor runs on a configurable schedule (not in the tick-loop hot path) and produces natural-language audit reports.
+
+#### 5.6.1 Responsibilities
+
+- **Ledger-broker reconciliation** — compare each bot's virtual positions and balances against actual broker account state
+- **Fee reconciliation** — independently calculate expected fees using its own fee schedule (maintained separately from the broker adapter's) and compare against fees actually charged by the broker
+- **Order history integrity** — verify that every trade intent has a corresponding fill or rejection, and that no unexpected fills exist
+- **Cross-strategy consistency** — check that the sum of all bot ledgers is consistent with aggregate broker account state
+
+#### 5.6.2 Fee schedule independence
+
+The auditor maintains its **own copy** of each broker's fee schedule, independent of the broker adapter's. This deliberate redundancy means:
+
+- Fee calculation bugs in the broker adapter are caught by the auditor (and vice versa)
+- Broker fee changes that are updated in one place but not the other surface as reconciliation failures
+- Neither component trusts the other's math
+
+#### 5.6.3 Kill-switch authority
+
+The auditor has kill-switch capability gated by a **user-configurable drift threshold**. Examples:
+
+- Fee discrepancy exceeds $X or Y% of trade value → `halt-and-stop-trading`
+- Ledger-broker position mismatch persists across N audit cycles → `halt-and-stop-trading`
+- Aggregate fee drift exceeds threshold over a rolling window → `halt-and-stop-trading`
+
+Drift thresholds are set by the operator at deploy time and can be adjusted at runtime.
+
+#### 5.6.4 Audit reports
+
+Each audit cycle produces a structured report covering:
+
+- Reconciliation status (pass/fail per check)
+- Fee breakdown and discrepancies (if any)
+- Drift trend over recent audit cycles
+- Natural-language summary and recommendations (LLM-generated)
+
+### 5.7 Market data
 
 Multi-source:
 
@@ -225,7 +299,8 @@ Multi-layered, with distinct verbs:
 1. **Strategy Bot** — self-halt based on own risk tolerance.
 2. **Risk Manager** — halt any single bot based on per-strategy deterministic rules.
 3. **Risk Manager portfolio-level** — halt multiple bots or the entire desk based on aggregate exposure.
-4. **Human operator** — always authoritative, always overrides everything.
+4. **Auditor** — halt any bot or the entire desk when drift thresholds are breached (user-configurable).
+5. **Human operator** — always authoritative, always overrides everything.
 
 ### 6.3 Predictive halts
 
@@ -243,6 +318,7 @@ Automatic tripwires distinct from kill switches. When any of the following fire,
 - Unexpected rate-limit or auth failure from the broker
 - An LLM decision call times out repeatedly
 - Loss rate across bots exceeds aggregate threshold within a window
+- Auditor detects fee discrepancy or ledger-broker drift exceeding user-configured thresholds
 
 ---
 
@@ -282,8 +358,9 @@ TradingStrands/
 │       ├── risk/            ← Risk Manager (deterministic + advisory)
 │       ├── broker/          ← broker adapters (robinhood, alpaca)
 │       ├── marketdata/      ← yfinance, google finance, broker quotes
-│       ├── ledger/          ← per-bot balance sheet
-│       └── whatif/          ← counterfactual tracker
+│       ├── ledger/          ← per-bot balance sheet + fee ledger
+│       ├── whatif/          ← counterfactual tracker
+│       └── auditor/         ← periodic reconciliation agent
 ├── examples/
 │   └── strategies/          ← .md strategy files
 └── tests/
@@ -301,9 +378,12 @@ Items that still need decisions before implementation:
 2. **TTA predicate language** — stay in permissive dict form, or crystallize into a small DSL? Defer until we've ingested three or four real strategies.
 3. **Predictive halt rules** — precise formulas for the risk manager's pre-cap halts.
 4. **Correlation limits** — how does the risk manager measure portfolio-level correlated exposure across strategies?
-5. **Robinhood auth flow** — MFA storage, session rotation, what to do when the unofficial API breaks.
+5. **Robinhood auth flow** — (deferred to v1) MFA storage, session rotation, what to do when the unofficial API breaks.
 6. **Observability / ops** — how the operator sees what the desk is doing in real time (TUI? webchat?).
-7. **Audit log** — every decision, every trade, every kill switch, every risk check must be logged in a form suitable for post-incident review. Format TBD.
+7. **Audit log** — every decision, every trade, every kill switch, every risk check must be logged in a form suitable for post-incident review. Format TBD. The Auditor (§5.6) consumes this log — its format must support the auditor's reconciliation needs.
+8. **Auditor cadence** — how frequently should the auditor run? Per-tick is too expensive (LLM agent); daily may be too slow to catch fee drift. Configurable, but what's the sensible default?
+9. **Auditor fee schedule maintenance** — how are the auditor's independent fee schedules kept current? Manual operator update? Scraped from broker documentation? Versioned in config?
+10. **Drift threshold defaults** — what are sensible default drift thresholds for the auditor's kill-switch authority? Need calibration against real broker fee variance.
 
 ---
 
