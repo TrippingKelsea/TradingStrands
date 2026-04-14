@@ -12,7 +12,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 # Copy dependency files first for layer caching
-COPY pyproject.toml uv.lock LICENSE ./
+# LICENSE and README.md are required by hatchling metadata validation
+COPY pyproject.toml uv.lock LICENSE README.md ./
 
 # Install production dependencies only
 RUN uv sync --frozen --no-dev
