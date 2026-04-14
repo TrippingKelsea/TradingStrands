@@ -56,23 +56,10 @@ jobs:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-deploy
           aws-region: us-west-2
 
-      - name: Install CDK
-        run: npm install -g aws-cdk
-
-      - name: Deploy CDK stack (creates ECR repo, DynamoDB, ECS, etc.)
-        working-directory: infra
+      - name: Ensure ECR repository exists
         run: |
-          pip install -r requirements.txt
-          cdk deploy --require-approval never
-
-      - name: Seed Alpaca credentials in Secrets Manager
-        env:
-          ALPACA_PAPER_KEY: ${{ secrets.ALPACA_PAPER_KEY }}
-          ALPACA_PAPER_SECRET: ${{ secrets.ALPACA_PAPER_SECRET }}
-        run: |
-          aws secretsmanager put-secret-value \
-            --secret-id trading-strands/alpaca \
-            --secret-string "{\"ALPACA_API_KEY\":\"${ALPACA_PAPER_KEY}\",\"ALPACA_SECRET_KEY\":\"${ALPACA_PAPER_SECRET}\",\"ALPACA_PAPER\":\"true\"}"
+          aws ecr describe-repositories --repository-names trading-strands 2>/dev/null || \
+          aws ecr create-repository --repository-name trading-strands
 
       - name: Login to Amazon ECR
         id: ecr-login
@@ -95,3 +82,21 @@ jobs:
           docker build -t $ECR_REGISTRY/trading-strands:dashboard-$IMAGE_TAG -t $ECR_REGISTRY/trading-strands:dashboard .
           docker push $ECR_REGISTRY/trading-strands:dashboard-$IMAGE_TAG
           docker push $ECR_REGISTRY/trading-strands:dashboard
+
+      - name: Install CDK
+        run: npm install -g aws-cdk
+
+      - name: Deploy CDK stack
+        working-directory: infra
+        run: |
+          pip install -r requirements.txt
+          cdk deploy --require-approval never
+
+      - name: Seed Alpaca credentials in Secrets Manager
+        env:
+          ALPACA_PAPER_KEY: ${{ secrets.ALPACA_PAPER_KEY }}
+          ALPACA_PAPER_SECRET: ${{ secrets.ALPACA_PAPER_SECRET }}
+        run: |
+          aws secretsmanager put-secret-value \
+            --secret-id trading-strands/alpaca \
+            --secret-string "{\"ALPACA_API_KEY\":\"${ALPACA_PAPER_KEY}\",\"ALPACA_SECRET_KEY\":\"${ALPACA_PAPER_SECRET}\",\"ALPACA_PAPER\":\"true\"}"
