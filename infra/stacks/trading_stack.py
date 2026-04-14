@@ -41,12 +41,9 @@ class TradingStrandsStack(cdk.Stack):
             description="CIDR range allowed to reach the dashboard ALB on port 80",
         )
 
-        # ECR repository
-        repository = ecr.Repository(
-            self,
-            "TradingStrandsRepo",
-            repository_name="trading-strands",
-            removal_policy=cdk.RemovalPolicy.RETAIN,
+        # ECR repository (created by CI workflow, referenced here)
+        repository = ecr.Repository.from_repository_name(
+            self, "TradingStrandsRepo", "trading-strands",
         )
 
         # DynamoDB table
