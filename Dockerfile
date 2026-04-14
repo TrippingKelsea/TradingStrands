@@ -12,7 +12,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 # Copy dependency files first for layer caching
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock LICENSE ./
 
 # Install production dependencies only
 RUN uv sync --frozen --no-dev
