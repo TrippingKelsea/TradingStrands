@@ -163,6 +163,12 @@ class TradingStrandsStack(cdk.Stack):
                 stream_prefix="dashboard",
                 log_group=dashboard_log_group,
             ),
+            entry_point=["uv", "run", "uvicorn"],
+            command=[
+                "trading_strands.dashboard.serve:app",
+                "--host", "0.0.0.0",
+                "--port", "8080",
+            ],
         )
 
         # ALB security group - restrict inbound to operator CIDR
