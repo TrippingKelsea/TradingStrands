@@ -67,7 +67,7 @@ class TradingStrandsStack(cdk.Stack):
             self,
             "AlpacaSecret",
             secret_name="trading-strands/alpaca",
-            description="Alpaca API credentials — seed manually after stack deploy",
+            description="Alpaca API credentials - seed manually after stack deploy",
         )
 
         # ECS cluster on default VPC
@@ -168,12 +168,12 @@ class TradingStrandsStack(cdk.Stack):
             ),
         )
 
-        # ALB security group — restrict inbound to operator CIDR
+        # ALB security group - restrict inbound to operator CIDR
         alb_sg = ec2.SecurityGroup(
             self,
             "DashboardAlbSg",
             vpc=vpc,
-            description="Dashboard ALB — inbound restricted to operator IP",
+            description="Dashboard ALB - inbound restricted to operator IP",
         )
         alb_sg.add_ingress_rule(
             peer=ec2.Peer.ipv4(allowed_cidr_param.value_as_string),
