@@ -10,6 +10,7 @@ import structlog
 
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.coordinator.types import IntentAction, TradeIntent
+from trading_strands.dashboard.publisher import StatePublisher
 from trading_strands.ir.tta import Context, Predicate, evaluate
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
@@ -49,10 +50,12 @@ class Orchestrator:
         coordinator: TradeCoordinator,
         market_data: MarketDataProvider,
         tick_interval: float = 5.0,
+        publisher: StatePublisher | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.market_data = market_data
         self.tick_interval = tick_interval
+        self._publisher = publisher
         self._bots: dict[str, BotRegistration] = {}
         self._symbols: set[str] = set()
         self._running = False
@@ -143,18 +146,36 @@ class Orchestrator:
                         quantity=str(intent.quantity),
                         order_id=result.order_result.order_id if result.order_result else None,
                     )
+                    self._publish_event("trade.executed", {
+                        "bot_id": bot_id,
+                        "symbol": intent.symbol,
+                        "action": str(intent.action),
+                        "quantity": intent.quantity,
+                        "rationale": intent.rationale,
+                    })
                 else:
+                    reason = result.risk_decision.reason if result.risk_decision else "unknown"
                     await logger.ainfo(
                         "trade.rejected",
                         bot_id=bot_id,
                         symbol=intent.symbol,
-                        reason=result.risk_decision.reason if result.risk_decision else "unknown",
+                        reason=reason,
                     )
+                    self._publish_event("trade.rejected", {
+                        "bot_id": bot_id,
+                        "symbol": intent.symbol,
+                        "action": str(intent.action),
+                        "quantity": intent.quantity,
+                        "reason": reason,
+                    })
             except Exception:
                 await logger.aexception("trade.execute.error", bot_id=bot_id)
 
         # Save context for cross-predicate evaluation on next tick
         self._prev_ctx = self._build_context(prices, None)
+
+        # Publish state snapshot
+        self._publish_snapshot(tick_number, prices)
 
     def _build_context(
         self,
@@ -174,6 +195,33 @@ class Orchestrator:
             ctx["ledger.position_count"] = Decimal(len(ledger.open_positions))
 
         return ctx
+
+    def _publish_snapshot(
+        self,
+        tick: int,
+        prices: dict[str, Decimal],
+    ) -> None:
+        """Publish state snapshot to DynamoDB (if publisher is configured)."""
+        if self._publisher is None:
+            return
+        try:
+            self._publisher.publish_snapshot(
+                tick=tick,
+                prices=prices,
+                ledgers=self.coordinator.ledgers,
+                risk_manager=self.coordinator.risk_manager,
+            )
+        except Exception:
+            logger.exception("publisher.snapshot.error")
+
+    def _publish_event(self, event_type: str, data: dict[str, object]) -> None:
+        """Publish an event to DynamoDB (if publisher is configured)."""
+        if self._publisher is None:
+            return
+        try:
+            self._publisher.publish_event(event_type, data)
+        except Exception:
+            logger.exception("publisher.event.error")
 
     def stop(self) -> None:
         """Signal the tick loop to stop."""

@@ -1,0 +1,32 @@
+# Virtual environment
+.venv/
+
+# Version control
+.git/
+.gitignore
+
+# Tests
+tests/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Environment files
+.env
+.env.*
+
+# Infrastructure and docs (not needed at runtime)
+infra/
+docs/
+.github/
+
+# Build artifacts
+*.egg-info/
+dist/
+build/

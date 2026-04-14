@@ -38,6 +38,10 @@ dependencies = [
     "structlog>=24.4",
     "typer>=0.12",
     "rich>=13.9",
+    "python-dotenv>=1.0",
+    # Dashboard
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +55,7 @@ dev = [
 ]
 
 [project.scripts]
-trading-strands = "trading_strands.cli:app"
+trading-strands = "trading_strands.app:main"
 
 [project.urls]
 Documentation = "file://./docs/SPEC.md"
@@ -81,6 +85,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S"]
+"infra/**/*.py" = ["S"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -93,6 +98,10 @@ files = ["src"]
 module = [
     "robin_stocks.*",
     "yfinance.*",
+    "uvicorn.*",
+    "boto3.*",
+    "botocore.*",
+    "mypy_boto3_dynamodb.*",
 ]
 ignore_missing_imports = true
 

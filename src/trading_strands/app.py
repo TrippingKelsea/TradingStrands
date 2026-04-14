@@ -6,6 +6,9 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 from decimal import Decimal
 from pathlib import Path
 
@@ -14,6 +17,7 @@ import structlog
 
 from trading_strands.broker.alpaca import AlpacaAdapter
 from trading_strands.coordinator.coordinator import TradeCoordinator
+from trading_strands.dashboard.publisher import StatePublisher
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
 from trading_strands.orchestrator.engine import Orchestrator
@@ -28,12 +32,26 @@ def _load_strategy(path: str) -> str:
 
 
 def _load_env() -> dict[str, str]:
-    """Load environment variables, with .env file support."""
-    import os
-
+    """Load environment variables, with .env file and Secrets Manager support."""
     from dotenv import load_dotenv
 
     load_dotenv()
+
+    # If running in AWS with Secrets Manager, fetch creds from there
+    secret_name = os.environ.get("SECRETS_MANAGER_SECRET_NAME")
+    if secret_name:
+        import boto3
+
+        client = boto3.client("secretsmanager")
+        resp = client.get_secret_value(SecretId=secret_name)
+        secrets = json.loads(resp["SecretString"])
+        return {
+            "ALPACA_API_KEY": secrets.get("ALPACA_API_KEY", ""),
+            "ALPACA_SECRET_KEY": secrets.get("ALPACA_SECRET_KEY", ""),
+            "ALPACA_PAPER": secrets.get("ALPACA_PAPER", "true"),
+        }
+
+    # Fall back to env vars / .env for local dev
     return {
         "ALPACA_API_KEY": os.environ.get("ALPACA_API_KEY", ""),
         "ALPACA_SECRET_KEY": os.environ.get("ALPACA_SECRET_KEY", ""),
@@ -77,10 +95,18 @@ async def run(
 
     market_data = MarketDataProvider(broker)
 
+    # Optional DynamoDB publisher for dashboard
+    publisher: StatePublisher | None = None
+    table_name = os.environ.get("DYNAMODB_TABLE")
+    if table_name:
+        publisher = StatePublisher(table_name)
+        await logger.ainfo("publisher.enabled", table=table_name)
+
     orchestrator = Orchestrator(
         coordinator=coordinator,
         market_data=market_data,
         tick_interval=tick_interval,
+        publisher=publisher,
     )
 
     bot = StrategyBot(
@@ -104,7 +130,19 @@ async def run(
         tick_interval=tick_interval,
     )
 
-    await orchestrator.run()
+    # Graceful shutdown on SIGTERM/SIGINT
+    with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
+        async with anyio.create_task_group() as tg:
+
+            async def _watch_signals() -> None:
+                async for _sig in signals:
+                    await logger.ainfo("system.shutdown_signal")
+                    orchestrator.stop()
+                    tg.cancel_scope.cancel()
+                    break
+
+            tg.start_soon(_watch_signals)
+            tg.start_soon(orchestrator.run)
 
 
 def main() -> None:

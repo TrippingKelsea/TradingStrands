@@ -1,0 +1,104 @@
+"""DynamoDB state publisher — writes trading state for the dashboard to read."""
+
+from __future__ import annotations
+
+import time
+from decimal import Decimal
+from typing import Any
+
+import boto3
+import structlog
+
+from trading_strands.ledger.models import Ledger
+from trading_strands.risk.manager import RiskManager
+
+logger = structlog.get_logger()
+
+
+def _decimal_default(obj: object) -> str | float:
+    """Convert Decimal to string for DynamoDB compatibility."""
+    if isinstance(obj, Decimal):
+        return str(obj)
+    msg = f"Object of type {type(obj)} is not serializable"
+    raise TypeError(msg)
+
+
+def _serialize_positions(ledger: Ledger) -> list[dict[str, str]]:
+    return [
+        {
+            "symbol": pos.symbol,
+            "quantity": str(pos.quantity),
+            "burdened_cost_basis": str(pos.burdened_cost_basis),
+        }
+        for pos in ledger.open_positions
+    ]
+
+
+class StatePublisher:
+    """Publishes trading state to DynamoDB for the dashboard to consume."""
+
+    def __init__(self, table_name: str) -> None:
+        self._table_name = table_name
+        dynamodb = boto3.resource("dynamodb")
+        self._table = dynamodb.Table(table_name)
+
+    def publish_snapshot(
+        self,
+        tick: int,
+        prices: dict[str, Decimal],
+        ledgers: dict[str, Ledger],
+        risk_manager: RiskManager,
+        whatif_summary: dict[str, Any] | None = None,
+    ) -> None:
+        """Write a full state snapshot to DynamoDB (overwrites previous)."""
+        ledger_data: dict[str, Any] = {}
+        for bot_id, ledger in ledgers.items():
+            ledger_data[bot_id] = {
+                "equity": str(ledger.equity),
+                "realized_pnl": str(ledger.realized_pnl),
+                "drawdown_pct": str(ledger.drawdown_pct),
+                "high_water_mark": str(ledger.high_water_mark),
+                "positions": _serialize_positions(ledger),
+            }
+
+        snapshot: dict[str, Any] = {
+            "pk": "SNAPSHOT",
+            "tick": tick,
+            "timestamp": int(time.time()),
+            "prices": {s: str(p) for s, p in prices.items()},
+            "ledgers": ledger_data,
+            "risk": {
+                "desk_halted": risk_manager._desk_halted,
+                "halted_bots": list(risk_manager._halted_bots),
+            },
+        }
+
+        if whatif_summary is not None:
+            snapshot["whatif"] = {
+                k: str(v) if isinstance(v, Decimal) else v
+                for k, v in whatif_summary.items()
+            }
+
+        self._table.put_item(Item=snapshot)
+
+    def publish_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+    ) -> None:
+        """Append a trade/risk event with 24h TTL for auto-cleanup."""
+        ts = int(time.time())
+        event_id = f"{ts}-{id(data)}"
+
+        item: dict[str, Any] = {
+            "pk": f"EVENT#{event_id}",
+            "event_type": event_type,
+            "timestamp": ts,
+            "ttl": ts + 86400,  # 24h TTL
+            "data": {
+                k: str(v) if isinstance(v, Decimal) else v
+                for k, v in data.items()
+            },
+        }
+
+        self._table.put_item(Item=item)
