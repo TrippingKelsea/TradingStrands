@@ -10,36 +10,38 @@ import structlog
 
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.coordinator.types import IntentAction, TradeIntent
+from trading_strands.ir.tta import Context, Predicate, evaluate
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
 
 logger = structlog.get_logger()
 
 
-class BotConfig:
-    """Configuration for a single strategy bot."""
+class BotRegistration:
+    """A registered bot with its TTA predicate and decision callback."""
 
     def __init__(
         self,
         bot_id: str,
         symbols: list[str],
-        starting_capital: Decimal,
+        callback: BotCallback,
+        tta: Predicate | None = None,
     ) -> None:
         self.bot_id = bot_id
         self.symbols = symbols
-        self.starting_capital = starting_capital
+        self.callback = callback
+        self.tta = tta
 
 
 class Orchestrator:
-    """Runs the tick loop, evaluates conditions, and dispatches to bots.
+    """Runs the tick loop, evaluates TTA predicates, and dispatches to bots.
 
-    For v0, the orchestrator is a simple loop that:
+    Each tick:
     1. Fetches market data for all watched symbols
-    2. Calls each bot's decide() callback with the market snapshot
-    3. Routes any resulting trade intents through the coordinator
-
-    TTA predicate evaluation and IR materialization are deferred
-    until the compilation agent is built.
+    2. Builds a TTA evaluation context (prices + ledger state)
+    3. Evaluates each bot's TTA predicate — only wakes bots whose predicates fire
+    4. Calls woken bot's decide() callback with the market snapshot
+    5. Routes any resulting trade intents through the coordinator
     """
 
     def __init__(
@@ -51,18 +53,28 @@ class Orchestrator:
         self.coordinator = coordinator
         self.market_data = market_data
         self.tick_interval = tick_interval
-        self._bots: dict[str, BotCallback] = {}
+        self._bots: dict[str, BotRegistration] = {}
         self._symbols: set[str] = set()
         self._running = False
+        self._prev_ctx: Context | None = None
 
     def register_bot(
         self,
         bot_id: str,
         symbols: list[str],
         callback: BotCallback,
+        tta: Predicate | None = None,
     ) -> None:
-        """Register a bot with its watched symbols and decision callback."""
-        self._bots[bot_id] = callback
+        """Register a bot with its watched symbols, TTA predicate, and callback.
+
+        If tta is None, the bot is woken on every tick.
+        """
+        self._bots[bot_id] = BotRegistration(
+            bot_id=bot_id,
+            symbols=symbols,
+            callback=callback,
+            tta=tta,
+        )
         self._symbols.update(symbols)
 
     async def run(self, max_ticks: int | None = None) -> None:
@@ -98,13 +110,20 @@ class Orchestrator:
                             prices={s: str(p) for s, p in prices.items()})
 
         # 2. Wake each bot and collect intents
-        for bot_id, callback in self._bots.items():
+        for bot_id, reg in self._bots.items():
             ledger = self.coordinator.ledgers.get(bot_id)
             if ledger is None:
                 continue
 
+            # Build TTA context: prices + ledger state
+            ctx = self._build_context(prices, ledger)
+
+            # Evaluate TTA predicate (if set)
+            if reg.tta is not None and not evaluate(reg.tta, ctx, self._prev_ctx):
+                continue  # predicate did not fire, skip this bot
+
             try:
-                intent = await callback(bot_id, prices, ledger)
+                intent = await reg.callback(bot_id, prices, ledger)
             except Exception:
                 await logger.aexception("bot.decide.error", bot_id=bot_id)
                 continue
@@ -133,6 +152,28 @@ class Orchestrator:
                     )
             except Exception:
                 await logger.aexception("trade.execute.error", bot_id=bot_id)
+
+        # Save context for cross-predicate evaluation on next tick
+        self._prev_ctx = self._build_context(prices, None)
+
+    def _build_context(
+        self,
+        prices: dict[str, Decimal],
+        ledger: Ledger | None,
+    ) -> Context:
+        """Build a flat context dict for TTA evaluation."""
+        ctx: Context = {}
+        for symbol, price in prices.items():
+            ctx[f"price.{symbol}"] = price
+
+        if ledger is not None:
+            ctx["ledger.equity"] = ledger.equity
+            ctx["ledger.realized_pnl"] = ledger.realized_pnl
+            ctx["ledger.drawdown_pct"] = ledger.drawdown_pct
+            ctx["ledger.high_water_mark"] = ledger.high_water_mark
+            ctx["ledger.position_count"] = Decimal(len(ledger.open_positions))
+
+        return ctx
 
     def stop(self) -> None:
         """Signal the tick loop to stop."""

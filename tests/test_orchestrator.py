@@ -13,6 +13,7 @@ from trading_strands.broker.types import (
 )
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.coordinator.types import IntentAction, TradeIntent
+from trading_strands.ir.tta import Predicate
 from trading_strands.ledger.models import FeeBreakdown, Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
 from trading_strands.orchestrator.engine import Orchestrator
@@ -202,3 +203,111 @@ class TestOrchestrator:
 
         assert bot1_calls == 3
         assert bot2_calls == 3
+
+
+class TestTTAIntegration:
+    @pytest.mark.anyio
+    async def test_tta_gates_bot_wakeup(self) -> None:
+        """Bot should only be woken when its TTA predicate fires."""
+        orch, _ledger, broker = _make_orchestrator()
+        call_count = 0
+
+        async def callback(
+            bot_id: str, prices: dict[str, Decimal], ledger: Ledger,
+        ) -> TradeIntent | None:
+            nonlocal call_count
+            call_count += 1
+            return None
+
+        # Only wake when AAPL > 160
+        tta: Predicate = {"field": "price.AAPL", "op": "gt", "value": 160}
+        orch.register_bot("test-bot", ["AAPL"], callback, tta=tta)
+
+        # Tick 1: price = 150, predicate false → not woken
+        broker.prices["AAPL"] = Decimal("150.00")
+        await orch._tick(0)
+        assert call_count == 0
+
+        # Tick 2: price = 165, predicate true → woken
+        broker.prices["AAPL"] = Decimal("165.00")
+        await orch._tick(1)
+        assert call_count == 1
+
+        # Tick 3: price = 155, predicate false → not woken
+        broker.prices["AAPL"] = Decimal("155.00")
+        await orch._tick(2)
+        assert call_count == 1
+
+    @pytest.mark.anyio
+    async def test_no_tta_wakes_every_tick(self) -> None:
+        """Bot without TTA should be woken on every tick."""
+        orch, _ledger, _broker = _make_orchestrator()
+        call_count = 0
+
+        async def callback(
+            bot_id: str, prices: dict[str, Decimal], ledger: Ledger,
+        ) -> TradeIntent | None:
+            nonlocal call_count
+            call_count += 1
+            return None
+
+        orch.register_bot("test-bot", ["AAPL"], callback, tta=None)
+        await orch.run(max_ticks=3)
+        assert call_count == 3
+
+    @pytest.mark.anyio
+    async def test_tta_cross_predicate(self) -> None:
+        """Cross predicate should fire only on the tick where price crosses."""
+        orch, _ledger, broker = _make_orchestrator()
+        call_count = 0
+
+        async def callback(
+            bot_id: str, prices: dict[str, Decimal], ledger: Ledger,
+        ) -> TradeIntent | None:
+            nonlocal call_count
+            call_count += 1
+            return None
+
+        tta: Predicate = {"cross": "above", "field": "price.AAPL", "value": 160}
+        orch.register_bot("test-bot", ["AAPL"], callback, tta=tta)
+
+        # Tick 1: 150 (no prev, cross = false)
+        broker.prices["AAPL"] = Decimal("150.00")
+        await orch._tick(0)
+        assert call_count == 0
+
+        # Tick 2: 165 (crossed above 160)
+        broker.prices["AAPL"] = Decimal("165.00")
+        await orch._tick(1)
+        assert call_count == 1
+
+        # Tick 3: 170 (still above, no crossing)
+        broker.prices["AAPL"] = Decimal("170.00")
+        await orch._tick(2)
+        assert call_count == 1
+
+    @pytest.mark.anyio
+    async def test_tta_with_ledger_state(self) -> None:
+        """TTA can reference ledger state like drawdown."""
+        orch, ledger, _broker = _make_orchestrator()
+        call_count = 0
+
+        async def callback(
+            bot_id: str, prices: dict[str, Decimal], bot_ledger: Ledger,
+        ) -> TradeIntent | None:
+            nonlocal call_count
+            call_count += 1
+            return None
+
+        # Fire when drawdown exceeds 5%
+        tta: Predicate = {"field": "ledger.drawdown_pct", "op": "gt", "value": 0.05}
+        orch.register_bot("test-bot", ["AAPL"], callback, tta=tta)
+
+        # No drawdown → not woken
+        await orch._tick(0)
+        assert call_count == 0
+
+        # Simulate drawdown by manipulating ledger
+        ledger.high_water_mark = Decimal("60000")  # HWM is 60k, equity is 50k → 16.7% DD
+        await orch._tick(1)
+        assert call_count == 1
