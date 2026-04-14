@@ -12,24 +12,24 @@ This project deliberately does not ship backtesting or paper-trading modes. Prop
 
 ## Development setup
 
-Requires Python 3.12+.
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 # Clone
 git clone <repo> TradingStrands
 cd TradingStrands
 
-# Create venv and install
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
+# Create venv and install (uv manages the virtualenv)
+uv sync --extra dev
 
 # Run checks
-ruff check .
-ruff format --check .
-mypy src/
-pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src/
+uv run pytest
 ```
+
+CI runs lint, type checking, and tests on every push and PR via GitHub Actions (`.github/workflows/ci.yml`).
 
 AWS credentials for Bedrock + AgentCore and broker credentials live in `.env` (never commit — see `.env.example`).
 
@@ -55,6 +55,7 @@ Any change to the following paths must include a description of how it was valid
 - `src/trading_strands/coordinator/`
 - `src/trading_strands/broker/`
 - `src/trading_strands/ledger/`
+- `src/trading_strands/auditor/`
 
 These paths gate real-money behavior. "It compiles and the tests pass" is not sufficient justification.
 
