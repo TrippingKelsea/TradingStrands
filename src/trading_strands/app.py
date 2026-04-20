@@ -1,7 +1,11 @@
 """TradingStrands application — wires the full system together.
 
 Usage:
+    # Local dev with a strategy file:
     uv run python -m trading_strands.app --strategy examples/strategies/turtle-trading.md
+
+    # AWS mode (reads strategies from DynamoDB):
+    DYNAMODB_TABLE=trading-strands-state uv run python -m trading_strands.app
 """
 
 from __future__ import annotations
@@ -59,8 +63,34 @@ def _load_env() -> dict[str, str]:
     }
 
 
+def _register_strategy(
+    orchestrator: Orchestrator,
+    coordinator: TradeCoordinator,
+    bot_id: str,
+    strategy_prompt: str,
+    symbols: list[str],
+    capital: Decimal,
+) -> None:
+    """Create a strategy bot and register it with the orchestrator."""
+    ledger = Ledger(starting_capital=capital)
+    coordinator.ledgers[bot_id] = ledger
+
+    bot = StrategyBot(
+        bot_id=bot_id,
+        strategy_prompt=strategy_prompt,
+        symbols=symbols,
+    )
+
+    orchestrator.register_bot(
+        bot_id=bot_id,
+        symbols=symbols,
+        callback=bot.decide,
+        tta=bot.tta,
+    )
+
+
 async def run(
-    strategy_path: str,
+    strategy_path: str | None = None,
     capital: Decimal = Decimal("1000"),
     symbols: list[str] | None = None,
     tick_interval: float = 5.0,
@@ -72,10 +102,6 @@ async def run(
         await logger.aerror("missing ALPACA_API_KEY or ALPACA_SECRET_KEY")
         return
 
-    strategy_prompt = _load_strategy(strategy_path)
-    if symbols is None:
-        symbols = ["AAPL"]  # default, should be extracted from strategy
-
     # Wire up the system
     broker = AlpacaAdapter(
         api_key=env["ALPACA_API_KEY"],
@@ -84,13 +110,10 @@ async def run(
     )
 
     risk_manager = RiskManager(RiskConfig())
-    bot_id = "strategy-0"
-    ledger = Ledger(starting_capital=capital)
-
     coordinator = TradeCoordinator(
         broker=broker,
         risk_manager=risk_manager,
-        ledgers={bot_id: ledger},
+        ledgers={},
     )
 
     market_data = MarketDataProvider(broker)
@@ -109,26 +132,58 @@ async def run(
         publisher=publisher,
     )
 
-    bot = StrategyBot(
-        bot_id=bot_id,
-        strategy_prompt=strategy_prompt,
-        symbols=symbols,
-    )
-
-    orchestrator.register_bot(
-        bot_id=bot_id,
-        symbols=symbols,
-        callback=bot.decide,
-        tta=bot.tta,
-    )
-
-    await logger.ainfo(
-        "system.start",
-        strategy=strategy_path,
-        capital=str(capital),
-        symbols=symbols,
-        tick_interval=tick_interval,
-    )
+    if strategy_path:
+        # Local mode: single strategy from file
+        strategy_prompt = _load_strategy(strategy_path)
+        if symbols is None:
+            symbols = ["AAPL"]
+        _register_strategy(
+            orchestrator, coordinator,
+            bot_id="strategy-0",
+            strategy_prompt=strategy_prompt,
+            symbols=symbols,
+            capital=capital,
+        )
+        await logger.ainfo(
+            "system.start.local",
+            strategy=strategy_path,
+            capital=str(capital),
+            symbols=symbols,
+        )
+    elif publisher:
+        # AWS mode: load strategies from DynamoDB
+        strategies = publisher.get_strategies()
+        active = [s for s in strategies if s.get("status") == "active"]
+        if not active:
+            await logger.awarn("system.no_strategies",
+                               msg="No active strategies in DynamoDB. "
+                               "Submit strategies via the dashboard.")
+        for strat in active:
+            sid = strat["strategy_id"]
+            bot_id = f"strategy-{sid}"
+            strat_symbols = strat.get("symbols", ["AAPL"])
+            strat_capital = Decimal(strat.get("capital", "1000"))
+            _register_strategy(
+                orchestrator, coordinator,
+                bot_id=bot_id,
+                strategy_prompt=strat["markdown"],
+                symbols=strat_symbols,
+                capital=strat_capital,
+            )
+            await logger.ainfo(
+                "system.strategy.loaded",
+                strategy_id=sid,
+                name=strat.get("name"),
+                symbols=strat_symbols,
+                capital=str(strat_capital),
+            )
+        await logger.ainfo("system.start.aws", strategy_count=len(active))
+    else:
+        await logger.aerror(
+            "no strategy specified. Use --strategy for local dev or "
+            "set DYNAMODB_TABLE for AWS mode.",
+        )
+        return
 
     # Graceful shutdown on SIGTERM/SIGINT
     with anyio.open_signal_receiver(signal.SIGTERM, signal.SIGINT) as signals:
@@ -141,7 +196,52 @@ async def run(
                     tg.cancel_scope.cancel()
                     break
 
+            async def _poll_strategies() -> None:
+                """Periodically check DynamoDB for new/changed strategies."""
+                if publisher is None:
+                    return
+                while orchestrator._running:
+                    await anyio.sleep(30)
+                    try:
+                        strategies = publisher.get_strategies()
+                        active_ids = set()
+                        for strat in strategies:
+                            if strat.get("status") != "active":
+                                continue
+                            sid = strat["strategy_id"]
+                            bot_id = f"strategy-{sid}"
+                            active_ids.add(bot_id)
+                            if bot_id not in orchestrator._bots:
+                                strat_symbols = strat.get("symbols", ["AAPL"])
+                                strat_capital = Decimal(
+                                    strat.get("capital", "1000"),
+                                )
+                                _register_strategy(
+                                    orchestrator, coordinator,
+                                    bot_id=bot_id,
+                                    strategy_prompt=strat["markdown"],
+                                    symbols=strat_symbols,
+                                    capital=strat_capital,
+                                )
+                                await logger.ainfo(
+                                    "system.strategy.hot_loaded",
+                                    strategy_id=sid,
+                                    name=strat.get("name"),
+                                )
+                        # Unregister bots for strategies that are no longer active
+                        for bot_id in list(orchestrator._bots):
+                            if bot_id.startswith("strategy-") and bot_id not in active_ids:
+                                orchestrator.unregister_bot(bot_id)
+                                coordinator.ledgers.pop(bot_id, None)
+                                await logger.ainfo(
+                                    "system.strategy.unloaded",
+                                    bot_id=bot_id,
+                                )
+                    except Exception:
+                        await logger.aexception("strategy_poll.error")
+
             tg.start_soon(_watch_signals)
+            tg.start_soon(_poll_strategies)
             tg.start_soon(orchestrator.run)
 
 
@@ -158,7 +258,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="TradingStrands")
     parser.add_argument(
-        "--strategy", required=True, help="Path to strategy markdown file",
+        "--strategy", required=False, default=None,
+        help="Path to strategy markdown file (optional in AWS mode)",
     )
     parser.add_argument(
         "--capital", type=Decimal, default=Decimal("1000"),

@@ -112,3 +112,75 @@ def test_publish_event() -> None:
     assert item["data"]["quantity"] == "10"
     assert "ttl" in item
     assert item["ttl"] > item["timestamp"]
+
+
+def test_put_strategy() -> None:
+    publisher, mock_table = _make_publisher()
+
+    result = publisher.put_strategy(
+        name="Momentum AAPL",
+        markdown="## Buy when RSI < 30",
+        symbols=["AAPL", "MSFT"],
+        capital="5000",
+        strategy_id="test123",
+    )
+
+    mock_table.put_item.assert_called_once()
+    item = mock_table.put_item.call_args.kwargs["Item"]
+
+    assert item["pk"] == "STRATEGY#test123"
+    assert item["strategy_id"] == "test123"
+    assert item["name"] == "Momentum AAPL"
+    assert item["markdown"] == "## Buy when RSI < 30"
+    assert item["symbols"] == ["AAPL", "MSFT"]
+    assert item["capital"] == "5000"
+    assert item["status"] == "active"
+    assert "created_at" in item
+    assert result["pk"] == "STRATEGY#test123"
+
+
+def test_get_strategies() -> None:
+    publisher, mock_table = _make_publisher()
+
+    mock_table.scan.return_value = {
+        "Items": [
+            {"pk": "STRATEGY#a", "strategy_id": "a", "name": "Strat A", "status": "active"},
+            {"pk": "STRATEGY#b", "strategy_id": "b", "name": "Strat B", "status": "paused"},
+        ],
+    }
+
+    result = publisher.get_strategies()
+    assert len(result) == 2
+    assert result[0]["strategy_id"] == "a"
+    assert result[1]["strategy_id"] == "b"
+
+    mock_table.scan.assert_called_once()
+    call_kwargs = mock_table.scan.call_args.kwargs
+    assert "FilterExpression" in call_kwargs
+
+
+def test_get_strategy_found() -> None:
+    publisher, mock_table = _make_publisher()
+
+    mock_table.get_item.return_value = {
+        "Item": {"pk": "STRATEGY#abc", "strategy_id": "abc", "name": "Test"},
+    }
+
+    result = publisher.get_strategy("abc")
+    assert result is not None
+    assert result["strategy_id"] == "abc"
+
+
+def test_get_strategy_not_found() -> None:
+    publisher, mock_table = _make_publisher()
+    mock_table.get_item.return_value = {}
+
+    result = publisher.get_strategy("nonexistent")
+    assert result is None
+
+
+def test_delete_strategy() -> None:
+    publisher, mock_table = _make_publisher()
+
+    publisher.delete_strategy("abc")
+    mock_table.delete_item.assert_called_once_with(Key={"pk": "STRATEGY#abc"})

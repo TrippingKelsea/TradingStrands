@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from decimal import Decimal
 from typing import Any
 
@@ -102,3 +103,60 @@ class StatePublisher:
         }
 
         self._table.put_item(Item=item)
+
+    def put_strategy(
+        self,
+        name: str,
+        markdown: str,
+        symbols: list[str],
+        capital: str = "1000",
+        strategy_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a strategy config in DynamoDB."""
+        sid = strategy_id or str(uuid.uuid4())[:8]
+        now = int(time.time())
+        item: dict[str, Any] = {
+            "pk": f"STRATEGY#{sid}",
+            "strategy_id": sid,
+            "name": name,
+            "markdown": markdown,
+            "symbols": symbols,
+            "capital": capital,
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        }
+        self._table.put_item(Item=item)
+        return item
+
+    def get_strategies(self) -> list[dict[str, Any]]:
+        """Scan for all strategy items."""
+        resp = self._table.scan(
+            FilterExpression="begins_with(pk, :prefix)",
+            ExpressionAttributeValues={":prefix": "STRATEGY#"},
+        )
+        return [dict(item) for item in resp.get("Items", [])]
+
+    def get_strategy(self, strategy_id: str) -> dict[str, Any] | None:
+        """Get a single strategy by ID."""
+        resp = self._table.get_item(Key={"pk": f"STRATEGY#{strategy_id}"})
+        item = resp.get("Item")
+        return dict(item) if item else None
+
+    def update_strategy_status(self, strategy_id: str, status: str) -> bool:
+        """Update a strategy's status (active/paused/stopped)."""
+        try:
+            self._table.update_item(
+                Key={"pk": f"STRATEGY#{strategy_id}"},
+                UpdateExpression="SET #s = :s, updated_at = :t",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": status, ":t": int(time.time())},
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except self._table.meta.client.exceptions.ConditionalCheckFailedException:
+            return False
+        return True
+
+    def delete_strategy(self, strategy_id: str) -> None:
+        """Delete a strategy from DynamoDB."""
+        self._table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})

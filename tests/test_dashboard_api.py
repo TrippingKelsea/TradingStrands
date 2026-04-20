@@ -110,3 +110,91 @@ def test_index_serves_html(mock_boto3: MagicMock) -> None:
     assert resp.status_code == 200
     assert "TradingStrands" in resp.text
     assert "text/html" in resp.headers["content-type"]
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_list_strategies(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.scan.return_value = {
+        "Items": [
+            {"pk": "STRATEGY#a", "strategy_id": "a", "name": "Strat A",
+             "status": "active", "created_at": 100},
+            {"pk": "STRATEGY#b", "strategy_id": "b", "name": "Strat B",
+             "status": "paused", "created_at": 200},
+        ],
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.get("/api/strategies")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 2
+    # Sorted by created_at desc
+    assert data[0]["strategy_id"] == "b"
+    assert data[1]["strategy_id"] == "a"
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_create_strategy(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.post("/api/strategies", json={
+        "name": "Test Strategy",
+        "markdown": "## Buy low sell high",
+        "symbols": ["AAPL", "MSFT"],
+        "capital": "5000",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Test Strategy"
+    assert data["symbols"] == ["AAPL", "MSFT"]
+    assert data["capital"] == "5000"
+    assert data["status"] == "active"
+    assert data["pk"].startswith("STRATEGY#")
+    table.put_item.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_update_strategy_status(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.put("/api/strategies/abc/status", json={"status": "paused"})
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "paused"
+    table.update_item.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_update_strategy_status_invalid(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.put("/api/strategies/abc/status", json={"status": "invalid"})
+    assert resp.status_code == 400
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_delete_strategy(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.delete("/api/strategies/abc")
+    assert resp.status_code == 204
+    table.delete_item.assert_called_once_with(Key={"pk": "STRATEGY#abc"})

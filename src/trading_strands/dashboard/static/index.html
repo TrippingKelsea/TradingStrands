@@ -17,6 +17,8 @@
   .header .status { font-size: 0.85rem; }
   .status-running { color: var(--green); }
   .status-halted { color: var(--red); font-weight: bold; }
+  .status-waiting { color: var(--yellow); }
+  .status-connected { color: var(--blue); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
   .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
   .panel h2 { font-size: 0.8rem; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
@@ -40,6 +42,50 @@
   .severity-halt-and-sell-gains { color: var(--yellow); }
   .full-width { grid-column: 1 / -1; }
   .disconnected { opacity: 0.5; }
+
+  /* Strategy cards */
+  .strategy-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; margin-bottom: 8px; }
+  .strategy-card .strat-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .strategy-card .strat-name { font-weight: bold; color: var(--blue); }
+  .strategy-card .strat-meta { font-size: 0.75rem; color: var(--dim); }
+  .strategy-card .strat-symbols { display: flex; gap: 4px; margin-top: 4px; }
+  .strategy-card .strat-symbols span { background: var(--border); padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; }
+  .badge { padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; }
+  .badge-active { background: #1a3a1a; color: var(--green); }
+  .badge-paused { background: #3a3a1a; color: var(--yellow); }
+  .badge-stopped { background: #3a1a1a; color: var(--red); }
+  .strat-actions { display: flex; gap: 4px; }
+  .strat-actions button { padding: 2px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--dim); border-radius: 3px; cursor: pointer; font-size: 0.7rem; font-family: inherit; }
+  .strat-actions button:hover { color: var(--text); border-color: var(--dim); }
+  .strat-actions button.danger:hover { color: var(--red); border-color: var(--red); }
+
+  /* Strategy form */
+  .form-group { margin-bottom: 10px; }
+  .form-group label { display: block; font-size: 0.75rem; color: var(--dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .form-group input, .form-group textarea { width: 100%; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; font-family: inherit; font-size: 0.85rem; }
+  .form-group textarea { min-height: 120px; resize: vertical; }
+  .form-group input:focus, .form-group textarea:focus { outline: none; border-color: var(--blue); }
+  .btn { padding: 6px 16px; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 0.85rem; }
+  .btn-primary { background: #1f6feb; border-color: #1f6feb; }
+  .btn-primary:hover { background: #388bfd; }
+  .btn:hover { border-color: var(--dim); }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 12px; }
+  .tab { padding: 8px 16px; background: var(--surface); border: 1px solid var(--border); cursor: pointer; font-family: inherit; font-size: 0.8rem; color: var(--dim); }
+  .tab:first-child { border-radius: 6px 0 0 6px; }
+  .tab:last-child { border-radius: 0 6px 6px 0; }
+  .tab.active { color: var(--text); background: var(--bg); border-color: var(--blue); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Per-strategy section in monitoring */
+  .strategy-section { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .strategy-section-header { padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .strategy-section-header .name { color: var(--blue); font-weight: bold; font-size: 0.85rem; }
+  .strategy-section-body { padding: 12px 16px; }
 </style>
 </head>
 <body>
@@ -47,7 +93,7 @@
 <div class="header">
   <div>
     <h1>TradingStrands</h1>
-    <span class="status" id="status">Connecting...</span>
+    <span class="status status-waiting" id="status">Connecting...</span>
   </div>
   <div style="text-align:right; font-size:0.8rem; color:var(--dim)">
     <div>Tick: <span id="tick">-</span></div>
@@ -55,44 +101,82 @@
   </div>
 </div>
 
-<div class="grid">
-  <div class="panel" id="account-panel">
-    <h2>Account</h2>
-    <div class="metric"><span class="label">Equity</span><span class="value" id="equity">-</span></div>
-    <div class="metric"><span class="label">Realized PnL</span><span class="value" id="realized-pnl">-</span></div>
-    <div class="metric"><span class="label">Drawdown</span><span class="value" id="drawdown">-</span></div>
-    <div class="drawdown-bar"><div class="drawdown-fill" id="drawdown-bar" style="width:0%;background:var(--green)"></div></div>
+<div class="tabs">
+  <div class="tab active" data-tab="monitor">Monitor</div>
+  <div class="tab" data-tab="strategies">Strategies</div>
+  <div class="tab" data-tab="submit">Submit Strategy</div>
+</div>
+
+<!-- Monitor Tab -->
+<div class="tab-content active" id="tab-monitor">
+  <div id="strategy-sections">
+    <div style="color:var(--dim);font-size:0.85rem;padding:16px;">No strategies running. Submit a strategy to get started.</div>
   </div>
 
-  <div class="panel" id="whatif-panel">
-    <h2>What-If</h2>
-    <div class="metric"><span class="label">Tracked</span><span class="value" id="whatif-count">-</span></div>
-    <div class="metric"><span class="label">Opportunity Cost</span><span class="value" id="whatif-pnl">-</span></div>
-    <div class="metric"><span class="label">Best Missed</span><span class="value" id="whatif-best">-</span></div>
-    <div class="metric"><span class="label">Worst Missed</span><span class="value" id="whatif-worst">-</span></div>
-  </div>
+  <div class="grid">
+    <div class="panel" id="whatif-panel">
+      <h2>What-If</h2>
+      <div class="metric"><span class="label">Tracked</span><span class="value" id="whatif-count">-</span></div>
+      <div class="metric"><span class="label">Opportunity Cost</span><span class="value" id="whatif-pnl">-</span></div>
+      <div class="metric"><span class="label">Best Missed</span><span class="value" id="whatif-best">-</span></div>
+      <div class="metric"><span class="label">Worst Missed</span><span class="value" id="whatif-worst">-</span></div>
+    </div>
 
-  <div class="panel full-width">
-    <h2>Positions</h2>
-    <table>
-      <thead><tr><th>Symbol</th><th>Qty</th><th>Cost Basis</th><th>Price</th><th>Unrealized PnL</th></tr></thead>
-      <tbody id="positions-body"></tbody>
-    </table>
-    <div id="no-positions" style="color:var(--dim);font-size:0.8rem;padding:8px 0;">No open positions</div>
-  </div>
+    <div class="panel">
+      <h2>Risk</h2>
+      <div class="metric"><span class="label">Desk Status</span><span class="value" id="desk-status">-</span></div>
+      <div class="metric"><span class="label">Halted Bots</span><span class="value" id="halted-bots">-</span></div>
+    </div>
 
-  <div class="panel">
-    <h2>Trade Feed</h2>
-    <div class="feed" id="trade-feed">
-      <div style="color:var(--dim);font-size:0.8rem;">Waiting for trades...</div>
+    <div class="panel">
+      <h2>Trade Feed</h2>
+      <div class="feed" id="trade-feed">
+        <div style="color:var(--dim);font-size:0.8rem;">Waiting for trades...</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Kill Switch Log</h2>
+      <div class="feed" id="killswitch-feed">
+        <div style="color:var(--dim);font-size:0.8rem;">No events</div>
+      </div>
     </div>
   </div>
+</div>
 
+<!-- Strategies Tab -->
+<div class="tab-content" id="tab-strategies">
+  <div id="strategies-list">
+    <div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading strategies...</div>
+  </div>
+</div>
+
+<!-- Submit Strategy Tab -->
+<div class="tab-content" id="tab-submit">
   <div class="panel">
-    <h2>Kill Switch Log</h2>
-    <div class="feed" id="killswitch-feed">
-      <div style="color:var(--dim);font-size:0.8rem;">No events</div>
-    </div>
+    <h2>Submit New Strategy</h2>
+    <form id="strategy-form">
+      <div class="form-group">
+        <label>Strategy Name</label>
+        <input type="text" id="strat-name" placeholder="e.g., Momentum AAPL" required>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Symbols (comma-separated)</label>
+          <input type="text" id="strat-symbols" placeholder="e.g., AAPL, MSFT, NVDA" required>
+        </div>
+        <div class="form-group">
+          <label>Capital ($)</label>
+          <input type="text" id="strat-capital" value="1000" required>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Strategy Prompt (Markdown)</label>
+        <textarea id="strat-markdown" placeholder="Describe your strategy in natural language...&#10;&#10;## Entry Rules&#10;- Buy when RSI drops below 30&#10;- Only enter if price is above 200-day SMA&#10;&#10;## Exit Rules&#10;- Sell when RSI rises above 70&#10;- Stop loss at 5% below entry" required></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary">Deploy Strategy</button>
+      <span id="submit-status" style="margin-left:12px;font-size:0.8rem;"></span>
+    </form>
   </div>
 </div>
 
@@ -101,6 +185,7 @@
   const $ = id => document.getElementById(id);
   let tradeFeedItems = [];
   let ksItems = [];
+  let knownStrategies = {};
 
   function fmt(v) {
     const n = parseFloat(v);
@@ -120,6 +205,100 @@
     return new Date(ts * 1000).toLocaleTimeString();
   }
 
+  // ── Tabs ──────────────────────────────────────────────────────────────
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      $('tab-' + tab.dataset.tab).classList.add('active');
+      if (tab.dataset.tab === 'strategies') loadStrategies();
+    });
+  });
+
+  // ── Multi-strategy monitor ────────────────────────────────────────────
+
+  function renderStrategySection(botId, ledger, prices) {
+    const container = $('strategy-sections');
+    let section = document.getElementById('strat-section-' + botId);
+
+    if (!section) {
+      // Clear placeholder
+      if (container.querySelector('div[style]') && !container.querySelector('.strategy-section')) {
+        container.innerHTML = '';
+      }
+      section = document.createElement('div');
+      section.id = 'strat-section-' + botId;
+      section.className = 'strategy-section';
+      section.innerHTML = `
+        <div class="strategy-section-header">
+          <span class="name">${botId}</span>
+          <span class="strat-meta" id="strat-equity-${botId}">-</span>
+        </div>
+        <div class="strategy-section-body">
+          <div class="grid" style="margin-bottom:0">
+            <div>
+              <div class="metric"><span class="label">Equity</span><span class="value" id="eq-${botId}">-</span></div>
+              <div class="metric"><span class="label">Realized PnL</span><span class="value" id="rpnl-${botId}">-</span></div>
+              <div class="metric"><span class="label">Drawdown</span><span class="value" id="dd-${botId}">-</span></div>
+              <div class="drawdown-bar"><div class="drawdown-fill" id="ddbar-${botId}" style="width:0%;background:var(--green)"></div></div>
+            </div>
+            <div>
+              <h2 style="font-size:0.75rem;color:var(--dim);margin-bottom:4px;">POSITIONS</h2>
+              <table>
+                <thead><tr><th>Symbol</th><th>Qty</th><th>Cost</th><th>Price</th><th>PnL</th></tr></thead>
+                <tbody id="pos-${botId}"></tbody>
+              </table>
+              <div id="nopos-${botId}" style="color:var(--dim);font-size:0.75rem;padding:4px 0;">No positions</div>
+            </div>
+          </div>
+        </div>`;
+      container.appendChild(section);
+    }
+
+    // Update values
+    const eq = document.getElementById('eq-' + botId);
+    const rpnl = document.getElementById('rpnl-' + botId);
+    const dd = document.getElementById('dd-' + botId);
+    const ddbar = document.getElementById('ddbar-' + botId);
+    const tbody = document.getElementById('pos-' + botId);
+    const nopos = document.getElementById('nopos-' + botId);
+    const eqHeader = document.getElementById('strat-equity-' + botId);
+
+    if (eq) eq.textContent = '$' + fmt(ledger.equity);
+    if (eqHeader) eqHeader.textContent = '$' + fmt(ledger.equity);
+
+    if (rpnl) {
+      const r = parseFloat(ledger.realized_pnl || 0);
+      rpnl.textContent = (r >= 0 ? '+$' : '-$') + fmt(Math.abs(r));
+      rpnl.className = 'value ' + pnlClass(r);
+    }
+
+    if (dd) {
+      const d = parseFloat(ledger.drawdown_pct || 0) * 100;
+      dd.textContent = d.toFixed(1) + '%';
+      if (ddbar) {
+        ddbar.style.width = Math.min(d / 15 * 100, 100) + '%';
+        ddbar.style.background = d > 10 ? 'var(--red)' : d > 5 ? 'var(--yellow)' : 'var(--green)';
+      }
+    }
+
+    // Positions
+    const positions = ledger.positions || [];
+    if (tbody) {
+      tbody.innerHTML = '';
+      positions.forEach(p => {
+        const price = parseFloat(prices[p.symbol] || 0);
+        const upnl = (price - parseFloat(p.burdened_cost_basis)) * parseFloat(p.quantity);
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${p.symbol}</td><td>${fmt(p.quantity)}</td><td>$${fmt(p.burdened_cost_basis)}</td><td>$${fmt(price)}</td><td class="${pnlClass(upnl)}">${upnl >= 0 ? '+' : ''}$${fmt(Math.abs(upnl))}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+    if (nopos) nopos.style.display = positions.length ? 'none' : 'block';
+  }
+
   function updateSnapshot(snap) {
     // Header
     const halted = snap.risk && snap.risk.desk_halted;
@@ -128,34 +307,28 @@
     $('tick').textContent = snap.tick || 0;
     $('last-update').textContent = snap.timestamp ? new Date(snap.timestamp * 1000).toLocaleTimeString() : '-';
 
-    // Account — use first ledger
+    // Multi-strategy ledgers
     const ledgers = snap.ledgers || {};
-    const botId = Object.keys(ledgers)[0];
-    if (botId) {
-      const l = ledgers[botId];
-      $('equity').textContent = '$' + fmt(l.equity);
-      const rpnl = parseFloat(l.realized_pnl || 0);
-      $('realized-pnl').textContent = (rpnl >= 0 ? '+$' : '-$') + fmt(Math.abs(rpnl));
-      $('realized-pnl').className = 'value ' + pnlClass(rpnl);
-      const dd = (parseFloat(l.drawdown_pct || 0) * 100);
-      $('drawdown').textContent = dd.toFixed(1) + '%';
-      const bar = $('drawdown-bar');
-      bar.style.width = Math.min(dd / 15 * 100, 100) + '%';
-      bar.style.background = dd > 10 ? 'var(--red)' : dd > 5 ? 'var(--yellow)' : 'var(--green)';
+    const prices = snap.prices || {};
+    const botIds = Object.keys(ledgers);
 
-      // Positions
-      const positions = l.positions || [];
-      const prices = snap.prices || {};
-      const tbody = $('positions-body');
-      tbody.innerHTML = '';
-      $('no-positions').style.display = positions.length ? 'none' : 'block';
-      positions.forEach(p => {
-        const price = parseFloat(prices[p.symbol] || 0);
-        const upnl = (price - parseFloat(p.burdened_cost_basis)) * parseFloat(p.quantity);
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${p.symbol}</td><td>${fmt(p.quantity)}</td><td>$${fmt(p.burdened_cost_basis)}</td><td>$${fmt(price)}</td><td class="${pnlClass(upnl)}">${upnl >= 0 ? '+' : ''}$${fmt(Math.abs(upnl))}</td>`;
-        tbody.appendChild(tr);
-      });
+    if (botIds.length === 0) {
+      const container = $('strategy-sections');
+      if (!container.querySelector('.strategy-section')) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">No strategies running. Submit a strategy to get started.</div>';
+      }
+    }
+
+    botIds.forEach(botId => {
+      renderStrategySection(botId, ledgers[botId], prices);
+    });
+
+    // Risk
+    if (snap.risk) {
+      $('desk-status').textContent = snap.risk.desk_halted ? 'HALTED' : 'OK';
+      $('desk-status').className = 'value ' + (snap.risk.desk_halted ? 'negative' : 'positive');
+      const hb = snap.risk.halted_bots || [];
+      $('halted-bots').textContent = hb.length ? hb.join(', ') : 'None';
     }
 
     // What-If
@@ -178,8 +351,8 @@
     const isExec = ev.event_type === 'trade.executed';
     div.className = 'feed-item ' + (isExec ? 'executed' : 'rejected');
     const d = ev.data || {};
-    div.innerHTML = `<div class="time">${timeStr(ev.timestamp)}</div>
-      <div>${isExec ? 'EXEC' : 'REJECT'} ${d.action || ''} ${d.quantity || ''} ${d.symbol || ''}${d.reason ? ' — ' + d.reason : ''}${d.rationale ? ' — ' + d.rationale : ''}</div>`;
+    div.innerHTML = `<div class="time">${timeStr(ev.timestamp)} ${d.bot_id || ''}</div>
+      <div>${isExec ? 'EXEC' : 'REJECT'} ${d.action || ''} ${d.quantity || ''} ${d.symbol || ''}${d.reason ? ' - ' + d.reason : ''}${d.rationale ? ' - ' + d.rationale : ''}</div>`;
     feed.prepend(div);
     tradeFeedItems.unshift(ev);
     if (tradeFeedItems.length > 50) {
@@ -200,13 +373,20 @@
     ksItems.unshift(ev);
   }
 
-  // SSE connection
+  // ── SSE connection ────────────────────────────────────────────────────
+
   function connect() {
     const es = new EventSource('/api/stream');
     es.onmessage = function(e) {
       try {
-        const snap = JSON.parse(e.data);
-        if (!snap.error) updateSnapshot(snap);
+        const data = JSON.parse(e.data);
+        if (data.connected) {
+          $('status').textContent = 'Connected - Waiting for data';
+          $('status').className = 'status status-connected';
+          return;
+        }
+        if (data.heartbeat) return;
+        if (!data.error) updateSnapshot(data);
       } catch(err) { console.error('Parse error', err); }
     };
     es.onerror = function() {
@@ -221,7 +401,8 @@
     };
   }
 
-  // Also poll events separately
+  // ── Event polling ─────────────────────────────────────────────────────
+
   async function pollEvents() {
     try {
       const resp = await fetch('/api/events');
@@ -234,6 +415,102 @@
       });
     } catch(e) { /* ignore */ }
   }
+
+  // ── Strategies management ─────────────────────────────────────────────
+
+  async function loadStrategies() {
+    const container = $('strategies-list');
+    try {
+      const resp = await fetch('/api/strategies');
+      const strategies = await resp.json();
+      knownStrategies = {};
+      strategies.forEach(s => { knownStrategies[s.strategy_id] = s; });
+
+      if (strategies.length === 0) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">No strategies deployed yet.</div>';
+        return;
+      }
+
+      container.innerHTML = '';
+      strategies.forEach(s => {
+        const card = document.createElement('div');
+        card.className = 'strategy-card';
+        const statusClass = s.status === 'active' ? 'badge-active' : s.status === 'paused' ? 'badge-paused' : 'badge-stopped';
+        card.innerHTML = `
+          <div class="strat-header">
+            <div>
+              <span class="strat-name">${s.name}</span>
+              <span class="badge ${statusClass}">${s.status}</span>
+            </div>
+            <div class="strat-actions">
+              ${s.status === 'active' ? `<button onclick="stratAction('${s.strategy_id}','paused')">Pause</button>` : ''}
+              ${s.status === 'paused' ? `<button onclick="stratAction('${s.strategy_id}','active')">Resume</button>` : ''}
+              ${s.status !== 'stopped' ? `<button onclick="stratAction('${s.strategy_id}','stopped')">Stop</button>` : ''}
+              <button class="danger" onclick="stratDelete('${s.strategy_id}')">Delete</button>
+            </div>
+          </div>
+          <div class="strat-meta">Capital: $${s.capital} | Created: ${new Date(s.created_at * 1000).toLocaleDateString()}</div>
+          <div class="strat-symbols">${(s.symbols || []).map(sym => '<span>' + sym + '</span>').join('')}</div>`;
+        container.appendChild(card);
+      });
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:16px;">Failed to load strategies.</div>';
+    }
+  }
+
+  window.stratAction = async function(sid, status) {
+    await fetch('/api/strategies/' + sid + '/status', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status}),
+    });
+    loadStrategies();
+  };
+
+  window.stratDelete = async function(sid) {
+    if (!confirm('Delete this strategy? This cannot be undone.')) return;
+    await fetch('/api/strategies/' + sid, {method: 'DELETE'});
+    loadStrategies();
+  };
+
+  // ── Strategy submission ───────────────────────────────────────────────
+
+  $('strategy-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const status = $('submit-status');
+    status.textContent = 'Deploying...';
+    status.style.color = 'var(--dim)';
+
+    const body = {
+      name: $('strat-name').value.trim(),
+      markdown: $('strat-markdown').value,
+      symbols: $('strat-symbols').value.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
+      capital: $('strat-capital').value.trim(),
+    };
+
+    try {
+      const resp = await fetch('/api/strategies', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) {
+        status.textContent = 'Strategy deployed! The trading service will pick it up within 30s.';
+        status.style.color = 'var(--green)';
+        $('strategy-form').reset();
+        $('strat-capital').value = '1000';
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown error');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  });
+
+  // ── Init ──────────────────────────────────────────────────────────────
 
   connect();
   pollEvents();

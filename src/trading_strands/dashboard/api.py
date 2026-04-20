@@ -9,8 +9,9 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
 
 app = FastAPI(title="TradingStrands Dashboard")
 
@@ -68,6 +69,9 @@ async def stream() -> StreamingResponse:
         table = _get_table()
         last_tick = -1
 
+        # Send initial connected message so clients know the stream is alive
+        yield f"data: {json.dumps({'connected': True})}\n\n"
+
         while True:
             try:
                 resp = table.get_item(Key={"pk": "SNAPSHOT"})
@@ -78,6 +82,9 @@ async def stream() -> StreamingResponse:
                         last_tick = tick
                         data = json.dumps(item, default=str)
                         yield f"data: {data}\n\n"
+                else:
+                    # No snapshot yet — send heartbeat to keep connection alive
+                    yield f"data: {json.dumps({'heartbeat': True})}\n\n"
             except Exception:
                 yield f"data: {json.dumps({'error': 'read failed'})}\n\n"
 
@@ -91,3 +98,83 @@ async def stream() -> StreamingResponse:
             "Connection": "keep-alive",
         },
     )
+
+
+# ── Strategy CRUD ───────────────────────────────────────────────────────
+
+
+class StrategyCreate(BaseModel):
+    name: str
+    markdown: str
+    symbols: list[str]
+    capital: str = "1000"
+
+
+class StrategyStatusUpdate(BaseModel):
+    status: str  # active, paused, stopped
+
+
+@app.get("/api/strategies")
+async def list_strategies() -> list[dict[str, Any]]:
+    table = _get_table()
+    resp = table.scan(
+        FilterExpression="begins_with(pk, :prefix)",
+        ExpressionAttributeValues={":prefix": "STRATEGY#"},
+    )
+    items = resp.get("Items", [])
+    return sorted(
+        [dict(item) for item in items],
+        key=lambda x: x.get("created_at", 0),
+        reverse=True,
+    )
+
+
+@app.post("/api/strategies", status_code=201)
+async def create_strategy(body: StrategyCreate) -> dict[str, Any]:
+    import time
+    import uuid
+
+    table = _get_table()
+    sid = str(uuid.uuid4())[:8]
+    now = int(time.time())
+    item: dict[str, Any] = {
+        "pk": f"STRATEGY#{sid}",
+        "strategy_id": sid,
+        "name": body.name,
+        "markdown": body.markdown,
+        "symbols": body.symbols,
+        "capital": body.capital,
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+    table.put_item(Item=item)
+    return item
+
+
+@app.put("/api/strategies/{strategy_id}/status")
+async def update_strategy_status(
+    strategy_id: str, body: StrategyStatusUpdate,
+) -> dict[str, str]:
+    if body.status not in ("active", "paused", "stopped"):
+        raise HTTPException(status_code=400, detail="Invalid status")
+    import time
+
+    table = _get_table()
+    try:
+        table.update_item(
+            Key={"pk": f"STRATEGY#{strategy_id}"},
+            UpdateExpression="SET #s = :s, updated_at = :t",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":s": body.status, ":t": int(time.time())},
+            ConditionExpression="attribute_exists(pk)",
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="Strategy not found")  # noqa: B904
+    return {"status": body.status}
+
+
+@app.delete("/api/strategies/{strategy_id}", status_code=204)
+async def delete_strategy(strategy_id: str) -> None:
+    table = _get_table()
+    table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})

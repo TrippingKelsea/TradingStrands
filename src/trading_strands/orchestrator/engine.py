@@ -80,6 +80,13 @@ class Orchestrator:
         )
         self._symbols.update(symbols)
 
+    def unregister_bot(self, bot_id: str) -> None:
+        """Remove a bot and recalculate watched symbols."""
+        self._bots.pop(bot_id, None)
+        self._symbols = set()
+        for reg in self._bots.values():
+            self._symbols.update(reg.symbols)
+
     async def run(self, max_ticks: int | None = None) -> None:
         """Run the tick loop.
 
@@ -106,6 +113,11 @@ class Orchestrator:
 
     async def _tick(self, tick_number: int) -> None:
         """Execute a single tick."""
+        if not self._bots:
+            # Still publish snapshot so dashboard shows connected state
+            self._publish_snapshot(tick_number, {})
+            return
+
         # 1. Fetch market data
         prices = await self.market_data.get_prices(self._symbols)
 
@@ -113,7 +125,7 @@ class Orchestrator:
                             prices={s: str(p) for s, p in prices.items()})
 
         # 2. Wake each bot and collect intents
-        for bot_id, reg in self._bots.items():
+        for bot_id, reg in list(self._bots.items()):
             ledger = self.coordinator.ledgers.get(bot_id)
             if ledger is None:
                 continue
