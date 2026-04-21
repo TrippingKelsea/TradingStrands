@@ -198,3 +198,69 @@ def test_delete_strategy(mock_boto3: MagicMock) -> None:
     resp = client.delete("/api/strategies/abc")
     assert resp.status_code == 204
     table.delete_item.assert_called_once_with(Key={"pk": "STRATEGY#abc"})
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_telemetry(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    # describe_table
+    table.meta.client.describe_table.return_value = {
+        "Table": {
+            "TableStatus": "ACTIVE",
+            "ItemCount": 42,
+            "TableSizeBytes": 8192,
+        },
+    }
+    table.table_name = "trading-strands-state"
+    # snapshot with telemetry
+    table.get_item.return_value = {
+        "Item": {
+            "pk": "SNAPSHOT",
+            "tick": 100,
+            "timestamp": 1700000000,
+            "telemetry": {
+                "uptime_seconds": 600,
+                "tick_rate_per_min": 12.0,
+                "active_bots": 2,
+                "watched_symbols": ["AAPL", "MSFT"],
+                "broker_status": "connected",
+                "broker_last_error": "",
+                "trades_executed": 5,
+                "trades_rejected": 1,
+                "tick_interval": 5.0,
+            },
+        },
+    }
+    # strategies scan
+    table.scan.return_value = {
+        "Items": [
+            {"pk": "STRATEGY#a", "status": "active"},
+            {"pk": "STRATEGY#b", "status": "paused"},
+        ],
+    }
+    # events count
+    table.query.return_value = {"Count": 7}
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.get("/api/telemetry")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["dynamodb"]["status"] == "ok"
+    assert data["dynamodb"]["table_status"] == "ACTIVE"
+    assert data["dynamodb"]["item_count"] == 42
+
+    assert data["trading_service"]["last_tick"] == 100
+    assert data["trading_service"]["telemetry"]["active_bots"] == 2
+    assert data["trading_service"]["telemetry"]["broker_status"] == "connected"
+
+    assert data["strategies"]["total"] == 2
+    assert data["strategies"]["by_status"]["active"] == 1
+    assert data["strategies"]["by_status"]["paused"] == 1
+
+    assert data["events"]["recent_count"] == 7
+
+    assert data["dashboard"]["status"] == "ok"

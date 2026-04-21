@@ -9,13 +9,15 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 app = FastAPI(title="TradingStrands Dashboard")
 
-_STATIC_DIR = Path(__file__).parent / "static"
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
 def _get_table_name() -> str:
@@ -33,9 +35,8 @@ async def health() -> dict[str, bool]:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> HTMLResponse:
-    html_path = _STATIC_DIR / "index.html"
-    return HTMLResponse(content=html_path.read_text())
+async def index(request: Request) -> HTMLResponse:
+    return _templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/api/snapshot")
@@ -178,3 +179,87 @@ async def update_strategy_status(
 async def delete_strategy(strategy_id: str) -> None:
     table = _get_table()
     table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})
+
+
+# ── Telemetry ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/telemetry")
+async def telemetry() -> dict[str, Any]:
+    """Aggregate telemetry from dashboard-side checks and trading service snapshot."""
+    import time as _time
+
+    table = _get_table()
+    now = int(_time.time())
+    result: dict[str, Any] = {}
+
+    # DynamoDB connectivity
+    try:
+        desc = table.meta.client.describe_table(TableName=table.table_name)
+        tbl = desc.get("Table", {})
+        result["dynamodb"] = {
+            "status": "ok",
+            "table_name": table.table_name,
+            "table_status": tbl.get("TableStatus", "UNKNOWN"),
+            "item_count": tbl.get("ItemCount", 0),
+            "size_bytes": tbl.get("TableSizeBytes", 0),
+        }
+    except Exception as exc:
+        result["dynamodb"] = {"status": "error", "error": str(exc)}
+
+    # Trading service liveness (from snapshot)
+    try:
+        resp = table.get_item(Key={"pk": "SNAPSHOT"})
+        item = resp.get("Item")
+        if item:
+            snap_ts = int(item.get("timestamp", 0))
+            age = now - snap_ts
+            result["trading_service"] = {
+                "status": "ok" if age < 30 else "stale" if age < 120 else "down",
+                "last_snapshot_age_seconds": age,
+                "last_tick": item.get("tick", 0),
+                "telemetry": item.get("telemetry", {}),
+            }
+        else:
+            result["trading_service"] = {
+                "status": "no_data",
+                "last_snapshot_age_seconds": None,
+                "last_tick": None,
+                "telemetry": {},
+            }
+    except Exception as exc:
+        result["trading_service"] = {"status": "error", "error": str(exc)}
+
+    # Strategy counts
+    try:
+        strategies = table.scan(
+            FilterExpression="begins_with(pk, :prefix)",
+            ExpressionAttributeValues={":prefix": "STRATEGY#"},
+            Select="ALL_ATTRIBUTES",
+        ).get("Items", [])
+        counts: dict[str, int] = {"active": 0, "paused": 0, "stopped": 0}
+        for s in strategies:
+            st = s.get("status", "unknown")
+            counts[st] = counts.get(st, 0) + 1
+        result["strategies"] = {"total": len(strategies), "by_status": counts}
+    except Exception as exc:
+        result["strategies"] = {"status": "error", "error": str(exc)}
+
+    # Recent events count
+    try:
+        events_resp = table.query(
+            KeyConditionExpression=Key("pk").begins_with("EVENT#"),
+            Select="COUNT",
+        )
+        result["events"] = {"recent_count": events_resp.get("Count", 0)}
+    except Exception as exc:
+        result["events"] = {"status": "error", "error": str(exc)}
+
+    # Dashboard service info
+    result["dashboard"] = {
+        "status": "ok",
+        "region": os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "unknown")),
+        "table_name": _get_table_name(),
+    }
+
+    return result

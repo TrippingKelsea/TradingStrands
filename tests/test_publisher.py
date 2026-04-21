@@ -184,3 +184,33 @@ def test_delete_strategy() -> None:
 
     publisher.delete_strategy("abc")
     mock_table.delete_item.assert_called_once_with(Key={"pk": "STRATEGY#abc"})
+
+
+def test_publish_snapshot_with_telemetry() -> None:
+    publisher, mock_table = _make_publisher()
+
+    risk = RiskManager(RiskConfig())
+    telemetry = {
+        "uptime_seconds": 300,
+        "tick_rate_per_min": 12.0,
+        "active_bots": 2,
+        "watched_symbols": ["AAPL", "MSFT"],
+        "broker_status": "connected",
+        "broker_last_error": "",
+        "trades_executed": 5,
+        "trades_rejected": 1,
+        "tick_interval": 5.0,
+    }
+
+    publisher.publish_snapshot(
+        tick=10,
+        prices={},
+        ledgers={},
+        risk_manager=risk,
+        telemetry=telemetry,
+    )
+
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert item["telemetry"]["uptime_seconds"] == 300
+    assert item["telemetry"]["broker_status"] == "connected"
+    assert item["telemetry"]["active_bots"] == 2

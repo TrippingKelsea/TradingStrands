@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
 
@@ -60,6 +61,11 @@ class Orchestrator:
         self._symbols: set[str] = set()
         self._running = False
         self._prev_ctx: Context | None = None
+        self._start_time: float = 0.0
+        self._broker_status: str = "unknown"
+        self._broker_last_error: str = ""
+        self._trades_executed: int = 0
+        self._trades_rejected: int = 0
 
     def register_bot(
         self,
@@ -94,6 +100,7 @@ class Orchestrator:
             max_ticks: Stop after this many ticks (None = run forever).
         """
         self._running = True
+        self._start_time = time.monotonic()
         tick = 0
 
         await logger.ainfo("orchestrator.start", bots=list(self._bots.keys()),
@@ -119,7 +126,16 @@ class Orchestrator:
             return
 
         # 1. Fetch market data
-        prices = await self.market_data.get_prices(self._symbols)
+        try:
+            prices = await self.market_data.get_prices(self._symbols)
+            self._broker_status = "connected"
+            self._broker_last_error = ""
+        except Exception as exc:
+            self._broker_status = "error"
+            self._broker_last_error = str(exc)
+            await logger.aexception("orchestrator.market_data.error")
+            self._publish_snapshot(tick_number, {})
+            return
 
         await logger.adebug("orchestrator.tick", tick=tick_number,
                             prices={s: str(p) for s, p in prices.items()})
@@ -150,6 +166,7 @@ class Orchestrator:
             try:
                 result = await self.coordinator.execute(intent)
                 if result.approved:
+                    self._trades_executed += 1
                     await logger.ainfo(
                         "trade.executed",
                         bot_id=bot_id,
@@ -166,6 +183,7 @@ class Orchestrator:
                         "rationale": intent.rationale,
                     })
                 else:
+                    self._trades_rejected += 1
                     reason = result.risk_decision.reason if result.risk_decision else "unknown"
                     await logger.ainfo(
                         "trade.rejected",
@@ -208,6 +226,22 @@ class Orchestrator:
 
         return ctx
 
+    def _build_telemetry(self, tick: int) -> dict[str, object]:
+        """Build telemetry data for the current tick."""
+        uptime = time.monotonic() - self._start_time if self._start_time else 0.0
+        tick_rate = (tick / (uptime / 60.0)) if uptime > 0 else 0.0
+        return {
+            "uptime_seconds": int(uptime),
+            "tick_rate_per_min": round(tick_rate, 1),
+            "active_bots": len(self._bots),
+            "watched_symbols": sorted(self._symbols),
+            "broker_status": self._broker_status,
+            "broker_last_error": self._broker_last_error,
+            "trades_executed": self._trades_executed,
+            "trades_rejected": self._trades_rejected,
+            "tick_interval": self.tick_interval,
+        }
+
     def _publish_snapshot(
         self,
         tick: int,
@@ -222,6 +256,7 @@ class Orchestrator:
                 prices=prices,
                 ledgers=self.coordinator.ledgers,
                 risk_manager=self.coordinator.risk_manager,
+                telemetry=self._build_telemetry(tick),
             )
         except Exception:
             logger.exception("publisher.snapshot.error")

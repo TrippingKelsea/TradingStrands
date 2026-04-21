@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TradingStrands Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --green: #3fb950;
+    --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; background: var(--bg); color: var(--text); padding: 16px; }
+  h1 { font-size: 1.1rem; color: var(--blue); margin-bottom: 4px; }
+  .header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; }
+  .header .status { font-size: 0.85rem; }
+  .status-running { color: var(--green); }
+  .status-halted { color: var(--red); font-weight: bold; }
+  .status-waiting { color: var(--yellow); }
+  .status-connected { color: var(--blue); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
+  .panel h2 { font-size: 0.8rem; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .metric { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.85rem; }
+  .metric .label { color: var(--dim); }
+  .metric .value { font-weight: bold; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  th { text-align: left; color: var(--dim); font-weight: normal; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  .feed { max-height: 300px; overflow-y: auto; }
+  .feed-item { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+  .feed-item .time { color: var(--dim); font-size: 0.7rem; }
+  .feed-item.executed { border-left: 3px solid var(--green); padding-left: 8px; }
+  .feed-item.rejected { border-left: 3px solid var(--red); padding-left: 8px; }
+  .drawdown-bar { height: 8px; background: var(--border); border-radius: 4px; margin-top: 4px; overflow: hidden; }
+  .drawdown-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+  .severity-halt-and-stop { color: var(--yellow); }
+  .severity-halt-and-liquidate { color: var(--red); font-weight: bold; }
+  .severity-halt-and-sell-gains { color: var(--yellow); }
+  .full-width { grid-column: 1 / -1; }
+  .disconnected { opacity: 0.5; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 0; margin-bottom: 12px; }
+  .tab { padding: 8px 16px; background: var(--surface); border: 1px solid var(--border); cursor: pointer; font-family: inherit; font-size: 0.8rem; color: var(--dim); }
+  .tab:first-child { border-radius: 6px 0 0 6px; }
+  .tab:last-child { border-radius: 0 6px 6px 0; }
+  .tab.active { color: var(--text); background: var(--bg); border-color: var(--blue); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Shared component styles */
+  .badge { padding: 2px 8px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; }
+  .badge-active, .badge-ok, .badge-connected { background: #1a3a1a; color: var(--green); }
+  .badge-paused, .badge-stale, .badge-unknown { background: #3a3a1a; color: var(--yellow); }
+  .badge-stopped, .badge-error, .badge-down { background: #3a1a1a; color: var(--red); }
+  .badge-no_data { background: #1a1a2a; color: var(--dim); }
+  .btn { padding: 6px 16px; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 0.85rem; }
+  .btn-primary { background: #1f6feb; border-color: #1f6feb; }
+  .btn-primary:hover { background: #388bfd; }
+  .btn:hover { border-color: var(--dim); }
+  .form-group { margin-bottom: 10px; }
+  .form-group label { display: block; font-size: 0.75rem; color: var(--dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .form-group input, .form-group textarea { width: 100%; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; font-family: inherit; font-size: 0.85rem; }
+  .form-group textarea { min-height: 120px; resize: vertical; }
+  .form-group input:focus, .form-group textarea:focus { outline: none; border-color: var(--blue); }
+  .form-row { display: flex; gap: 12px; }
+  .form-row .form-group { flex: 1; }
+
+  {% block extra_styles %}{% endblock %}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>TradingStrands</h1>
+    <span class="status status-waiting" id="status">Connecting...</span>
+  </div>
+  <div style="text-align:right; font-size:0.8rem; color:var(--dim)">
+    <div>Tick: <span id="tick">-</span></div>
+    <div>Updated: <span id="last-update">-</span></div>
+  </div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-tab="monitor">Monitor</div>
+  <div class="tab" data-tab="strategies">Strategies</div>
+  <div class="tab" data-tab="submit">Submit Strategy</div>
+  <div class="tab" data-tab="telemetry">Telemetry</div>
+</div>
+
+{% block content %}{% endblock %}
+
+<script>
+(function() {
+  const $ = id => document.getElementById(id);
+
+  // ── Tabs ──────────────────────────────────────────────────────────────
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      tab.classList.add('active');
+      const target = $('tab-' + tab.dataset.tab);
+      if (target) target.classList.add('active');
+      if (tab.dataset.tab === 'strategies') loadStrategies();
+      if (tab.dataset.tab === 'telemetry') loadTelemetry();
+    });
+  });
+
+  // ── Shared utils ──────────────────────────────────────────────────────
+
+  function fmt(v) {
+    const n = parseFloat(v);
+    if (isNaN(n)) return v || '-';
+    return n.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  }
+
+  function pnlClass(v) {
+    const n = parseFloat(v);
+    if (n > 0) return 'positive';
+    if (n < 0) return 'negative';
+    return '';
+  }
+
+  function timeStr(ts) {
+    if (!ts) return '';
+    return new Date(ts * 1000).toLocaleTimeString();
+  }
+
+  function fmtDuration(s) {
+    if (!s && s !== 0) return '-';
+    s = parseInt(s);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return h + 'h ' + m + 'm ' + sec + 's';
+    if (m > 0) return m + 'm ' + sec + 's';
+    return sec + 's';
+  }
+
+  // ── SSE connection ────────────────────────────────────────────────────
+
+  function connect() {
+    const es = new EventSource('/api/stream');
+    es.onmessage = function(e) {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.connected) {
+          $('status').textContent = 'Connected - Waiting for data';
+          $('status').className = 'status status-connected';
+          return;
+        }
+        if (data.heartbeat) return;
+        if (!data.error) updateSnapshot(data);
+      } catch(err) { console.error('Parse error', err); }
+    };
+    es.onerror = function() {
+      $('status').textContent = 'Disconnected';
+      $('status').className = 'status status-halted';
+      document.body.classList.add('disconnected');
+      es.close();
+      setTimeout(connect, 5000);
+    };
+    es.onopen = function() {
+      document.body.classList.remove('disconnected');
+    };
+  }
+
+  {% block scripts %}{% endblock %}
+
+  // ── Init ──────────────────────────────────────────────────────────────
+
+  connect();
+  {% block init %}{% endblock %}
+})();
+</script>
+</body>
+</html>

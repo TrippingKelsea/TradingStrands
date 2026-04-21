@@ -50,6 +50,7 @@ class StatePublisher:
         ledgers: dict[str, Ledger],
         risk_manager: RiskManager,
         whatif_summary: dict[str, Any] | None = None,
+        telemetry: dict[str, object] | None = None,
     ) -> None:
         """Write a full state snapshot to DynamoDB (overwrites previous)."""
         ledger_data: dict[str, Any] = {}
@@ -79,6 +80,9 @@ class StatePublisher:
                 k: str(v) if isinstance(v, Decimal) else v
                 for k, v in whatif_summary.items()
             }
+
+        if telemetry is not None:
+            snapshot["telemetry"] = telemetry
 
         self._table.put_item(Item=snapshot)
 
