@@ -30,14 +30,26 @@ from aws_cdk import (
     aws_route53 as route53,
 )
 from aws_cdk import (
+    aws_route53_targets as targets,
+)
+from aws_cdk import (
     aws_secretsmanager as secretsmanager,
 )
 from constructs import Construct
 
 
 class TradingStrandsStack(cdk.Stack):
-    def __init__(self, scope: Construct, construct_id: str, **kwargs: object) -> None:
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        domain_name: str = "",
+        hosted_zone_id: str = "",
+        **kwargs: object,
+    ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        tls_enabled = bool(domain_name and hosted_zone_id)
 
         allowed_cidr_param = cdk.CfnParameter(
             self,
@@ -45,31 +57,6 @@ class TradingStrandsStack(cdk.Stack):
             type="String",
             default="0.0.0.0/0",
             description="CIDR range allowed to reach the dashboard ALB",
-        )
-
-        domain_name_param = cdk.CfnParameter(
-            self,
-            "DomainName",
-            type="String",
-            default="",
-            description="Domain name for TLS (e.g. tradingstrands.io). Leave empty to skip TLS.",
-        )
-
-        hosted_zone_id_param = cdk.CfnParameter(
-            self,
-            "HostedZoneId",
-            type="String",
-            default="",
-            description="Route 53 hosted zone ID for the domain. Required if DomainName is set.",
-        )
-
-        # Condition: TLS is enabled when domain name is provided
-        tls_enabled = cdk.CfnCondition(
-            self,
-            "TlsEnabled",
-            expression=cdk.Fn.condition_not(
-                cdk.Fn.condition_equals(domain_name_param.value_as_string, ""),
-            ),
         )
 
         # ECR repository (created by CI workflow, referenced here)
@@ -215,11 +202,27 @@ class TradingStrandsStack(cdk.Stack):
             connection=ec2.Port.tcp(80),
             description="Operator HTTP access to dashboard",
         )
-        alb_sg.add_ingress_rule(
-            peer=ec2.Peer.ipv4(allowed_cidr_param.value_as_string),
-            connection=ec2.Port.tcp(443),
-            description="Operator HTTPS access to dashboard",
-        )
+        if tls_enabled:
+            alb_sg.add_ingress_rule(
+                peer=ec2.Peer.ipv4(allowed_cidr_param.value_as_string),
+                connection=ec2.Port.tcp(443),
+                description="Operator HTTPS access to dashboard",
+            )
+
+        # TLS: look up hosted zone and create ACM certificate
+        certificate = None
+        if tls_enabled:
+            zone = route53.HostedZone.from_hosted_zone_attributes(
+                self, "HostedZone",
+                hosted_zone_id=hosted_zone_id,
+                zone_name=domain_name,
+            )
+            certificate = acm.Certificate(
+                self,
+                "DashboardCert",
+                domain_name=domain_name,
+                validation=acm.CertificateValidation.from_dns(zone),
+            )
 
         dashboard_service = ecs_patterns.ApplicationLoadBalancedFargateService(
             self,
@@ -227,7 +230,13 @@ class TradingStrandsStack(cdk.Stack):
             cluster=cluster,
             task_definition=dashboard_task_def,
             desired_count=1,
-            listener_port=80,
+            listener_port=443 if tls_enabled else 80,
+            protocol=(
+                elbv2.ApplicationProtocol.HTTPS if tls_enabled
+                else elbv2.ApplicationProtocol.HTTP
+            ),
+            certificate=certificate,
+            redirect_http=tls_enabled,
             target_protocol=elbv2.ApplicationProtocol.HTTP,
             assign_public_ip=True,
         )
@@ -238,77 +247,28 @@ class TradingStrandsStack(cdk.Stack):
             healthy_http_codes="200",
         )
 
-        # -- TLS (conditional on DomainName parameter) ------------------------
-
-        # ACM certificate - DNS validated against the hosted zone
-        certificate = acm.Certificate(
-            self,
-            "DashboardCert",
-            domain_name=domain_name_param.value_as_string,
-            validation=acm.CertificateValidation.from_dns(),
-        )
-        # Only create cert when TLS is enabled
-        certificate.node.default_child.cfn_options.condition = tls_enabled
-
-        # HTTPS listener on port 443
-        https_listener = dashboard_service.load_balancer.add_listener(
-            "HttpsListener",
-            port=443,
-            protocol=elbv2.ApplicationProtocol.HTTPS,
-            certificates=[certificate],
-            default_target_groups=[dashboard_service.target_group],
-        )
-        https_listener.node.default_child.cfn_options.condition = tls_enabled
-
-        # Redirect HTTP to HTTPS (modify the existing port-80 listener)
-        redirect_action = elbv2.CfnListenerRule(
-            self,
-            "HttpToHttpsRedirect",
-            listener_arn=dashboard_service.listener.listener_arn,
-            priority=1,
-            conditions=[
-                elbv2.CfnListenerRule.RuleConditionProperty(
-                    field="path-pattern",
-                    values=["/*"],
+        # Route 53 alias record
+        if tls_enabled:
+            route53.ARecord(
+                self,
+                "DashboardAliasRecord",
+                zone=zone,
+                target=route53.RecordTarget.from_alias(
+                    targets.LoadBalancerTarget(dashboard_service.load_balancer),
                 ),
-            ],
-            actions=[
-                elbv2.CfnListenerRule.ActionProperty(
-                    type="redirect",
-                    redirect_config=elbv2.CfnListenerRule.RedirectConfigProperty(
-                        protocol="HTTPS",
-                        port="443",
-                        status_code="HTTP_301",
-                    ),
-                ),
-            ],
-        )
-        redirect_action.cfn_options.condition = tls_enabled
-
-        # Route 53 alias record pointing domain to the ALB
-        alias_record = route53.CfnRecordSet(
-            self,
-            "DashboardAliasRecord",
-            name=domain_name_param.value_as_string,
-            type="A",
-            hosted_zone_id=hosted_zone_id_param.value_as_string,
-            alias_target=route53.CfnRecordSet.AliasTargetProperty(
-                dns_name=dashboard_service.load_balancer.load_balancer_dns_name,
-                hosted_zone_id=dashboard_service.load_balancer.load_balancer_canonical_hosted_zone_id,
-            ),
-        )
-        alias_record.cfn_options.condition = tls_enabled
+            )
 
         # -- Outputs ----------------------------------------------------------
 
+        dashboard_url = (
+            f"https://{domain_name}"
+            if tls_enabled
+            else f"http://{dashboard_service.load_balancer.load_balancer_dns_name}"
+        )
         cdk.CfnOutput(
             self,
             "DashboardUrl",
-            value=cdk.Fn.condition_if(
-                tls_enabled.logical_id,
-                f"https://{domain_name_param.value_as_string}",
-                f"http://{dashboard_service.load_balancer.load_balancer_dns_name}",
-            ).to_string(),
+            value=dashboard_url,
             description="Dashboard URL",
         )
         cdk.CfnOutput(
