@@ -1,5 +1,8 @@
 import aws_cdk as cdk
 from aws_cdk import (
+    aws_certificatemanager as acm,
+)
+from aws_cdk import (
     aws_dynamodb as dynamodb,
 )
 from aws_cdk import (
@@ -24,6 +27,9 @@ from aws_cdk import (
     aws_logs as logs,
 )
 from aws_cdk import (
+    aws_route53 as route53,
+)
+from aws_cdk import (
     aws_secretsmanager as secretsmanager,
 )
 from constructs import Construct
@@ -38,7 +44,32 @@ class TradingStrandsStack(cdk.Stack):
             "AllowedCidr",
             type="String",
             default="0.0.0.0/0",
-            description="CIDR range allowed to reach the dashboard ALB on port 80",
+            description="CIDR range allowed to reach the dashboard ALB",
+        )
+
+        domain_name_param = cdk.CfnParameter(
+            self,
+            "DomainName",
+            type="String",
+            default="",
+            description="Domain name for TLS (e.g. tradingstrands.io). Leave empty to skip TLS.",
+        )
+
+        hosted_zone_id_param = cdk.CfnParameter(
+            self,
+            "HostedZoneId",
+            type="String",
+            default="",
+            description="Route 53 hosted zone ID for the domain. Required if DomainName is set.",
+        )
+
+        # Condition: TLS is enabled when domain name is provided
+        tls_enabled = cdk.CfnCondition(
+            self,
+            "TlsEnabled",
+            expression=cdk.Fn.condition_not(
+                cdk.Fn.condition_equals(domain_name_param.value_as_string, ""),
+            ),
         )
 
         # ECR repository (created by CI workflow, referenced here)
@@ -71,7 +102,7 @@ class TradingStrandsStack(cdk.Stack):
         vpc = ec2.Vpc.from_lookup(self, "DefaultVpc", is_default=True)
         cluster = ecs.Cluster(self, "TradingStrandsCluster", vpc=vpc)
 
-        # ── Trading service ──────────────────────────────────────────────────
+        # -- Trading service --------------------------------------------------
 
         trading_task_role = iam.Role(
             self,
@@ -130,14 +161,15 @@ class TradingStrandsStack(cdk.Stack):
             assign_public_ip=True,
         )
 
-        # ── Dashboard service ────────────────────────────────────────────────
+        # -- Dashboard service ------------------------------------------------
 
         dashboard_task_role = iam.Role(
             self,
             "DashboardTaskRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
         )
-        table.grant_read_data(dashboard_task_role)
+        # Dashboard needs read/write: reads snapshots+events, writes strategies
+        table.grant_read_write_data(dashboard_task_role)
 
         dashboard_task_def = ecs.FargateTaskDefinition(
             self,
@@ -181,7 +213,12 @@ class TradingStrandsStack(cdk.Stack):
         alb_sg.add_ingress_rule(
             peer=ec2.Peer.ipv4(allowed_cidr_param.value_as_string),
             connection=ec2.Port.tcp(80),
-            description="Operator access to dashboard",
+            description="Operator HTTP access to dashboard",
+        )
+        alb_sg.add_ingress_rule(
+            peer=ec2.Peer.ipv4(allowed_cidr_param.value_as_string),
+            connection=ec2.Port.tcp(443),
+            description="Operator HTTPS access to dashboard",
         )
 
         dashboard_service = ecs_patterns.ApplicationLoadBalancedFargateService(
@@ -194,7 +231,6 @@ class TradingStrandsStack(cdk.Stack):
             target_protocol=elbv2.ApplicationProtocol.HTTP,
             assign_public_ip=True,
         )
-        # Replace the auto-created ALB security group with the restricted one
         dashboard_service.load_balancer.add_security_group(alb_sg)
 
         dashboard_service.target_group.configure_health_check(
@@ -202,12 +238,78 @@ class TradingStrandsStack(cdk.Stack):
             healthy_http_codes="200",
         )
 
-        # Outputs
+        # -- TLS (conditional on DomainName parameter) ------------------------
+
+        # ACM certificate - DNS validated against the hosted zone
+        certificate = acm.Certificate(
+            self,
+            "DashboardCert",
+            domain_name=domain_name_param.value_as_string,
+            validation=acm.CertificateValidation.from_dns(),
+        )
+        # Only create cert when TLS is enabled
+        certificate.node.default_child.cfn_options.condition = tls_enabled
+
+        # HTTPS listener on port 443
+        https_listener = dashboard_service.load_balancer.add_listener(
+            "HttpsListener",
+            port=443,
+            protocol=elbv2.ApplicationProtocol.HTTPS,
+            certificates=[certificate],
+            default_target_groups=[dashboard_service.target_group],
+        )
+        https_listener.node.default_child.cfn_options.condition = tls_enabled
+
+        # Redirect HTTP to HTTPS (modify the existing port-80 listener)
+        redirect_action = elbv2.CfnListenerRule(
+            self,
+            "HttpToHttpsRedirect",
+            listener_arn=dashboard_service.listener.listener_arn,
+            priority=1,
+            conditions=[
+                elbv2.CfnListenerRule.RuleConditionProperty(
+                    field="path-pattern",
+                    values=["/*"],
+                ),
+            ],
+            actions=[
+                elbv2.CfnListenerRule.ActionProperty(
+                    type="redirect",
+                    redirect_config=elbv2.CfnListenerRule.RedirectConfigProperty(
+                        protocol="HTTPS",
+                        port="443",
+                        status_code="HTTP_301",
+                    ),
+                ),
+            ],
+        )
+        redirect_action.cfn_options.condition = tls_enabled
+
+        # Route 53 alias record pointing domain to the ALB
+        alias_record = route53.CfnRecordSet(
+            self,
+            "DashboardAliasRecord",
+            name=domain_name_param.value_as_string,
+            type="A",
+            hosted_zone_id=hosted_zone_id_param.value_as_string,
+            alias_target=route53.CfnRecordSet.AliasTargetProperty(
+                dns_name=dashboard_service.load_balancer.load_balancer_dns_name,
+                hosted_zone_id=dashboard_service.load_balancer.load_balancer_canonical_hosted_zone_id,
+            ),
+        )
+        alias_record.cfn_options.condition = tls_enabled
+
+        # -- Outputs ----------------------------------------------------------
+
         cdk.CfnOutput(
             self,
             "DashboardUrl",
-            value=f"http://{dashboard_service.load_balancer.load_balancer_dns_name}",
-            description="Dashboard ALB DNS name",
+            value=cdk.Fn.condition_if(
+                tls_enabled.logical_id,
+                f"https://{domain_name_param.value_as_string}",
+                f"http://{dashboard_service.load_balancer.load_balancer_dns_name}",
+            ).to_string(),
+            description="Dashboard URL",
         )
         cdk.CfnOutput(
             self,
