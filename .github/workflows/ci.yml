@@ -90,7 +90,10 @@ jobs:
         working-directory: infra
         run: |
           pip install -r requirements.txt
-          cdk deploy --require-approval never
+          cdk deploy --require-approval never \
+            -c domain=app.tradingstrands.xyz \
+            -c zone_name=tradingstrands.xyz \
+            -c zone_id=Z04993921Q8ZI5T322JJX
 
       - name: Seed Alpaca credentials in Secrets Manager
         env:

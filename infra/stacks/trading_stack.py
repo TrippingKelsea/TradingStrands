@@ -44,12 +44,15 @@ class TradingStrandsStack(cdk.Stack):
         scope: Construct,
         construct_id: str,
         domain_name: str = "",
+        zone_name: str = "",
         hosted_zone_id: str = "",
         **kwargs: object,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         tls_enabled = bool(domain_name and hosted_zone_id)
+        # zone_name defaults to domain_name for apex domains
+        zone_name = zone_name or domain_name
 
         allowed_cidr_param = cdk.CfnParameter(
             self,
@@ -215,7 +218,7 @@ class TradingStrandsStack(cdk.Stack):
             zone = route53.HostedZone.from_hosted_zone_attributes(
                 self, "HostedZone",
                 hosted_zone_id=hosted_zone_id,
-                zone_name=domain_name,
+                zone_name=zone_name,
             )
             certificate = acm.Certificate(
                 self,
@@ -253,6 +256,7 @@ class TradingStrandsStack(cdk.Stack):
                 self,
                 "DashboardAliasRecord",
                 zone=zone,
+                record_name=domain_name,
                 target=route53.RecordTarget.from_alias(
                     targets.LoadBalancerTarget(dashboard_service.load_balancer),
                 ),
