@@ -95,6 +95,13 @@ jobs:
             -c zone_name=tradingstrands.xyz \
             -c zone_id=Z04993921Q8ZI5T322JJX
 
+      - name: Force ECS services to pull latest images
+        run: |
+          CLUSTER=$(aws ecs list-clusters --query 'clusterArns[0]' --output text)
+          for SVC in $(aws ecs list-services --cluster "$CLUSTER" --query 'serviceArns[]' --output text); do
+            aws ecs update-service --cluster "$CLUSTER" --service "$SVC" --force-new-deployment --query 'service.status'
+          done
+
       - name: Seed Alpaca credentials in Secrets Manager
         env:
           ALPACA_PAPER_KEY: ${{ secrets.ALPACA_PAPER_KEY }}
