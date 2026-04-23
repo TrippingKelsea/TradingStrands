@@ -36,6 +36,11 @@
   </div>
 
   <div class="grid">
+    <div class="panel">
+      <h2>Market Prices</h2>
+      <div id="prices-list" style="font-size:0.8rem;color:var(--dim);">Waiting for data...</div>
+    </div>
+
     <div class="panel" id="whatif-panel">
       <h2>What-If</h2>
       <div class="metric"><span class="label">Tracked</span><span class="value" id="whatif-count">-</span></div>
@@ -84,8 +89,8 @@
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>Symbols (comma-separated)</label>
-          <input type="text" id="strat-symbols" placeholder="e.g., AAPL, MSFT, NVDA" required>
+          <label>Symbols (comma-separated, optional)</label>
+          <input type="text" id="strat-symbols" placeholder="e.g., AAPL, MSFT — leave blank to let strategy select">
         </div>
         <div class="form-group">
           <label>Capital ($)</label>
@@ -94,7 +99,7 @@
       </div>
       <div class="form-group">
         <label>Strategy Prompt (Markdown)</label>
-        <textarea id="strat-markdown" placeholder="Describe your strategy in natural language...&#10;&#10;## Entry Rules&#10;- Buy when RSI drops below 30&#10;- Only enter if price is above 200-day SMA&#10;&#10;## Exit Rules&#10;- Sell when RSI rises above 70&#10;- Stop loss at 5% below entry" required></textarea>
+        <textarea id="strat-markdown" placeholder="Describe your strategy in natural language...&#10;&#10;## Stock Selection (optional, if symbols left blank)&#10;- Select top 3 stocks by intraday volume from S&amp;P 500&#10;&#10;## Entry Rules&#10;- Buy when RSI drops below 30&#10;- Only enter if price is above 200-day SMA&#10;&#10;## Exit Rules&#10;- Sell when RSI rises above 70&#10;- Stop loss at 5% below entry" required></textarea>
       </div>
       <button type="submit" class="btn btn-primary">Deploy Strategy</button>
       <span id="submit-status" style="margin-left:12px;font-size:0.8rem;"></span>
@@ -203,6 +208,17 @@
     const ledgers = snap.ledgers || {};
     const prices = snap.prices || {};
     const botIds = Object.keys(ledgers);
+
+    // Update prices panel
+    const pricesList = $('prices-list');
+    const symbols = Object.keys(prices).sort();
+    if (symbols.length > 0) {
+      pricesList.innerHTML = symbols.map(sym =>
+        `<div class="metric"><span class="label">${sym}</span><span class="value">$${fmt(prices[sym])}</span></div>`
+      ).join('');
+    } else {
+      pricesList.innerHTML = '<span style="color:var(--dim)">No price data</span>';
+    }
 
     if (botIds.length === 0) {
       const container = $('strategy-sections');

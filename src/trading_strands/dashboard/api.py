@@ -108,7 +108,7 @@ async def stream() -> StreamingResponse:
 class StrategyCreate(BaseModel):
     name: str
     markdown: str
-    symbols: list[str]
+    symbols: list[str] = []
     capital: str = "1000"
 
 

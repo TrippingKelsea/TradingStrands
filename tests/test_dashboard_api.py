@@ -162,6 +162,26 @@ def test_create_strategy(mock_boto3: MagicMock) -> None:
 
 
 @patch("trading_strands.dashboard.api.boto3")
+def test_create_strategy_no_symbols(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.post("/api/strategies", json={
+        "name": "Volume Scanner",
+        "markdown": "## Select top stocks by volume\nBuy the dip",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Volume Scanner"
+    assert data["symbols"] == []
+    assert data["capital"] == "1000"
+    table.put_item.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api.boto3")
 def test_update_strategy_status(mock_boto3: MagicMock) -> None:
     table = MagicMock()
     mock_boto3.resource.return_value.Table.return_value = table
