@@ -240,6 +240,37 @@ async def delete_strategy(strategy_id: str) -> None:
     table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})
 
 
+# ── Halt control ────────────────────────────────────────────────────────
+
+
+@app.post("/api/halt")
+async def halt_trading() -> dict[str, str]:
+    """Emergency halt — writes desk halt flag to DynamoDB."""
+    import time as _time
+
+    table = _get_table()
+    table.put_item(Item={
+        "pk": "CONTROL",
+        "desk_halted": True,
+        "updated_at": int(_time.time()),
+    })
+    return {"status": "halted"}
+
+
+@app.post("/api/unhalt")
+async def unhalt_trading() -> dict[str, str]:
+    """Resume trading — clears desk halt flag in DynamoDB."""
+    import time as _time
+
+    table = _get_table()
+    table.put_item(Item={
+        "pk": "CONTROL",
+        "desk_halted": False,
+        "updated_at": int(_time.time()),
+    })
+    return {"status": "running"}
+
+
 # ── Telemetry ───────────────────────────────────────────────────────────
 
 

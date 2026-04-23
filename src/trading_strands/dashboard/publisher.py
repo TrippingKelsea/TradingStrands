@@ -175,3 +175,19 @@ class StatePublisher:
     def delete_strategy(self, strategy_id: str) -> None:
         """Delete a strategy from DynamoDB."""
         self._table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})
+
+    def set_halt(self, halted: bool) -> None:
+        """Write desk halt flag to DynamoDB for the trading service to read."""
+        self._table.put_item(Item={
+            "pk": "CONTROL",
+            "desk_halted": halted,
+            "updated_at": int(time.time()),
+        })
+
+    def get_halt(self) -> bool:
+        """Read desk halt flag from DynamoDB."""
+        resp = self._table.get_item(Key={"pk": "CONTROL"})
+        item = resp.get("Item")
+        if item is None:
+            return False
+        return bool(item.get("desk_halted", False))

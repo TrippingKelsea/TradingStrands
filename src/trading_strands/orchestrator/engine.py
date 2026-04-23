@@ -120,6 +120,9 @@ class Orchestrator:
 
     async def _tick(self, tick_number: int) -> None:
         """Execute a single tick."""
+        # Check for remote halt command from dashboard
+        self._check_remote_halt()
+
         if not self._bots:
             # Still publish snapshot so dashboard shows connected state
             self._publish_snapshot(tick_number, {})
@@ -241,6 +244,22 @@ class Orchestrator:
             "trades_rejected": self._trades_rejected,
             "tick_interval": self.tick_interval,
         }
+
+    def _check_remote_halt(self) -> None:
+        """Check DynamoDB for a remote halt command from the dashboard."""
+        if self._publisher is None:
+            return
+        try:
+            halted = self._publisher.get_halt()
+            risk = self.coordinator.risk_manager
+            if halted and not risk._desk_halted:
+                risk.halt_desk()
+                logger.info("orchestrator.remote_halt", source="dashboard")
+            elif not halted and risk._desk_halted:
+                risk.unhalt_desk()
+                logger.info("orchestrator.remote_unhalt", source="dashboard")
+        except Exception:
+            logger.exception("orchestrator.remote_halt.check_error")
 
     def _publish_snapshot(
         self,

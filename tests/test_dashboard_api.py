@@ -308,6 +308,38 @@ def test_delete_strategy(mock_boto3: MagicMock) -> None:
 
 
 @patch("trading_strands.dashboard.api.boto3")
+def test_halt_trading(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.post("/api/halt")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "halted"
+    item = table.put_item.call_args.kwargs["Item"]
+    assert item["pk"] == "CONTROL"
+    assert item["desk_halted"] is True
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_unhalt_trading(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.post("/api/unhalt")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "running"
+    item = table.put_item.call_args.kwargs["Item"]
+    assert item["pk"] == "CONTROL"
+    assert item["desk_halted"] is False
+
+
+@patch("trading_strands.dashboard.api.boto3")
 def test_telemetry(mock_boto3: MagicMock) -> None:
     table = MagicMock()
     # describe_table

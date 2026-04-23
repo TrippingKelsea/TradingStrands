@@ -62,6 +62,15 @@
   .btn-primary { background: #1f6feb; border-color: #1f6feb; }
   .btn-primary:hover { background: #388bfd; }
   .btn:hover { border-color: var(--dim); }
+  .btn-danger { background: #da3633; border-color: #da3633; color: #fff; }
+  .btn-danger:hover { background: #f85149; border-color: #f85149; }
+  .btn-success { background: #238636; border-color: #238636; color: #fff; }
+  .btn-success:hover { background: #2ea043; border-color: #2ea043; }
+  .account-bar { display: flex; align-items: center; gap: 24px; padding: 10px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; font-size: 0.85rem; }
+  .account-bar .acct-metric { display: flex; gap: 6px; align-items: baseline; }
+  .account-bar .acct-label { color: var(--dim); font-size: 0.75rem; text-transform: uppercase; }
+  .account-bar .acct-value { font-weight: bold; font-size: 1rem; }
+  .account-bar .spacer { flex: 1; }
   .form-group { margin-bottom: 10px; }
   .form-group label { display: block; font-size: 0.75rem; color: var(--dim); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
   .form-group input, .form-group textarea { width: 100%; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 4px; font-family: inherit; font-size: 0.85rem; }
@@ -84,6 +93,23 @@
     <div>Tick: <span id="tick">-</span></div>
     <div>Updated: <span id="last-update">-</span></div>
   </div>
+</div>
+
+<div class="account-bar">
+  <div class="acct-metric">
+    <span class="acct-label">Total Equity</span>
+    <span class="acct-value" id="total-equity">-</span>
+  </div>
+  <div class="acct-metric">
+    <span class="acct-label">Realized PnL</span>
+    <span class="acct-value" id="total-rpnl">-</span>
+  </div>
+  <div class="acct-metric">
+    <span class="acct-label">Strategies</span>
+    <span class="acct-value" id="active-strat-count">0</span>
+  </div>
+  <div class="spacer"></div>
+  <button class="btn btn-danger" id="halt-btn" onclick="haltTrading()">HALT TRADING</button>
 </div>
 
 <div class="tabs">
@@ -171,6 +197,58 @@
       document.body.classList.remove('disconnected');
     };
   }
+
+  // ── Account bar + halt ───────────────────────────────────────────────
+
+  let _deskHalted = false;
+
+  function updateAccountBar(snap) {
+    const ledgers = snap.ledgers || {};
+    const bots = Object.keys(ledgers);
+    let totalEquity = 0;
+    let totalRpnl = 0;
+
+    bots.forEach(botId => {
+      totalEquity += parseFloat(ledgers[botId].equity || 0);
+      totalRpnl += parseFloat(ledgers[botId].realized_pnl || 0);
+    });
+
+    $('total-equity').textContent = '$' + fmt(totalEquity);
+    $('total-equity').className = 'acct-value';
+    $('total-rpnl').textContent = (totalRpnl >= 0 ? '+$' : '-$') + fmt(Math.abs(totalRpnl));
+    $('total-rpnl').className = 'acct-value ' + pnlClass(totalRpnl);
+    $('active-strat-count').textContent = bots.length;
+
+    // Update halt button state from snapshot
+    const halted = snap.risk && snap.risk.desk_halted;
+    _deskHalted = halted;
+    const btn = $('halt-btn');
+    if (halted) {
+      btn.textContent = 'RESUME TRADING';
+      btn.className = 'btn btn-success';
+    } else {
+      btn.textContent = 'HALT TRADING';
+      btn.className = 'btn btn-danger';
+    }
+  }
+
+  async function haltTrading() {
+    const btn = $('halt-btn');
+    btn.disabled = true;
+    btn.textContent = _deskHalted ? 'Resuming...' : 'Halting...';
+
+    try {
+      const endpoint = _deskHalted ? '/api/unhalt' : '/api/halt';
+      const resp = await fetch(endpoint, {method: 'POST'});
+      if (!resp.ok) {
+        alert('Failed to ' + (_deskHalted ? 'resume' : 'halt') + ' trading');
+      }
+    } catch(e) {
+      alert('Network error');
+    }
+    btn.disabled = false;
+  }
+  window.haltTrading = haltTrading;
 
   {% block scripts %}{% endblock %}
 

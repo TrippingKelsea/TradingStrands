@@ -214,3 +214,28 @@ def test_publish_snapshot_with_telemetry() -> None:
     assert item["telemetry"]["uptime_seconds"] == 300
     assert item["telemetry"]["broker_status"] == "connected"
     assert item["telemetry"]["active_bots"] == 2
+
+
+def test_set_halt() -> None:
+    publisher, mock_table = _make_publisher()
+
+    publisher.set_halt(True)
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert item["pk"] == "CONTROL"
+    assert item["desk_halted"] is True
+
+
+def test_get_halt_true() -> None:
+    publisher, mock_table = _make_publisher()
+    mock_table.get_item.return_value = {
+        "Item": {"pk": "CONTROL", "desk_halted": True},
+    }
+
+    assert publisher.get_halt() is True
+
+
+def test_get_halt_false_no_item() -> None:
+    publisher, mock_table = _make_publisher()
+    mock_table.get_item.return_value = {}
+
+    assert publisher.get_halt() is False

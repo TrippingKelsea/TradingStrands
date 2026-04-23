@@ -239,6 +239,9 @@
     const prices = snap.prices || {};
     const botIds = Object.keys(ledgers);
 
+    // Update account bar (equity, PnL, halt state)
+    updateAccountBar(snap);
+
     // Update prices panel
     const pricesList = $('prices-list');
     const symbols = Object.keys(prices).sort();
