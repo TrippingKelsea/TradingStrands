@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import boto3
-from boto3.dynamodb.conditions import Key
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -52,12 +51,14 @@ async def snapshot() -> dict[str, Any]:
 @app.get("/api/events")
 async def events() -> list[dict[str, Any]]:
     table = _get_table()
-    resp = table.query(
-        KeyConditionExpression=Key("pk").begins_with("EVENT#"),
-        ScanIndexForward=False,
-        Limit=50,
+    resp = table.scan(
+        FilterExpression="begins_with(pk, :prefix)",
+        ExpressionAttributeValues={":prefix": "EVENT#"},
     )
-    return [dict(item) for item in resp.get("Items", [])]
+    items = resp.get("Items", [])
+    # Sort by timestamp descending, return most recent 50
+    items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+    return [dict(item) for item in items[:50]]
 
 
 @app.get("/api/stream")
@@ -247,8 +248,9 @@ async def telemetry() -> dict[str, Any]:
 
     # Recent events count
     try:
-        events_resp = table.query(
-            KeyConditionExpression=Key("pk").begins_with("EVENT#"),
+        events_resp = table.scan(
+            FilterExpression="begins_with(pk, :prefix)",
+            ExpressionAttributeValues={":prefix": "EVENT#"},
             Select="COUNT",
         )
         result["events"] = {"recent_count": events_resp.get("Count", 0)}

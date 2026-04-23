@@ -29,7 +29,7 @@ def _mock_table() -> MagicMock:
             "risk": {"desk_halted": False, "halted_bots": []},
         }
     }
-    table.query.return_value = {
+    table.scan.return_value = {
         "Items": [
             {
                 "pk": "EVENT#123",
@@ -231,15 +231,16 @@ def test_telemetry(mock_boto3: MagicMock) -> None:
             },
         },
     }
-    # strategies scan
-    table.scan.return_value = {
-        "Items": [
-            {"pk": "STRATEGY#a", "status": "active"},
-            {"pk": "STRATEGY#b", "status": "paused"},
-        ],
-    }
-    # events count
-    table.query.return_value = {"Count": 7}
+    # scan is called twice: first for strategies, then for events count
+    table.scan.side_effect = [
+        {
+            "Items": [
+                {"pk": "STRATEGY#a", "status": "active"},
+                {"pk": "STRATEGY#b", "status": "paused"},
+            ],
+        },
+        {"Count": 7},
+    ]
     mock_boto3.resource.return_value.Table.return_value = table
 
     from trading_strands.dashboard.api import app
