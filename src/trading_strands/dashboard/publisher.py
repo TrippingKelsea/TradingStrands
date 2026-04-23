@@ -16,6 +16,17 @@ from trading_strands.risk.manager import RiskManager
 logger = structlog.get_logger()
 
 
+def _sanitize_floats(obj: Any) -> Any:
+    """Recursively convert floats to Decimals for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
+
 def _decimal_default(obj: object) -> str | float:
     """Convert Decimal to string for DynamoDB compatibility."""
     if isinstance(obj, Decimal):
@@ -82,7 +93,7 @@ class StatePublisher:
             }
 
         if telemetry is not None:
-            snapshot["telemetry"] = telemetry
+            snapshot["telemetry"] = _sanitize_floats(telemetry)
 
         self._table.put_item(Item=snapshot)
 
