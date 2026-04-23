@@ -176,6 +176,64 @@ async def update_strategy_status(
     return {"status": body.status}
 
 
+class StrategyUpdate(BaseModel):
+    name: str | None = None
+    markdown: str | None = None
+    symbols: list[str] | None = None
+    capital: str | None = None
+
+
+@app.get("/api/strategies/{strategy_id}")
+async def get_strategy(strategy_id: str) -> dict[str, Any]:
+    table = _get_table()
+    resp = table.get_item(Key={"pk": f"STRATEGY#{strategy_id}"})
+    item = resp.get("Item")
+    if item is None:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return dict(item)
+
+
+@app.put("/api/strategies/{strategy_id}")
+async def update_strategy(
+    strategy_id: str, body: StrategyUpdate,
+) -> dict[str, Any]:
+    import time
+
+    table = _get_table()
+    updates: list[str] = ["updated_at = :t"]
+    names: dict[str, str] = {}
+    values: dict[str, Any] = {":t": int(time.time())}
+
+    if body.name is not None:
+        updates.append("#n = :n")
+        names["#n"] = "name"
+        values[":n"] = body.name
+    if body.markdown is not None:
+        updates.append("markdown = :md")
+        values[":md"] = body.markdown
+    if body.symbols is not None:
+        updates.append("symbols = :sym")
+        values[":sym"] = body.symbols
+    if body.capital is not None:
+        updates.append("capital = :cap")
+        values[":cap"] = body.capital
+
+    try:
+        kwargs: dict[str, Any] = {
+            "Key": {"pk": f"STRATEGY#{strategy_id}"},
+            "UpdateExpression": "SET " + ", ".join(updates),
+            "ExpressionAttributeValues": values,
+            "ConditionExpression": "attribute_exists(pk)",
+            "ReturnValues": "ALL_NEW",
+        }
+        if names:
+            kwargs["ExpressionAttributeNames"] = names
+        resp = table.update_item(**kwargs)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Strategy not found")  # noqa: B904
+    return dict(resp.get("Attributes", {}))
+
+
 @app.delete("/api/strategies/{strategy_id}", status_code=204)
 async def delete_strategy(strategy_id: str) -> None:
     table = _get_table()

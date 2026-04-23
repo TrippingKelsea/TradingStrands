@@ -208,6 +208,93 @@ def test_update_strategy_status_invalid(mock_boto3: MagicMock) -> None:
 
 
 @patch("trading_strands.dashboard.api.boto3")
+def test_get_strategy(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.get_item.return_value = {
+        "Item": {
+            "pk": "STRATEGY#abc",
+            "strategy_id": "abc",
+            "name": "Test",
+            "markdown": "## Buy low",
+            "symbols": ["AAPL"],
+            "capital": "1000",
+        },
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.get("/api/strategies/abc")
+    assert resp.status_code == 200
+    assert resp.json()["strategy_id"] == "abc"
+    assert resp.json()["markdown"] == "## Buy low"
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_get_strategy_not_found(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.get_item.return_value = {}
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.get("/api/strategies/nonexistent")
+    assert resp.status_code == 404
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_update_strategy(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.update_item.return_value = {
+        "Attributes": {
+            "pk": "STRATEGY#abc",
+            "strategy_id": "abc",
+            "name": "Updated Name",
+            "markdown": "## Updated",
+            "symbols": ["MSFT"],
+            "capital": "2000",
+        },
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.put("/api/strategies/abc", json={
+        "name": "Updated Name",
+        "markdown": "## Updated",
+        "symbols": ["MSFT"],
+        "capital": "2000",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "Updated Name"
+    assert data["symbols"] == ["MSFT"]
+    table.update_item.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_update_strategy_partial(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.update_item.return_value = {
+        "Attributes": {"pk": "STRATEGY#abc", "name": "New Name"},
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    resp = client.put("/api/strategies/abc", json={"name": "New Name"})
+    assert resp.status_code == 200
+    # Should only update name + updated_at
+    call_kwargs = table.update_item.call_args.kwargs
+    assert "name" not in call_kwargs["UpdateExpression"] or "#n" in call_kwargs["UpdateExpression"]
+    assert ":md" not in call_kwargs["ExpressionAttributeValues"]
+
+
+@patch("trading_strands.dashboard.api.boto3")
 def test_delete_strategy(mock_boto3: MagicMock) -> None:
     table = MagicMock()
     mock_boto3.resource.return_value.Table.return_value = table

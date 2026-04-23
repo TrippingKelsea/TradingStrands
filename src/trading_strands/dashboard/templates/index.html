@@ -12,6 +12,7 @@
   .strat-actions button { padding: 2px 8px; border: 1px solid var(--border); background: var(--bg); color: var(--dim); border-radius: 3px; cursor: pointer; font-size: 0.7rem; font-family: inherit; }
   .strat-actions button:hover { color: var(--text); border-color: var(--dim); }
   .strat-actions button.danger:hover { color: var(--red); border-color: var(--red); }
+  .strategy-card:hover { border-color: var(--blue); }
 
   /* Per-strategy section in monitoring */
   .strategy-section { margin-bottom: 16px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -75,6 +76,35 @@
 <div class="tab-content" id="tab-strategies">
   <div id="strategies-list">
     <div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading strategies...</div>
+  </div>
+  <div id="strategy-edit" style="display:none;">
+    <div style="margin-bottom:8px;">
+      <button class="btn" onclick="closeEditStrategy()">&larr; Back to strategies</button>
+    </div>
+    <div class="panel">
+      <h2>Edit Strategy</h2>
+      <input type="hidden" id="edit-strat-id">
+      <div class="form-group">
+        <label>Strategy Name</label>
+        <input type="text" id="edit-strat-name">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Symbols (comma-separated, optional)</label>
+          <input type="text" id="edit-strat-symbols" placeholder="Leave blank to let strategy select">
+        </div>
+        <div class="form-group">
+          <label>Capital ($)</label>
+          <input type="text" id="edit-strat-capital">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Strategy Prompt (Markdown)</label>
+        <textarea id="edit-strat-markdown" style="min-height:200px;"></textarea>
+      </div>
+      <button class="btn btn-primary" onclick="saveStrategy()">Save Changes</button>
+      <span id="edit-status" style="margin-left:12px;font-size:0.8rem;"></span>
+    </div>
   </div>
 </div>
 
@@ -311,7 +341,10 @@
       strategies.forEach(s => {
         const card = document.createElement('div');
         card.className = 'strategy-card';
+        card.style.cursor = 'pointer';
         const statusClass = s.status === 'active' ? 'badge-active' : s.status === 'paused' ? 'badge-paused' : 'badge-stopped';
+        const syms = (s.symbols || []);
+        const symsLabel = syms.length ? syms.map(sym => '<span>' + sym + '</span>').join('') : '<span style="color:var(--dim);font-style:italic">dynamic selection</span>';
         card.innerHTML = `
           <div class="strat-header">
             <div>
@@ -319,14 +352,15 @@
               <span class="badge ${statusClass}">${s.status}</span>
             </div>
             <div class="strat-actions">
-              ${s.status === 'active' ? `<button onclick="stratAction('${s.strategy_id}','paused')">Pause</button>` : ''}
-              ${s.status === 'paused' ? `<button onclick="stratAction('${s.strategy_id}','active')">Resume</button>` : ''}
-              ${s.status !== 'stopped' ? `<button onclick="stratAction('${s.strategy_id}','stopped')">Stop</button>` : ''}
-              <button class="danger" onclick="stratDelete('${s.strategy_id}')">Delete</button>
+              ${s.status === 'active' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','paused')">Pause</button>` : ''}
+              ${s.status === 'paused' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','active')">Resume</button>` : ''}
+              ${s.status !== 'stopped' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','stopped')">Stop</button>` : ''}
+              <button class="danger" onclick="event.stopPropagation();stratDelete('${s.strategy_id}')">Delete</button>
             </div>
           </div>
           <div class="strat-meta">Capital: $${s.capital} | Created: ${new Date(s.created_at * 1000).toLocaleDateString()}</div>
-          <div class="strat-symbols">${(s.symbols || []).map(sym => '<span>' + sym + '</span>').join('')}</div>`;
+          <div class="strat-symbols">${symsLabel}</div>`;
+        card.addEventListener('click', () => openEditStrategy(s.strategy_id));
         container.appendChild(card);
       });
     } catch(e) {
@@ -348,6 +382,75 @@
     await fetch('/api/strategies/' + sid, {method: 'DELETE'});
     loadStrategies();
   };
+
+  async function openEditStrategy(sid) {
+    const list = $('strategies-list');
+    const edit = $('strategy-edit');
+    const status = $('edit-status');
+    status.textContent = 'Loading...';
+    status.style.color = 'var(--dim)';
+
+    list.style.display = 'none';
+    edit.style.display = 'block';
+
+    try {
+      const resp = await fetch('/api/strategies/' + sid);
+      if (!resp.ok) { status.textContent = 'Strategy not found'; status.style.color = 'var(--red)'; return; }
+      const s = await resp.json();
+      $('edit-strat-id').value = s.strategy_id;
+      $('edit-strat-name').value = s.name || '';
+      $('edit-strat-symbols').value = (s.symbols || []).join(', ');
+      $('edit-strat-capital').value = s.capital || '1000';
+      $('edit-strat-markdown').value = s.markdown || '';
+      status.textContent = '';
+    } catch(e) {
+      status.textContent = 'Failed to load strategy';
+      status.style.color = 'var(--red)';
+    }
+  }
+  window.openEditStrategy = openEditStrategy;
+
+  function closeEditStrategy() {
+    $('strategy-edit').style.display = 'none';
+    $('strategies-list').style.display = 'block';
+    loadStrategies();
+  }
+  window.closeEditStrategy = closeEditStrategy;
+
+  async function saveStrategy() {
+    const sid = $('edit-strat-id').value;
+    const status = $('edit-status');
+    status.textContent = 'Saving...';
+    status.style.color = 'var(--dim)';
+
+    const symbolsRaw = $('edit-strat-symbols').value.trim();
+    const body = {
+      name: $('edit-strat-name').value.trim(),
+      markdown: $('edit-strat-markdown').value,
+      symbols: symbolsRaw ? symbolsRaw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [],
+      capital: $('edit-strat-capital').value.trim(),
+    };
+
+    try {
+      const resp = await fetch('/api/strategies/' + sid, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) {
+        status.textContent = 'Saved! Changes will take effect within 30s.';
+        status.style.color = 'var(--green)';
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown error');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  }
+  window.saveStrategy = saveStrategy;
 
   // ── Strategy submission ───────────────────────────────────────────────
 
