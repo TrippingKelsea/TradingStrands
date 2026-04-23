@@ -3,6 +3,9 @@ from aws_cdk import (
     aws_certificatemanager as acm,
 )
 from aws_cdk import (
+    aws_cognito as cognito,
+)
+from aws_cdk import (
     aws_dynamodb as dynamodb,
 )
 from aws_cdk import (
@@ -86,6 +89,39 @@ class TradingStrandsStack(cdk.Stack):
             "AlpacaSecret",
             secret_name="trading-strands/alpaca",
             description="Alpaca API credentials - seed manually after stack deploy",
+        )
+
+        # Cognito user pool for dashboard authentication
+        user_pool = cognito.UserPool(
+            self,
+            "DashboardUserPool",
+            user_pool_name="trading-strands-dashboard",
+            self_sign_up_enabled=False,
+            sign_in_aliases=cognito.SignInAliases(email=True),
+            password_policy=cognito.PasswordPolicy(
+                min_length=12,
+                require_lowercase=True,
+                require_uppercase=True,
+                require_digits=True,
+                require_symbols=True,
+            ),
+            mfa=cognito.Mfa.OPTIONAL,
+            mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
+            custom_attributes={
+                "role": cognito.StringAttribute(
+                    min_len=1, max_len=20, mutable=True,
+                ),
+            },
+            removal_policy=cdk.RemovalPolicy.RETAIN,
+        )
+
+        user_pool_client = user_pool.add_client(
+            "DashboardAppClient",
+            user_pool_client_name="dashboard",
+            generate_secret=True,
+            auth_flows=cognito.AuthFlow(
+                user_password=True,
+            ),
         )
 
         # ECS cluster on default VPC
@@ -179,6 +215,16 @@ class TradingStrandsStack(cdk.Stack):
             image=ecs.ContainerImage.from_ecr_repository(repository, tag="dashboard"),
             environment={
                 "DYNAMODB_TABLE": table.table_name,
+                "COGNITO_USER_POOL_ID": user_pool.user_pool_id,
+                "COGNITO_CLIENT_ID": user_pool_client.user_pool_client_id,
+            },
+            secrets={
+                "COGNITO_CLIENT_SECRET": ecs.Secret.from_secrets_manager(
+                    secretsmanager.Secret.from_secret_name_v2(
+                        self, "CognitoClientSecretRef",
+                        "trading-strands/cognito-client-secret",
+                    ),
+                ),
             },
             port_mappings=[ecs.PortMapping(container_port=8080)],
             logging=ecs.LogDrivers.aws_logs(
@@ -286,4 +332,16 @@ class TradingStrandsStack(cdk.Stack):
             "DynamoDbTableName",
             value=table.table_name,
             description="DynamoDB state table name",
+        )
+        cdk.CfnOutput(
+            self,
+            "CognitoUserPoolId",
+            value=user_pool.user_pool_id,
+            description="Cognito User Pool ID for dashboard auth",
+        )
+        cdk.CfnOutput(
+            self,
+            "CognitoClientId",
+            value=user_pool_client.user_pool_client_id,
+            description="Cognito App Client ID for dashboard auth",
         )

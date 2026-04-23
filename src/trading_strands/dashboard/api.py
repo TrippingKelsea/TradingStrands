@@ -6,14 +6,25 @@ import asyncio
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import boto3
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from trading_strands.dashboard.auth import (
+    SESSION_COOKIE,
+    AuthMiddleware,
+    authenticate,
+    create_session_cookie,
+)
+
 app = FastAPI(title="TradingStrands Dashboard")
+
+# Auth middleware — enforces login on all routes except /health, /login, /auth/*
+app.add_middleware(AuthMiddleware)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -31,6 +42,44 @@ def _get_table() -> Any:
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True}
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request) -> HTMLResponse:
+    error = request.query_params.get("error", "")
+    return _templates.TemplateResponse(request, "login.html", {"error": error})
+
+
+@app.post("/auth/login")
+async def auth_login(
+    email: str = Form(...),
+    password: str = Form(...),
+) -> RedirectResponse:
+    user_info = authenticate(email, password)
+    if user_info is None:
+        return RedirectResponse(
+            url="/login?" + urlencode({"error": "Invalid email or password"}),
+            status_code=303,
+        )
+
+    session_value = create_session_cookie(user_info)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=session_value,
+        max_age=86400 * 7,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.post("/auth/logout")
+async def auth_logout() -> RedirectResponse:
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(key=SESSION_COOKIE)
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)

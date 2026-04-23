@@ -90,8 +90,9 @@
     <span class="status status-waiting" id="status">Connecting...</span>
   </div>
   <div style="text-align:right; font-size:0.8rem; color:var(--dim)">
-    <div>Tick: <span id="tick">-</span></div>
+    <div>Tick: <span id="tick">-</span> &middot; <a href="#" onclick="document.getElementById('logout-form').submit();return false;" style="color:var(--dim);text-decoration:none;">Logout</a></div>
     <div>Updated: <span id="last-update">-</span></div>
+    <form id="logout-form" method="POST" action="/auth/logout" style="display:none;"></form>
   </div>
 </div>
 

@@ -2,9 +2,27 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+
+# Set auth env vars before importing the app
+os.environ.setdefault("COGNITO_USER_POOL_ID", "us-west-2_test")
+os.environ.setdefault("COGNITO_CLIENT_ID", "testclient")
+os.environ.setdefault("COGNITO_CLIENT_SECRET", "testsecret")
+
+
+def _auth_cookie() -> dict[str, str]:
+    """Create a valid operator session cookie for tests."""
+    from trading_strands.dashboard.auth import create_session_cookie
+
+    return {"session": create_session_cookie({
+        "email": "test@example.com",
+        "role": "operator",
+        "access_token": "fake",
+        "login_at": 1700000000,
+    })}
 
 
 def _mock_table() -> MagicMock:
@@ -46,7 +64,7 @@ def _mock_table() -> MagicMock:
 def test_health(mock_boto3: MagicMock) -> None:
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app)  # no auth needed for /health
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
@@ -59,7 +77,7 @@ def test_snapshot(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/snapshot")
     assert resp.status_code == 200
     data = resp.json()
@@ -78,7 +96,7 @@ def test_snapshot_empty(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/snapshot")
     assert resp.status_code == 200
     data = resp.json()
@@ -93,7 +111,7 @@ def test_events(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/events")
     assert resp.status_code == 200
     data = resp.json()
@@ -105,7 +123,7 @@ def test_events(mock_boto3: MagicMock) -> None:
 def test_index_serves_html(mock_boto3: MagicMock) -> None:
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/")
     assert resp.status_code == 200
     assert "TradingStrands" in resp.text
@@ -127,7 +145,7 @@ def test_list_strategies(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/strategies")
     assert resp.status_code == 200
     data = resp.json()
@@ -144,7 +162,7 @@ def test_create_strategy(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.post("/api/strategies", json={
         "name": "Test Strategy",
         "markdown": "## Buy low sell high",
@@ -168,7 +186,7 @@ def test_create_strategy_no_symbols(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.post("/api/strategies", json={
         "name": "Volume Scanner",
         "markdown": "## Select top stocks by volume\nBuy the dip",
@@ -188,7 +206,7 @@ def test_update_strategy_status(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.put("/api/strategies/abc/status", json={"status": "paused"})
     assert resp.status_code == 200
     assert resp.json()["status"] == "paused"
@@ -202,7 +220,7 @@ def test_update_strategy_status_invalid(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.put("/api/strategies/abc/status", json={"status": "invalid"})
     assert resp.status_code == 400
 
@@ -224,7 +242,7 @@ def test_get_strategy(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/strategies/abc")
     assert resp.status_code == 200
     assert resp.json()["strategy_id"] == "abc"
@@ -239,7 +257,7 @@ def test_get_strategy_not_found(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/strategies/nonexistent")
     assert resp.status_code == 404
 
@@ -261,7 +279,7 @@ def test_update_strategy(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.put("/api/strategies/abc", json={
         "name": "Updated Name",
         "markdown": "## Updated",
@@ -285,7 +303,7 @@ def test_update_strategy_partial(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.put("/api/strategies/abc", json={"name": "New Name"})
     assert resp.status_code == 200
     # Should only update name + updated_at
@@ -301,7 +319,7 @@ def test_delete_strategy(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.delete("/api/strategies/abc")
     assert resp.status_code == 204
     table.delete_item.assert_called_once_with(Key={"pk": "STRATEGY#abc"})
@@ -314,7 +332,7 @@ def test_halt_trading(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.post("/api/halt")
     assert resp.status_code == 200
     assert resp.json()["status"] == "halted"
@@ -330,7 +348,7 @@ def test_unhalt_trading(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.post("/api/unhalt")
     assert resp.status_code == 200
     assert resp.json()["status"] == "running"
@@ -384,7 +402,7 @@ def test_telemetry(mock_boto3: MagicMock) -> None:
 
     from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
+    client = TestClient(app, cookies=_auth_cookie())
     resp = client.get("/api/telemetry")
     assert resp.status_code == 200
     data = resp.json()

@@ -102,6 +102,23 @@ jobs:
             aws ecs update-service --cluster "$CLUSTER" --service "$SVC" --force-new-deployment --query 'service.status'
           done
 
+      - name: Seed Cognito client secret
+        run: |
+          # Get the client secret from Cognito and store in Secrets Manager
+          POOL_ID=$(aws cloudformation describe-stacks --stack-name TradingStrandsStack \
+            --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue" --output text)
+          CLIENT_ID=$(aws cloudformation describe-stacks --stack-name TradingStrandsStack \
+            --query "Stacks[0].Outputs[?OutputKey=='CognitoClientId'].OutputValue" --output text)
+          CLIENT_SECRET=$(aws cognito-idp describe-user-pool-client \
+            --user-pool-id "$POOL_ID" --client-id "$CLIENT_ID" \
+            --query 'UserPoolClient.ClientSecret' --output text)
+          aws secretsmanager create-secret \
+            --name trading-strands/cognito-client-secret \
+            --secret-string "$CLIENT_SECRET" 2>/dev/null || \
+          aws secretsmanager put-secret-value \
+            --secret-id trading-strands/cognito-client-secret \
+            --secret-string "$CLIENT_SECRET"
+
       - name: Seed Alpaca credentials in Secrets Manager
         env:
           ALPACA_PAPER_KEY: ${{ secrets.ALPACA_PAPER_KEY }}
