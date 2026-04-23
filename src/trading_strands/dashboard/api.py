@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from trading_strands.dashboard.auth import (
     SESSION_COOKIE,
     AuthMiddleware,
+    _get_cognito_client,
     authenticate,
     create_session_cookie,
 )
@@ -403,3 +404,178 @@ async def telemetry() -> dict[str, Any]:
     }
 
     return result
+
+
+# ── Admin: User Management ─────────────────────────────────────────────
+
+
+def _get_user_pool_id() -> str:
+    return os.environ.get("COGNITO_USER_POOL_ID", "")
+
+
+class UserCreate(BaseModel):
+    email: str
+    role: str = "viewer"  # operator or viewer
+
+
+class UserPasswordReset(BaseModel):
+    password: str
+
+
+class UserRoleUpdate(BaseModel):
+    role: str  # operator or viewer
+
+
+@app.get("/api/admin/users")
+async def list_users() -> list[dict[str, Any]]:
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+    users: list[dict[str, Any]] = []
+
+    paginator_token: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"UserPoolId": pool_id, "Limit": 60}
+        if paginator_token:
+            kwargs["PaginationToken"] = paginator_token
+        resp = cognito.list_users(**kwargs)
+        for u in resp.get("Users", []):
+            attrs = {a["Name"]: a["Value"] for a in u.get("Attributes", [])}
+            users.append({
+                "username": u["Username"],
+                "email": attrs.get("email", ""),
+                "role": attrs.get("custom:role", "viewer"),
+                "status": u.get("UserStatus", "UNKNOWN"),
+                "enabled": u.get("Enabled", False),
+                "created": u.get("UserCreateDate", "").isoformat()
+                if hasattr(u.get("UserCreateDate", ""), "isoformat")
+                else str(u.get("UserCreateDate", "")),
+            })
+        paginator_token = resp.get("PaginationToken")
+        if not paginator_token:
+            break
+
+    return users
+
+
+@app.post("/api/admin/users", status_code=201)
+async def create_user(body: UserCreate) -> dict[str, Any]:
+    import secrets
+    import string
+
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    if body.role not in ("operator", "viewer"):
+        raise HTTPException(status_code=400, detail="Role must be 'operator' or 'viewer'")
+
+    # Generate a temporary password
+    alphabet = string.ascii_letters + string.digits + "!@#$%"
+    temp_password = "".join(secrets.choice(alphabet) for _ in range(16))
+
+    try:
+        cognito.admin_create_user(
+            UserPoolId=pool_id,
+            Username=body.email,
+            UserAttributes=[
+                {"Name": "email", "Value": body.email},
+                {"Name": "email_verified", "Value": "true"},
+                {"Name": "custom:role", "Value": body.role},
+            ],
+            TemporaryPassword=temp_password,
+            MessageAction="SUPPRESS",
+        )
+        # Set permanent password so user can log in immediately
+        cognito.admin_set_user_password(
+            UserPoolId=pool_id,
+            Username=body.email,
+            Password=temp_password,
+            Permanent=True,
+        )
+    except cognito.exceptions.UsernameExistsException:
+        raise HTTPException(status_code=409, detail="User already exists")  # noqa: B904
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))  # noqa: B904
+
+    return {
+        "email": body.email,
+        "role": body.role,
+        "temporary_password": temp_password,
+    }
+
+
+@app.post("/api/admin/users/{username}/reset-password")
+async def reset_user_password(
+    username: str, body: UserPasswordReset,
+) -> dict[str, str]:
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    try:
+        cognito.admin_set_user_password(
+            UserPoolId=pool_id,
+            Username=username,
+            Password=body.password,
+            Permanent=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))  # noqa: B904
+    return {"status": "password_reset"}
+
+
+@app.put("/api/admin/users/{username}/role")
+async def update_user_role(
+    username: str, body: UserRoleUpdate,
+) -> dict[str, str]:
+    if body.role not in ("operator", "viewer"):
+        raise HTTPException(status_code=400, detail="Role must be 'operator' or 'viewer'")
+
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    try:
+        cognito.admin_update_user_attributes(
+            UserPoolId=pool_id,
+            Username=username,
+            UserAttributes=[{"Name": "custom:role", "Value": body.role}],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))  # noqa: B904
+    return {"status": "role_updated", "role": body.role}
+
+
+@app.delete("/api/admin/users/{username}", status_code=204)
+async def delete_user(username: str) -> None:
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    try:
+        cognito.admin_delete_user(
+            UserPoolId=pool_id,
+            Username=username,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))  # noqa: B904
+
+
+@app.post("/api/admin/users/{username}/enable")
+async def enable_user(username: str) -> dict[str, str]:
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    try:
+        cognito.admin_enable_user(UserPoolId=pool_id, Username=username)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))  # noqa: B904
+    return {"status": "enabled"}
+
+
+@app.post("/api/admin/users/{username}/disable")
+async def disable_user(username: str) -> dict[str, str]:
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    try:
+        cognito.admin_disable_user(UserPoolId=pool_id, Username=username)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))  # noqa: B904
+    return {"status": "disabled"}

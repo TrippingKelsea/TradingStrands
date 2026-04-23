@@ -422,3 +422,145 @@ def test_telemetry(mock_boto3: MagicMock) -> None:
     assert data["events"]["recent_count"] == 7
 
     assert data["dashboard"]["status"] == "ok"
+
+
+# ── Admin user management ──────────────────────────────────────────────
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_list_users(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+    mock_cognito.list_users.return_value = {
+        "Users": [
+            {
+                "Username": "abc-123",
+                "Attributes": [
+                    {"Name": "email", "Value": "admin@example.com"},
+                    {"Name": "custom:role", "Value": "operator"},
+                ],
+                "UserStatus": "CONFIRMED",
+                "Enabled": True,
+                "UserCreateDate": "2026-01-01T00:00:00Z",
+            },
+        ],
+    }
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.get("/api/admin/users")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["email"] == "admin@example.com"
+    assert data[0]["role"] == "operator"
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_create_user(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.post("/api/admin/users", json={
+        "email": "new@example.com",
+        "role": "viewer",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["email"] == "new@example.com"
+    assert data["role"] == "viewer"
+    assert "temporary_password" in data
+    mock_cognito.admin_create_user.assert_called_once()
+    mock_cognito.admin_set_user_password.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_create_user_invalid_role(
+    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
+) -> None:
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.post("/api/admin/users", json={
+        "email": "bad@example.com",
+        "role": "superadmin",
+    })
+    assert resp.status_code == 400
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_reset_user_password(
+    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
+) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.post("/api/admin/users/abc-123/reset-password", json={
+        "password": "NewPassword123!@#",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "password_reset"
+    mock_cognito.admin_set_user_password.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_update_user_role(
+    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
+) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.put("/api/admin/users/abc-123/role", json={"role": "operator"})
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "operator"
+    mock_cognito.admin_update_user_attributes.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_delete_user(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.delete("/api/admin/users/abc-123")
+    assert resp.status_code == 204
+    mock_cognito.admin_delete_user.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+@patch("trading_strands.dashboard.api.boto3")
+def test_enable_disable_user(
+    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
+) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+
+    resp = client.post("/api/admin/users/abc-123/disable")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "disabled"
+
+    resp = client.post("/api/admin/users/abc-123/enable")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "enabled"

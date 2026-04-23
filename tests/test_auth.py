@@ -207,6 +207,45 @@ def test_viewer_cannot_halt(
     assert resp.status_code == 403
 
 
+def test_viewer_cannot_access_admin(
+    _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
+) -> None:
+    """Viewer role should be rejected from admin endpoints."""
+    import trading_strands.dashboard.auth as auth_mod
+
+    auth_mod._cognito_client = _mock_cognito.client.return_value
+    cognito = _mock_cognito.client.return_value
+
+    cognito.initiate_auth.return_value = {
+        "AuthenticationResult": {
+            "IdToken": "fake.id.token",
+            "AccessToken": "viewer.access.token",
+            "RefreshToken": "fake.refresh.token",
+        },
+    }
+    cognito.get_user.return_value = {
+        "Username": "viewer",
+        "UserAttributes": [
+            {"Name": "email", "Value": "viewer@example.com"},
+            {"Name": "custom:role", "Value": "viewer"},
+        ],
+    }
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app)
+    login_resp = client.post("/auth/login", data={
+        "email": "viewer@example.com",
+        "password": "ViewerPass123!",
+    }, follow_redirects=False)
+    session_cookie = login_resp.cookies.get("session")
+
+    client.cookies.set("session", session_cookie)
+    resp = client.get("/api/admin/users")
+    assert resp.status_code == 403
+    assert "operator" in resp.json()["detail"].lower()
+
+
 def test_viewer_can_read_snapshot(
     _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
 ) -> None:

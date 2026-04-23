@@ -205,6 +205,21 @@ class TradingStrandsStack(cdk.Stack):
         )
         # Dashboard needs read/write: reads snapshots+events, writes strategies
         table.grant_read_write_data(dashboard_task_role)
+        # Dashboard needs Cognito admin access for user management
+        dashboard_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "cognito-idp:ListUsers",
+                    "cognito-idp:AdminCreateUser",
+                    "cognito-idp:AdminDeleteUser",
+                    "cognito-idp:AdminSetUserPassword",
+                    "cognito-idp:AdminUpdateUserAttributes",
+                    "cognito-idp:AdminEnableUser",
+                    "cognito-idp:AdminDisableUser",
+                ],
+                resources=[user_pool.user_pool_arn],
+            )
+        )
 
         dashboard_task_def = ecs.FargateTaskDefinition(
             self,

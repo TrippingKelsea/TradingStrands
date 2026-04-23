@@ -118,6 +118,7 @@
   <div class="tab" data-tab="strategies">Strategies</div>
   <div class="tab" data-tab="submit">Submit Strategy</div>
   <div class="tab" data-tab="telemetry">Telemetry</div>
+  <div class="tab" data-tab="admin">Admin</div>
 </div>
 
 {% block content %}{% endblock %}
@@ -137,6 +138,7 @@
       if (target) target.classList.add('active');
       if (tab.dataset.tab === 'strategies') loadStrategies();
       if (tab.dataset.tab === 'telemetry') loadTelemetry();
+      if (tab.dataset.tab === 'admin') loadUsers();
     });
   });
 

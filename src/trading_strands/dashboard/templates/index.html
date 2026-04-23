@@ -143,6 +143,51 @@
     <div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading telemetry...</div>
   </div>
 </div>
+
+<!-- Admin Tab -->
+<div class="tab-content" id="tab-admin">
+  <div class="panel" style="margin-bottom:12px;">
+    <h2>Create User</h2>
+    <form id="create-user-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+      <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
+        <label>Email</label>
+        <input type="email" id="new-user-email" required placeholder="user@example.com">
+      </div>
+      <div class="form-group" style="margin-bottom:0;min-width:120px;">
+        <label>Role</label>
+        <select id="new-user-role" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;font-size:0.85rem;">
+          <option value="viewer">Viewer</option>
+          <option value="operator">Operator</option>
+        </select>
+      </div>
+      <button type="submit" class="btn btn-primary" style="margin-bottom:0;">Create User</button>
+      <span id="create-user-status" style="font-size:0.8rem;"></span>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Users</h2>
+    <div id="users-list">
+      <div style="color:var(--dim);font-size:0.85rem;padding:8px 0;">Loading users...</div>
+    </div>
+  </div>
+
+  <div id="password-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:100;display:none;align-items:center;justify-content:center;">
+    <div class="panel" style="max-width:400px;width:90%;">
+      <h2 id="password-modal-title">Reset Password</h2>
+      <input type="hidden" id="password-modal-username">
+      <div class="form-group">
+        <label>New Password</label>
+        <input type="password" id="password-modal-input" placeholder="Min 12 chars, upper+lower+digit+symbol">
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="submitPasswordReset()">Set Password</button>
+        <button class="btn" onclick="closePasswordModal()">Cancel</button>
+      </div>
+      <span id="password-modal-status" style="font-size:0.8rem;margin-top:8px;display:block;"></span>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -568,6 +613,167 @@
 
   // Expose for onclick
   window.loadTelemetry = loadTelemetry;
+
+  // ── Admin: User Management ──────────────────────────────────────────
+
+  async function loadUsers() {
+    const container = $('users-list');
+    container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:8px 0;">Loading users...</div>';
+
+    try {
+      const resp = await fetch('/api/admin/users');
+      if (resp.status === 403) {
+        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:8px 0;">Admin access requires operator role.</div>';
+        return;
+      }
+      const users = await resp.json();
+
+      if (users.length === 0) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:8px 0;">No users found.</div>';
+        return;
+      }
+
+      let html = '<table><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+      users.forEach(u => {
+        const roleClass = u.role === 'operator' ? 'badge-active' : 'badge-paused';
+        const statusClass = u.enabled ? (u.status === 'CONFIRMED' ? 'badge-active' : 'badge-paused') : 'badge-stopped';
+        html += `<tr>
+          <td>${u.email}</td>
+          <td><span class="badge ${roleClass}">${u.role}</span></td>
+          <td><span class="badge ${statusClass}">${u.enabled ? u.status : 'DISABLED'}</span></td>
+          <td style="color:var(--dim);font-size:0.75rem;">${u.created ? new Date(u.created).toLocaleDateString() : '-'}</td>
+          <td>
+            <div class="strat-actions">
+              <button onclick="toggleRole('${u.username}','${u.role}')">${u.role === 'operator' ? 'Make Viewer' : 'Make Operator'}</button>
+              <button onclick="openPasswordModal('${u.username}','${u.email}')">Reset Password</button>
+              <button onclick="${u.enabled ? `disableUser('${u.username}')` : `enableUser('${u.username}')`}">${u.enabled ? 'Disable' : 'Enable'}</button>
+              <button class="danger" onclick="deleteUser('${u.username}','${u.email}')">Delete</button>
+            </div>
+          </td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:8px 0;">Failed to load users: ' + e.message + '</div>';
+    }
+  }
+  window.loadUsers = loadUsers;
+
+  $('create-user-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const status = $('create-user-status');
+    status.textContent = 'Creating...';
+    status.style.color = 'var(--dim)';
+
+    const email = $('new-user-email').value.trim();
+    const role = $('new-user-role').value;
+
+    try {
+      const resp = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({email, role}),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        status.innerHTML = 'Created! Temp password: <code style="background:var(--bg);padding:2px 6px;border-radius:3px;user-select:all;">' + data.temporary_password + '</code>';
+        status.style.color = 'var(--green)';
+        $('new-user-email').value = '';
+        loadUsers();
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown error');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  });
+
+  window.toggleRole = async function(username, currentRole) {
+    const newRole = currentRole === 'operator' ? 'viewer' : 'operator';
+    if (!confirm('Change role to ' + newRole + '?')) return;
+    try {
+      await fetch('/api/admin/users/' + encodeURIComponent(username) + '/role', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({role: newRole}),
+      });
+      loadUsers();
+    } catch(e) { alert('Failed to update role'); }
+  };
+
+  window.deleteUser = async function(username, email) {
+    if (!confirm('Delete user ' + email + '? This cannot be undone.')) return;
+    try {
+      await fetch('/api/admin/users/' + encodeURIComponent(username), {method: 'DELETE'});
+      loadUsers();
+    } catch(e) { alert('Failed to delete user'); }
+  };
+
+  window.enableUser = async function(username) {
+    try {
+      await fetch('/api/admin/users/' + encodeURIComponent(username) + '/enable', {method: 'POST'});
+      loadUsers();
+    } catch(e) { alert('Failed to enable user'); }
+  };
+
+  window.disableUser = async function(username) {
+    if (!confirm('Disable this user? They will not be able to log in.')) return;
+    try {
+      await fetch('/api/admin/users/' + encodeURIComponent(username) + '/disable', {method: 'POST'});
+      loadUsers();
+    } catch(e) { alert('Failed to disable user'); }
+  };
+
+  window.openPasswordModal = function(username, email) {
+    $('password-modal-username').value = username;
+    $('password-modal-title').textContent = 'Reset Password: ' + email;
+    $('password-modal-input').value = '';
+    $('password-modal-status').textContent = '';
+    $('password-modal').style.display = 'flex';
+  };
+
+  window.closePasswordModal = function() {
+    $('password-modal').style.display = 'none';
+  };
+
+  window.submitPasswordReset = async function() {
+    const username = $('password-modal-username').value;
+    const password = $('password-modal-input').value;
+    const status = $('password-modal-status');
+
+    if (!password || password.length < 12) {
+      status.textContent = 'Password must be at least 12 characters';
+      status.style.color = 'var(--red)';
+      return;
+    }
+
+    status.textContent = 'Resetting...';
+    status.style.color = 'var(--dim)';
+
+    try {
+      const resp = await fetch('/api/admin/users/' + encodeURIComponent(username) + '/reset-password', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password}),
+      });
+      if (resp.ok) {
+        status.textContent = 'Password reset successfully!';
+        status.style.color = 'var(--green)';
+        setTimeout(closePasswordModal, 1500);
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  };
 {% endblock %}
 
 {% block init %}

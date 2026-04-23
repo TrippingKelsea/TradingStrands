@@ -31,6 +31,9 @@ READ_ONLY_API_PATHS = frozenset({
     "/api/strategies", "/api/telemetry",
 })
 
+# Admin paths require operator role regardless of HTTP method
+ADMIN_PATH_PREFIX = "/api/admin/"
+
 # Module-level Cognito client (set during startup or mocked in tests)
 _cognito_client: Any = None
 _serializer: URLSafeTimedSerializer | None = None
@@ -169,6 +172,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         user = validate_session(session_cookie)
         if user is None:
             return self._unauthorized(request)
+
+        # Admin paths require operator role
+        if path.startswith(ADMIN_PATH_PREFIX) and user.get("role") != "operator":
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Admin access requires operator role"},
+            )
 
         # Role-based access: viewers can only read
         if user.get("role") == "viewer" and not _is_read_only_request(request):
