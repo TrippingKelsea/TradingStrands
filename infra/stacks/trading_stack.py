@@ -91,6 +91,15 @@ class TradingStrandsStack(cdk.Stack):
             description="Alpaca API credentials - seed manually after stack deploy",
         )
 
+        # Cognito client secret — created here so ECS can reference it on
+        # first deploy; CI overwrites the value after stack deploy.
+        cognito_client_secret = secretsmanager.Secret(
+            self,
+            "CognitoClientSecret",
+            secret_name="trading-strands/cognito-client-secret",
+            description="Cognito app client secret - seeded by CI after deploy",
+        )
+
         # Cognito user pool for dashboard authentication
         user_pool = cognito.UserPool(
             self,
@@ -220,10 +229,7 @@ class TradingStrandsStack(cdk.Stack):
             },
             secrets={
                 "COGNITO_CLIENT_SECRET": ecs.Secret.from_secrets_manager(
-                    secretsmanager.Secret.from_secret_name_v2(
-                        self, "CognitoClientSecretRef",
-                        "trading-strands/cognito-client-secret",
-                    ),
+                    cognito_client_secret,
                 ),
             },
             port_mappings=[ecs.PortMapping(container_port=8080)],
