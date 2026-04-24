@@ -138,7 +138,7 @@
       if (target) target.classList.add('active');
       if (tab.dataset.tab === 'strategies') loadStrategies();
       if (tab.dataset.tab === 'telemetry') loadTelemetry();
-      if (tab.dataset.tab === 'admin') loadUsers();
+      if (tab.dataset.tab === 'admin') { loadOrgs(); loadUsers(); }
     });
   });
 

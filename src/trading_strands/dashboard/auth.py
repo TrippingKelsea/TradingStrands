@@ -12,14 +12,19 @@ import boto3
 import structlog
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
-from itsdangerous import BadSignature, URLSafeTimedSerializer
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 logger = structlog.get_logger()
 
-# Session cookie settings
+# Session cookie name
 SESSION_COOKIE = "session"
-SESSION_MAX_AGE = 86400 * 7  # 7 days
+
+# Default session max age: 1 year for dev (controlled per-org via ORG item)
+SESSION_MAX_AGE_DEFAULT = 86400 * 365  # 1 year
+
+# Signed URL token max age — short-lived, just survives one redirect
+URL_TOKEN_MAX_AGE = 60  # 60 seconds
 
 # Paths that don't require authentication
 PUBLIC_PATHS = frozenset({"/health", "/login", "/auth/login", "/auth/logout"})
@@ -72,6 +77,32 @@ def _compute_secret_hash(username: str) -> str:
     return base64.b64encode(dig).decode("utf-8")
 
 
+# ── Signed URL tokens ─────────────────────────────────────────────────
+
+
+def create_url_token(data: dict[str, Any]) -> str:
+    """Create a signed, time-limited token for URL parameters.
+
+    Uses a separate salt from session cookies so tokens are not
+    interchangeable. Expires after URL_TOKEN_MAX_AGE seconds.
+    """
+    serializer = _get_serializer()
+    return serializer.dumps(data, salt="url-token")
+
+
+def decode_url_token(token: str) -> dict[str, Any] | None:
+    """Decode a signed URL token. Returns None if expired or tampered."""
+    serializer = _get_serializer()
+    try:
+        data = serializer.loads(token, salt="url-token", max_age=URL_TOKEN_MAX_AGE)
+        return dict(data)
+    except (BadSignature, SignatureExpired):
+        return None
+
+
+# ── Authentication ─────────────────────────────────────────────────────
+
+
 def authenticate(email: str, password: str) -> dict[str, Any] | None:
     """Authenticate a user against Cognito and return user info + tokens."""
     client_id = os.environ.get("COGNITO_CLIENT_ID", "")
@@ -109,6 +140,7 @@ def authenticate(email: str, password: str) -> dict[str, Any] | None:
     return {
         "email": attrs.get("email", email),
         "role": attrs.get("custom:role", "viewer"),
+        "org_id": attrs.get("custom:org_id", ""),
         "access_token": access_token,
         "refresh_token": tokens.get("RefreshToken", ""),
         "login_at": int(time.time()),
@@ -121,18 +153,22 @@ def create_session_cookie(user_info: dict[str, Any]) -> str:
     return serializer.dumps({
         "email": user_info["email"],
         "role": user_info["role"],
+        "org_id": user_info.get("org_id", ""),
         "access_token": user_info["access_token"],
         "login_at": user_info["login_at"],
-    })
+    }, salt="session")
 
 
-def validate_session(cookie_value: str) -> dict[str, Any] | None:
+def validate_session(
+    cookie_value: str,
+    max_age: int = SESSION_MAX_AGE_DEFAULT,
+) -> dict[str, Any] | None:
     """Validate and decode a session cookie. Returns user info or None."""
     serializer = _get_serializer()
     try:
-        data = serializer.loads(cookie_value, max_age=SESSION_MAX_AGE)
+        data = serializer.loads(cookie_value, salt="session", max_age=max_age)
         return dict(data)
-    except BadSignature:
+    except (BadSignature, SignatureExpired):
         return None
 
 

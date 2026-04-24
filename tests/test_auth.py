@@ -147,7 +147,15 @@ def test_login_failure(
     }, follow_redirects=False)
 
     assert resp.status_code == 303
-    assert "error" in resp.headers["location"]
+    location = resp.headers["location"]
+    assert "?t=" in location
+    # Verify the signed token decodes to the error message
+    from trading_strands.dashboard.auth import decode_url_token
+
+    token = location.split("?t=")[1]
+    data = decode_url_token(token)
+    assert data is not None
+    assert data["error"] == "Invalid email or password"
 
 
 def test_logout_clears_session(

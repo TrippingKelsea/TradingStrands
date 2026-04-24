@@ -120,6 +120,9 @@ class TradingStrandsStack(cdk.Stack):
                 "role": cognito.StringAttribute(
                     min_len=1, max_len=20, mutable=True,
                 ),
+                "org_id": cognito.StringAttribute(
+                    min_len=0, max_len=40, mutable=True,
+                ),
             },
             removal_policy=cdk.RemovalPolicy.RETAIN,
         )

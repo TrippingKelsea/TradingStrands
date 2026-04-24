@@ -6,7 +6,6 @@ import asyncio
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
 
 import boto3
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -16,10 +15,13 @@ from pydantic import BaseModel
 
 from trading_strands.dashboard.auth import (
     SESSION_COOKIE,
+    SESSION_MAX_AGE_DEFAULT,
     AuthMiddleware,
     _get_cognito_client,
     authenticate,
     create_session_cookie,
+    create_url_token,
+    decode_url_token,
 )
 
 app = FastAPI(title="TradingStrands Dashboard")
@@ -47,7 +49,12 @@ async def health() -> dict[str, bool]:
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> HTMLResponse:
-    error = request.query_params.get("error", "")
+    error = ""
+    token = request.query_params.get("t", "")
+    if token:
+        data = decode_url_token(token)
+        if data:
+            error = data.get("error", "")
     return _templates.TemplateResponse(request, "login.html", {"error": error})
 
 
@@ -58,17 +65,15 @@ async def auth_login(
 ) -> RedirectResponse:
     user_info = authenticate(email, password)
     if user_info is None:
-        return RedirectResponse(
-            url="/login?" + urlencode({"error": "Invalid email or password"}),
-            status_code=303,
-        )
+        token = create_url_token({"error": "Invalid email or password"})
+        return RedirectResponse(url=f"/login?t={token}", status_code=303)
 
     session_value = create_session_cookie(user_info)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
         key=SESSION_COOKIE,
         value=session_value,
-        max_age=86400 * 7,
+        max_age=SESSION_MAX_AGE_DEFAULT,
         httponly=True,
         secure=True,
         samesite="lax",
@@ -413,9 +418,102 @@ def _get_user_pool_id() -> str:
     return os.environ.get("COGNITO_USER_POOL_ID", "")
 
 
+class OrgCreate(BaseModel):
+    name: str
+
+
+class OrgUpdate(BaseModel):
+    name: str | None = None
+    session_max_age: int | None = None  # seconds
+
+
+@app.get("/api/admin/orgs")
+async def list_orgs() -> list[dict[str, Any]]:
+    table = _get_table()
+    resp = table.scan(
+        FilterExpression="begins_with(pk, :prefix)",
+        ExpressionAttributeValues={":prefix": "ORG#"},
+    )
+    return sorted(
+        [dict(item) for item in resp.get("Items", [])],
+        key=lambda x: x.get("created_at", 0),
+        reverse=True,
+    )
+
+
+@app.post("/api/admin/orgs", status_code=201)
+async def create_org(body: OrgCreate) -> dict[str, Any]:
+    import time
+    import uuid
+
+    table = _get_table()
+    org_id = str(uuid.uuid4())[:8]
+    now = int(time.time())
+    item: dict[str, Any] = {
+        "pk": f"ORG#{org_id}",
+        "org_id": org_id,
+        "name": body.name,
+        "session_max_age": SESSION_MAX_AGE_DEFAULT,
+        "created_at": now,
+        "updated_at": now,
+    }
+    table.put_item(Item=item)
+    return item
+
+
+@app.get("/api/admin/orgs/{org_id}")
+async def get_org(org_id: str) -> dict[str, Any]:
+    table = _get_table()
+    resp = table.get_item(Key={"pk": f"ORG#{org_id}"})
+    item = resp.get("Item")
+    if item is None:
+        raise HTTPException(status_code=404, detail="Organization not found")
+    return dict(item)
+
+
+@app.put("/api/admin/orgs/{org_id}")
+async def update_org(org_id: str, body: OrgUpdate) -> dict[str, Any]:
+    import time
+
+    table = _get_table()
+    updates: list[str] = ["updated_at = :t"]
+    names: dict[str, str] = {}
+    values: dict[str, Any] = {":t": int(time.time())}
+
+    if body.name is not None:
+        updates.append("#n = :n")
+        names["#n"] = "name"
+        values[":n"] = body.name
+    if body.session_max_age is not None:
+        updates.append("session_max_age = :sma")
+        values[":sma"] = body.session_max_age
+
+    try:
+        kwargs: dict[str, Any] = {
+            "Key": {"pk": f"ORG#{org_id}"},
+            "UpdateExpression": "SET " + ", ".join(updates),
+            "ExpressionAttributeValues": values,
+            "ConditionExpression": "attribute_exists(pk)",
+            "ReturnValues": "ALL_NEW",
+        }
+        if names:
+            kwargs["ExpressionAttributeNames"] = names
+        resp = table.update_item(**kwargs)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Organization not found")  # noqa: B904
+    return dict(resp.get("Attributes", {}))
+
+
+@app.delete("/api/admin/orgs/{org_id}", status_code=204)
+async def delete_org(org_id: str) -> None:
+    table = _get_table()
+    table.delete_item(Key={"pk": f"ORG#{org_id}"})
+
+
 class UserCreate(BaseModel):
     email: str
     role: str = "viewer"  # operator or viewer
+    org_id: str = ""
 
 
 class UserPasswordReset(BaseModel):
@@ -444,6 +542,7 @@ async def list_users() -> list[dict[str, Any]]:
                 "username": u["Username"],
                 "email": attrs.get("email", ""),
                 "role": attrs.get("custom:role", "viewer"),
+                "org_id": attrs.get("custom:org_id", ""),
                 "status": u.get("UserStatus", "UNKNOWN"),
                 "enabled": u.get("Enabled", False),
                 "created": u.get("UserCreateDate", "").isoformat()
@@ -472,15 +571,19 @@ async def create_user(body: UserCreate) -> dict[str, Any]:
     alphabet = string.ascii_letters + string.digits + "!@#$%"
     temp_password = "".join(secrets.choice(alphabet) for _ in range(16))
 
+    user_attrs = [
+        {"Name": "email", "Value": body.email},
+        {"Name": "email_verified", "Value": "true"},
+        {"Name": "custom:role", "Value": body.role},
+    ]
+    if body.org_id:
+        user_attrs.append({"Name": "custom:org_id", "Value": body.org_id})
+
     try:
         cognito.admin_create_user(
             UserPoolId=pool_id,
             Username=body.email,
-            UserAttributes=[
-                {"Name": "email", "Value": body.email},
-                {"Name": "email_verified", "Value": "true"},
-                {"Name": "custom:role", "Value": body.role},
-            ],
+            UserAttributes=user_attrs,
             TemporaryPassword=temp_password,
             MessageAction="SUPPRESS",
         )
@@ -499,6 +602,7 @@ async def create_user(body: UserCreate) -> dict[str, Any]:
     return {
         "email": body.email,
         "role": body.role,
+        "org_id": body.org_id,
         "temporary_password": temp_password,
     }
 

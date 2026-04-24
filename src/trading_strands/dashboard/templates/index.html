@@ -146,23 +146,50 @@
 
 <!-- Admin Tab -->
 <div class="tab-content" id="tab-admin">
+  <div class="grid" style="margin-bottom:12px;">
+    <div class="panel">
+      <h2>Create Organization</h2>
+      <form id="create-org-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
+          <label>Organization Name</label>
+          <input type="text" id="new-org-name" required placeholder="e.g., Kelsea's Org">
+        </div>
+        <button type="submit" class="btn btn-primary" style="margin-bottom:0;">Create Org</button>
+        <span id="create-org-status" style="font-size:0.8rem;"></span>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Create User</h2>
+      <form id="create-user-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+        <div class="form-group" style="margin-bottom:0;flex:1;min-width:180px;">
+          <label>Email</label>
+          <input type="email" id="new-user-email" required placeholder="user@example.com">
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:100px;">
+          <label>Role</label>
+          <select id="new-user-role" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;font-size:0.85rem;">
+            <option value="viewer">Viewer</option>
+            <option value="operator">Operator</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:0;min-width:140px;">
+          <label>Organization</label>
+          <select id="new-user-org" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;font-size:0.85rem;">
+            <option value="">None</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary" style="margin-bottom:0;">Create User</button>
+        <span id="create-user-status" style="font-size:0.8rem;"></span>
+      </form>
+    </div>
+  </div>
+
   <div class="panel" style="margin-bottom:12px;">
-    <h2>Create User</h2>
-    <form id="create-user-form" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
-      <div class="form-group" style="margin-bottom:0;flex:1;min-width:200px;">
-        <label>Email</label>
-        <input type="email" id="new-user-email" required placeholder="user@example.com">
-      </div>
-      <div class="form-group" style="margin-bottom:0;min-width:120px;">
-        <label>Role</label>
-        <select id="new-user-role" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;font-size:0.85rem;">
-          <option value="viewer">Viewer</option>
-          <option value="operator">Operator</option>
-        </select>
-      </div>
-      <button type="submit" class="btn btn-primary" style="margin-bottom:0;">Create User</button>
-      <span id="create-user-status" style="font-size:0.8rem;"></span>
-    </form>
+    <h2>Organizations</h2>
+    <div id="orgs-list">
+      <div style="color:var(--dim);font-size:0.85rem;padding:8px 0;">Loading organizations...</div>
+    </div>
   </div>
 
   <div class="panel">
@@ -172,7 +199,7 @@
     </div>
   </div>
 
-  <div id="password-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:100;display:none;align-items:center;justify-content:center;">
+  <div id="password-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center;">
     <div class="panel" style="max-width:400px;width:90%;">
       <h2 id="password-modal-title">Reset Password</h2>
       <input type="hidden" id="password-modal-username">
@@ -614,7 +641,99 @@
   // Expose for onclick
   window.loadTelemetry = loadTelemetry;
 
-  // ── Admin: User Management ──────────────────────────────────────────
+  // ── Admin: Organization + User Management ────────────────────────────
+
+  let _orgsCache = [];
+
+  async function loadOrgs() {
+    const container = $('orgs-list');
+    try {
+      const resp = await fetch('/api/admin/orgs');
+      if (resp.status === 403) {
+        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Operator role required.</div>';
+        return;
+      }
+      const orgs = await resp.json();
+      _orgsCache = orgs;
+
+      // Populate the org dropdown in user creation form
+      const select = $('new-user-org');
+      select.innerHTML = '<option value="">None</option>';
+      orgs.forEach(o => {
+        const opt = document.createElement('option');
+        opt.value = o.org_id;
+        opt.textContent = o.name;
+        select.appendChild(opt);
+      });
+
+      if (orgs.length === 0) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No organizations yet.</div>';
+        return;
+      }
+
+      let html = '<table><thead><tr><th>Name</th><th>Org ID</th><th>Session Timeout</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+      orgs.forEach(o => {
+        const timeout = o.session_max_age ? (o.session_max_age / 86400).toFixed(0) + ' days' : 'default';
+        html += `<tr>
+          <td style="font-weight:bold;color:var(--blue);">${o.name}</td>
+          <td style="color:var(--dim);font-size:0.75rem;">${o.org_id}</td>
+          <td>${timeout}</td>
+          <td style="color:var(--dim);font-size:0.75rem;">${o.created_at ? new Date(o.created_at * 1000).toLocaleDateString() : '-'}</td>
+          <td>
+            <div class="strat-actions">
+              <button class="danger" onclick="deleteOrg('${o.org_id}','${o.name}')">Delete</button>
+            </div>
+          </td>
+        </tr>`;
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load orgs.</div>';
+    }
+  }
+
+  function orgName(orgId) {
+    const org = _orgsCache.find(o => o.org_id === orgId);
+    return org ? org.name : orgId || '-';
+  }
+
+  $('create-org-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const status = $('create-org-status');
+    status.textContent = 'Creating...';
+    status.style.color = 'var(--dim)';
+
+    try {
+      const resp = await fetch('/api/admin/orgs', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: $('new-org-name').value.trim()}),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        status.textContent = 'Created: ' + data.name + ' (' + data.org_id + ')';
+        status.style.color = 'var(--green)';
+        $('new-org-name').value = '';
+        loadOrgs();
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  });
+
+  window.deleteOrg = async function(orgId, name) {
+    if (!confirm('Delete organization "' + name + '"? Users will not be deleted.')) return;
+    try {
+      await fetch('/api/admin/orgs/' + encodeURIComponent(orgId), {method: 'DELETE'});
+      loadOrgs();
+    } catch(e) { alert('Failed to delete org'); }
+  };
 
   async function loadUsers() {
     const container = $('users-list');
@@ -633,12 +752,13 @@
         return;
       }
 
-      let html = '<table><thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+      let html = '<table><thead><tr><th>Email</th><th>Org</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
       users.forEach(u => {
         const roleClass = u.role === 'operator' ? 'badge-active' : 'badge-paused';
         const statusClass = u.enabled ? (u.status === 'CONFIRMED' ? 'badge-active' : 'badge-paused') : 'badge-stopped';
         html += `<tr>
           <td>${u.email}</td>
+          <td style="font-size:0.75rem;">${orgName(u.org_id)}</td>
           <td><span class="badge ${roleClass}">${u.role}</span></td>
           <td><span class="badge ${statusClass}">${u.enabled ? u.status : 'DISABLED'}</span></td>
           <td style="color:var(--dim);font-size:0.75rem;">${u.created ? new Date(u.created).toLocaleDateString() : '-'}</td>
@@ -668,12 +788,13 @@
 
     const email = $('new-user-email').value.trim();
     const role = $('new-user-role').value;
+    const org_id = $('new-user-org').value;
 
     try {
       const resp = await fetch('/api/admin/users', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({email, role}),
+        body: JSON.stringify({email, role, org_id}),
       });
       if (resp.ok) {
         const data = await resp.json();

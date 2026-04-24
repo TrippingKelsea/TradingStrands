@@ -564,3 +564,131 @@ def test_enable_disable_user(
     resp = client.post("/api/admin/users/abc-123/enable")
     assert resp.status_code == 200
     assert resp.json()["status"] == "enabled"
+
+
+# ── Organization management ────────────────────────────────────────────
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_create_org(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.post("/api/admin/orgs", json={"name": "Kelsea's Org"})
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["name"] == "Kelsea's Org"
+    assert "org_id" in data
+    assert data["pk"].startswith("ORG#")
+    table.put_item.assert_called_once()
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_list_orgs(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.scan.return_value = {
+        "Items": [
+            {"pk": "ORG#abc", "org_id": "abc", "name": "Test Org", "created_at": 100},
+        ],
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.get("/api/admin/orgs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["name"] == "Test Org"
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_get_org(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.get_item.return_value = {
+        "Item": {"pk": "ORG#abc", "org_id": "abc", "name": "Test Org"},
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.get("/api/admin/orgs/abc")
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Test Org"
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_get_org_not_found(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.get_item.return_value = {}
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.get("/api/admin/orgs/nonexistent")
+    assert resp.status_code == 404
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_update_org(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    table.update_item.return_value = {
+        "Attributes": {"pk": "ORG#abc", "name": "Updated Org", "session_max_age": 86400},
+    }
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.put("/api/admin/orgs/abc", json={
+        "name": "Updated Org",
+        "session_max_age": 86400,
+    })
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Updated Org"
+
+
+@patch("trading_strands.dashboard.api.boto3")
+def test_delete_org(mock_boto3: MagicMock) -> None:
+    table = MagicMock()
+    mock_boto3.resource.return_value.Table.return_value = table
+
+    from trading_strands.dashboard.api import app
+
+    client = TestClient(app, cookies=_auth_cookie())
+    resp = client.delete("/api/admin/orgs/abc")
+    assert resp.status_code == 204
+    table.delete_item.assert_called_once_with(Key={"pk": "ORG#abc"})
+
+
+# ── Signed URL tokens ─────────────────────────────────────────────────
+
+
+def test_url_token_roundtrip() -> None:
+    from trading_strands.dashboard.auth import create_url_token, decode_url_token
+
+    data = {"error": "test message", "code": 42}
+    token = create_url_token(data)
+    # Token should be URL-safe string, not plain text
+    assert "test message" not in token
+    assert "error" not in token
+    # Should decode back
+    decoded = decode_url_token(token)
+    assert decoded is not None
+    assert decoded["error"] == "test message"
+    assert decoded["code"] == 42
+
+
+def test_url_token_tampered() -> None:
+    from trading_strands.dashboard.auth import create_url_token, decode_url_token
+
+    token = create_url_token({"error": "test"})
+    # Tamper with the token
+    tampered = token[:-4] + "XXXX"
+    assert decode_url_token(tampered) is None
