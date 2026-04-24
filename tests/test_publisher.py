@@ -239,3 +239,29 @@ def test_get_halt_false_no_item() -> None:
     mock_table.get_item.return_value = {}
 
     assert publisher.get_halt() is False
+
+
+def test_publish_snapshot_with_agents() -> None:
+    publisher, mock_table = _make_publisher()
+
+    risk = RiskManager(RiskConfig())
+    agents = [
+        {"name": "Orchestrator", "type": "core", "status": "running", "detail": "ok"},
+        {"name": "RiskManager", "type": "core", "status": "running", "detail": "ok"},
+        {"name": "strategy-0", "type": "strategy", "status": "running",
+         "detail": "symbols=['AAPL']"},
+    ]
+
+    publisher.publish_snapshot(
+        tick=5,
+        prices={},
+        ledgers={},
+        risk_manager=risk,
+        agents=agents,
+    )
+
+    item = mock_table.put_item.call_args.kwargs["Item"]
+    assert "agents" in item
+    assert len(item["agents"]) == 3
+    assert item["agents"][0]["name"] == "Orchestrator"
+    assert item["agents"][2]["type"] == "strategy"

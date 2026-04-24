@@ -53,6 +53,11 @@ class TradingStrandsStack(cdk.Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # ── Cost allocation tags ──────────────────────────────────────────
+        cdk.Tags.of(self).add("Project", "TradingStrands")
+        cdk.Tags.of(self).add("Environment", "production")
+        cdk.Tags.of(self).add("ManagedBy", "CDK")
+
         tls_enabled = bool(domain_name and hosted_zone_id)
         # zone_name defaults to domain_name for apex domains
         zone_name = zone_name or domain_name
@@ -70,7 +75,7 @@ class TradingStrandsStack(cdk.Stack):
             self, "TradingStrandsRepo", "trading-strands",
         )
 
-        # DynamoDB table
+        # DynamoDB table — tagged for cost tracking
         table = dynamodb.Table(
             self,
             "TradingStrandsState",
@@ -166,6 +171,7 @@ class TradingStrandsStack(cdk.Stack):
             memory_limit_mib=1024,
             task_role=trading_task_role,
         )
+        cdk.Tags.of(trading_task_def).add("Component", "trading-service")
         trading_log_group = logs.LogGroup(
             self,
             "TradingLogGroup",
@@ -223,6 +229,13 @@ class TradingStrandsStack(cdk.Stack):
                 resources=[user_pool.user_pool_arn],
             )
         )
+        # Dashboard needs Cost Explorer access for cost tracking
+        dashboard_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ce:GetCostAndUsage"],
+                resources=["*"],
+            )
+        )
 
         dashboard_task_def = ecs.FargateTaskDefinition(
             self,
@@ -231,6 +244,7 @@ class TradingStrandsStack(cdk.Stack):
             memory_limit_mib=512,
             task_role=dashboard_task_role,
         )
+        cdk.Tags.of(dashboard_task_def).add("Component", "dashboard-service")
         dashboard_log_group = logs.LogGroup(
             self,
             "DashboardLogGroup",

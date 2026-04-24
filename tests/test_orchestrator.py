@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from trading_strands.auditor.reconciler import AuditConfig, Reconciler
 from trading_strands.broker.types import (
     AccountInfo,
     BrokerPosition,
@@ -18,6 +19,7 @@ from trading_strands.ledger.models import FeeBreakdown, Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
 from trading_strands.orchestrator.engine import Orchestrator
 from trading_strands.risk.manager import RiskConfig, RiskManager
+from trading_strands.whatif.tracker import WhatIfTracker
 
 
 class StubBroker:
@@ -311,3 +313,107 @@ class TestTTAIntegration:
         ledger.high_water_mark = Decimal("60000")  # HWM is 60k, equity is 50k → 16.7% DD
         await orch._tick(1)
         assert call_count == 1
+
+    @pytest.mark.anyio
+    async def test_whatif_marks_to_market(self) -> None:
+        """WhatIfTracker should be marked to market each tick."""
+        tracker = WhatIfTracker()
+        tracker.record_passed(
+            bot_id="test-bot", symbol="AAPL", action="buy",
+            quantity=Decimal("10"), price_at_decision=Decimal("150.00"),
+        )
+
+        broker = StubBroker()
+        broker.prices = {"AAPL": Decimal("160.00")}
+        risk_mgr = RiskManager(RiskConfig())
+        ledger = Ledger(starting_capital=Decimal("50000"))
+        coordinator = TradeCoordinator(
+            broker=broker, risk_manager=risk_mgr,
+            ledgers={"test-bot": ledger},
+        )
+        market_data = MarketDataProvider(broker)
+        orch = Orchestrator(
+            coordinator=coordinator,
+            market_data=market_data,
+            tick_interval=0.0,
+            whatif_tracker=tracker,
+        )
+
+        async def noop(
+            _bid: str, _p: dict[str, Decimal], _l: Ledger,
+        ) -> TradeIntent | None:
+            return None
+
+        orch.register_bot("test-bot", ["AAPL"], noop)
+
+        await orch._tick(0)
+
+        assert tracker.entries[0].current_price == Decimal("160.00")
+        assert tracker.entries[0].unrealized_pnl == Decimal("100.00")
+
+    @pytest.mark.anyio
+    async def test_reconciler_wired(self) -> None:
+        """Reconciler should be accepted by orchestrator without error."""
+        reconciler = Reconciler(AuditConfig())
+        broker = StubBroker()
+        risk_mgr = RiskManager(RiskConfig())
+        coordinator = TradeCoordinator(
+            broker=broker, risk_manager=risk_mgr, ledgers={},
+        )
+        market_data = MarketDataProvider(broker)
+        orch = Orchestrator(
+            coordinator=coordinator,
+            market_data=market_data,
+            tick_interval=0.0,
+            reconciler=reconciler,
+        )
+
+        assert orch._reconciler is reconciler
+        assert orch._reconciler_cycles_failed == 0
+
+    @pytest.mark.anyio
+    async def test_agents_status_includes_all_components(self) -> None:
+        """_build_agents_status should report all system agents."""
+        tracker = WhatIfTracker()
+        reconciler = Reconciler(AuditConfig())
+        broker = StubBroker()
+        risk_mgr = RiskManager(RiskConfig())
+        ledger = Ledger(starting_capital=Decimal("50000"))
+        coordinator = TradeCoordinator(
+            broker=broker, risk_manager=risk_mgr,
+            ledgers={"test-bot": ledger},
+        )
+        market_data = MarketDataProvider(broker)
+        orch = Orchestrator(
+            coordinator=coordinator,
+            market_data=market_data,
+            tick_interval=0.0,
+            whatif_tracker=tracker,
+            reconciler=reconciler,
+        )
+        orch._running = True
+
+        async def noop(
+            _bid: str, _p: dict[str, Decimal], _l: Ledger,
+        ) -> TradeIntent | None:
+            return None
+
+        orch.register_bot("test-bot", ["AAPL"], noop)
+
+        agents = orch._build_agents_status()
+        names = [a["name"] for a in agents]
+
+        assert "Orchestrator" in names
+        assert "RiskManager" in names
+        assert "TradeCoordinator" in names
+        assert "MarketDataProvider" in names
+        assert "Reconciler" in names
+        assert "WhatIfTracker" in names
+        assert "test-bot" in names
+
+        # Check types
+        types = {a["name"]: a["type"] for a in agents}
+        assert types["Orchestrator"] == "core"
+        assert types["Reconciler"] == "auditor"
+        assert types["WhatIfTracker"] == "analysis"
+        assert types["test-bot"] == "strategy"

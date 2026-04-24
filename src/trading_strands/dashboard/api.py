@@ -411,6 +411,77 @@ async def telemetry() -> dict[str, Any]:
     return result
 
 
+# ── Cost tracking ──────────────────────────────────────────────────────
+
+
+@app.get("/api/costs")
+async def cost_summary() -> dict[str, Any]:
+    """Infrastructure cost summary from AWS Cost Explorer.
+
+    Returns cost data tagged with Project=TradingStrands.
+    Requires ce:GetCostAndUsage permissions on the dashboard task role.
+    """
+    try:
+        import datetime
+
+        ce = boto3.client("ce")
+        end = datetime.date.today()
+        start = end - datetime.timedelta(days=30)
+
+        resp = ce.get_cost_and_usage(
+            TimePeriod={
+                "Start": start.isoformat(),
+                "End": end.isoformat(),
+            },
+            Granularity="DAILY",
+            Metrics=["UnblendedCost"],
+            Filter={
+                "Tags": {
+                    "Key": "Project",
+                    "Values": ["TradingStrands"],
+                },
+            },
+            GroupBy=[
+                {"Type": "TAG", "Key": "Component"},
+            ],
+        )
+
+        daily: list[dict[str, Any]] = []
+        total = 0.0
+        for result in resp.get("ResultsByTime", []):
+            period = result["TimePeriod"]
+            day_total = 0.0
+            components: dict[str, float] = {}
+            for group in result.get("Groups", []):
+                key = group["Keys"][0] if group["Keys"] else "untagged"
+                # Strip "Component$" prefix from tag grouping
+                key = key.replace("Component$", "")
+                amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
+                components[key] = amount
+                day_total += amount
+            daily.append({
+                "date": period["Start"],
+                "total": round(day_total, 4),
+                "components": components,
+            })
+            total += day_total
+
+        return {
+            "period": {"start": start.isoformat(), "end": end.isoformat()},
+            "total_cost": round(total, 2),
+            "currency": "USD",
+            "daily": daily,
+        }
+    except Exception as exc:
+        return {
+            "error": str(exc),
+            "period": {},
+            "total_cost": 0,
+            "currency": "USD",
+            "daily": [],
+        }
+
+
 # ── Admin: User Management ─────────────────────────────────────────────
 
 

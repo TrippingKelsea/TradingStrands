@@ -62,6 +62,7 @@ class StatePublisher:
         risk_manager: RiskManager,
         whatif_summary: dict[str, Any] | None = None,
         telemetry: dict[str, object] | None = None,
+        agents: list[dict[str, object]] | None = None,
     ) -> None:
         """Write a full state snapshot to DynamoDB (overwrites previous)."""
         ledger_data: dict[str, Any] = {}
@@ -94,6 +95,9 @@ class StatePublisher:
 
         if telemetry is not None:
             snapshot["telemetry"] = _sanitize_floats(telemetry)
+
+        if agents is not None:
+            snapshot["agents"] = agents
 
         self._table.put_item(Item=snapshot)
 

@@ -137,6 +137,13 @@
   </div>
 </div>
 
+<!-- Agents Tab -->
+<div class="tab-content" id="tab-agents">
+  <div id="agents-content">
+    <div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading agents...</div>
+  </div>
+</div>
+
 <!-- Telemetry Tab -->
 <div class="tab-content" id="tab-telemetry">
   <div id="telemetry-content">
@@ -563,6 +570,76 @@
       status.style.color = 'var(--red)';
     }
   });
+
+  // ── Agents ───────────────────────────────────────────────────────────
+
+  async function loadAgents() {
+    const container = $('agents-content');
+    container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading agents...</div>';
+
+    try {
+      const resp = await fetch('/api/snapshot');
+      const snap = await resp.json();
+      const agents = snap.agents || [];
+
+      if (agents.length === 0) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">No agent data available. The trading service may not be running.</div>';
+        return;
+      }
+
+      // Group by type
+      const groups = {};
+      agents.forEach(a => {
+        const t = a.type || 'other';
+        if (!groups[t]) groups[t] = [];
+        groups[t].push(a);
+      });
+
+      const typeLabels = {
+        core: 'Core Services',
+        auditor: 'Auditor / QC',
+        analysis: 'Analysis',
+        infra: 'Infrastructure',
+        strategy: 'Strategy Bots',
+      };
+
+      let html = '<div class="telem-grid">';
+      for (const [type, list] of Object.entries(groups)) {
+        const label = typeLabels[type] || type;
+        html += `<div class="telem-service ${type === 'strategy' ? 'telem-full' : ''}">`;
+        html += `<h3>${label}</h3>`;
+
+        list.forEach(a => {
+          let statusClass = 'badge-unknown';
+          if (a.status === 'running' || a.status === 'connected') statusClass = 'badge-ok';
+          else if (a.status === 'halted' || a.status === 'error') statusClass = 'badge-error';
+          else if (a.status === 'not_wired' || a.status === 'stopped') statusClass = 'badge-stale';
+
+          html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);">
+            <div>
+              <span style="font-weight:bold;font-size:0.85rem;">${a.name}</span>
+              <span style="color:var(--dim);font-size:0.7rem;margin-left:8px;">${a.detail || ''}</span>
+            </div>
+            <span class="badge ${statusClass}">${a.status}</span>
+          </div>`;
+        });
+
+        html += '</div>';
+      }
+      html += '</div>';
+
+      html += `<div style="text-align:right;padding:8px 0;font-size:0.7rem;color:var(--dim)">
+        Last refreshed: ${new Date().toLocaleTimeString()}
+        <button class="btn" style="margin-left:8px;padding:2px 8px;font-size:0.7rem;" onclick="loadAgents()">Refresh</button>
+      </div>`;
+
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:16px;">Failed to load agents: ' + e.message + '</div>';
+    }
+  }
+
+  window.loadAgents = loadAgents;
 
   // ── Telemetry ─────────────────────────────────────────────────────────
 

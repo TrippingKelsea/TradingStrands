@@ -19,6 +19,7 @@ from pathlib import Path
 import anyio
 import structlog
 
+from trading_strands.auditor.reconciler import AuditConfig, Reconciler
 from trading_strands.broker.alpaca import AlpacaAdapter
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.dashboard.publisher import StatePublisher
@@ -27,6 +28,7 @@ from trading_strands.marketdata.provider import MarketDataProvider
 from trading_strands.orchestrator.engine import Orchestrator
 from trading_strands.risk.manager import RiskConfig, RiskManager
 from trading_strands.strategies.bot import StrategyBot
+from trading_strands.whatif.tracker import WhatIfTracker
 
 logger = structlog.get_logger()
 
@@ -125,11 +127,19 @@ async def run(
         publisher = StatePublisher(table_name)
         await logger.ainfo("publisher.enabled", table=table_name)
 
+    # Auditor reconciler — checks ledger-broker consistency
+    reconciler = Reconciler(AuditConfig())
+
+    # What-if counterfactual tracker — records missed opportunities
+    whatif_tracker = WhatIfTracker()
+
     orchestrator = Orchestrator(
         coordinator=coordinator,
         market_data=market_data,
         tick_interval=tick_interval,
         publisher=publisher,
+        whatif_tracker=whatif_tracker,
+        reconciler=reconciler,
     )
 
     if strategy_path:

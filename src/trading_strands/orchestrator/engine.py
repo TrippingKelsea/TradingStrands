@@ -9,12 +9,14 @@ from decimal import Decimal
 import anyio
 import structlog
 
+from trading_strands.auditor.reconciler import Reconciler
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.coordinator.types import IntentAction, TradeIntent
 from trading_strands.dashboard.publisher import StatePublisher
 from trading_strands.ir.tta import Context, Predicate, evaluate
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
+from trading_strands.whatif.tracker import WhatIfTracker
 
 logger = structlog.get_logger()
 
@@ -52,11 +54,18 @@ class Orchestrator:
         market_data: MarketDataProvider,
         tick_interval: float = 5.0,
         publisher: StatePublisher | None = None,
+        whatif_tracker: WhatIfTracker | None = None,
+        reconciler: Reconciler | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.market_data = market_data
         self.tick_interval = tick_interval
         self._publisher = publisher
+        self._whatif = whatif_tracker
+        self._reconciler = reconciler
+        self._reconciler_cycles_failed: int = 0
+        self._last_reconcile_tick: int = -1
+        self._reconcile_interval: int = 60  # reconcile every N ticks
         self._bots: dict[str, BotRegistration] = {}
         self._symbols: set[str] = set()
         self._running = False
@@ -204,11 +213,53 @@ class Orchestrator:
             except Exception:
                 await logger.aexception("trade.execute.error", bot_id=bot_id)
 
+        # Mark what-if entries to market
+        if self._whatif:
+            self._whatif.mark_to_market(prices)
+
+        # Periodic reconciliation
+        await self._maybe_reconcile(tick_number)
+
         # Save context for cross-predicate evaluation on next tick
         self._prev_ctx = self._build_context(prices, None)
 
         # Publish state snapshot
         self._publish_snapshot(tick_number, prices)
+
+    async def _maybe_reconcile(self, tick: int) -> None:
+        """Run reconciliation periodically to detect ledger-broker drift."""
+        if self._reconciler is None:
+            return
+        if tick - self._last_reconcile_tick < self._reconcile_interval:
+            return
+        self._last_reconcile_tick = tick
+
+        try:
+            broker_positions = await self.market_data._broker.get_positions()
+            pos_check = self._reconciler.reconcile_positions(
+                self.coordinator.ledgers, broker_positions,
+            )
+            if pos_check.status.value == "fail":
+                self._reconciler_cycles_failed += 1
+                logger.warning(
+                    "reconciler.position_mismatch",
+                    details=pos_check.details,
+                    consecutive_failures=self._reconciler_cycles_failed,
+                )
+                if self._reconciler.should_kill_switch(
+                    Decimal("0"), self._reconciler_cycles_failed,
+                ):
+                    self.coordinator.risk_manager.halt_desk()
+                    logger.error("reconciler.kill_switch", reason="position drift")
+                    self._publish_event("killswitch", {
+                        "verb": "halt-and-stop",
+                        "reason": "Reconciler: persistent position mismatch",
+                        "source": "auditor",
+                    })
+            else:
+                self._reconciler_cycles_failed = 0
+        except Exception:
+            logger.exception("reconciler.error")
 
     def _build_context(
         self,
@@ -261,6 +312,101 @@ class Orchestrator:
         except Exception:
             logger.exception("orchestrator.remote_halt.check_error")
 
+    def _build_agents_status(self) -> list[dict[str, object]]:
+        """Build status info for all system agents."""
+        agents: list[dict[str, object]] = []
+
+        # Orchestrator itself
+        agents.append({
+            "name": "Orchestrator",
+            "type": "core",
+            "status": "running" if self._running else "stopped",
+            "detail": f"tick_interval={self.tick_interval}s, bots={len(self._bots)}",
+        })
+
+        # Risk Manager
+        rm = self.coordinator.risk_manager
+        agents.append({
+            "name": "RiskManager",
+            "type": "core",
+            "status": "halted" if rm._desk_halted else "running",
+            "detail": f"halted_bots={len(rm._halted_bots)}",
+        })
+
+        # Trade Coordinator
+        agents.append({
+            "name": "TradeCoordinator",
+            "type": "core",
+            "status": "running",
+            "detail": f"ledgers={len(self.coordinator.ledgers)}",
+        })
+
+        # Market Data Provider
+        agents.append({
+            "name": "MarketDataProvider",
+            "type": "core",
+            "status": self._broker_status,
+            "detail": self._broker_last_error or "ok",
+        })
+
+        # Reconciler (auditor)
+        if self._reconciler:
+            agents.append({
+                "name": "Reconciler",
+                "type": "auditor",
+                "status": "running",
+                "detail": (
+                    f"interval={self._reconcile_interval} ticks, "
+                    f"consecutive_failures={self._reconciler_cycles_failed}"
+                ),
+            })
+        else:
+            agents.append({
+                "name": "Reconciler",
+                "type": "auditor",
+                "status": "not_wired",
+                "detail": "Auditor not configured",
+            })
+
+        # What-If Tracker
+        if self._whatif:
+            agents.append({
+                "name": "WhatIfTracker",
+                "type": "analysis",
+                "status": "running",
+                "detail": (
+                    f"entries={len(self._whatif.entries)}, "
+                    f"taken={len(self._whatif.taken_actions)}"
+                ),
+            })
+        else:
+            agents.append({
+                "name": "WhatIfTracker",
+                "type": "analysis",
+                "status": "not_wired",
+                "detail": "What-if tracking not configured",
+            })
+
+        # State Publisher
+        if self._publisher:
+            agents.append({
+                "name": "StatePublisher",
+                "type": "infra",
+                "status": "running",
+                "detail": f"table={self._publisher._table_name}",
+            })
+
+        # Strategy Bots
+        for bot_id, reg in self._bots.items():
+            agents.append({
+                "name": bot_id,
+                "type": "strategy",
+                "status": "running",
+                "detail": f"symbols={reg.symbols}, tta={'yes' if reg.tta else 'no'}",
+            })
+
+        return agents
+
     def _publish_snapshot(
         self,
         tick: int,
@@ -270,12 +416,15 @@ class Orchestrator:
         if self._publisher is None:
             return
         try:
+            whatif_summary = self._whatif.summary() if self._whatif else None
             self._publisher.publish_snapshot(
                 tick=tick,
                 prices=prices,
                 ledgers=self.coordinator.ledgers,
                 risk_manager=self.coordinator.risk_manager,
+                whatif_summary=whatif_summary,
                 telemetry=self._build_telemetry(tick),
+                agents=self._build_agents_status(),
             )
         except Exception:
             logger.exception("publisher.snapshot.error")
