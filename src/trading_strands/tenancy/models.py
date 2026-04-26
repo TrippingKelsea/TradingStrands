@@ -24,9 +24,13 @@ class Org(BaseModel):
 
     `settings` is intentionally loose — per-org config like session
     max-age, default capital, etc. Validated at read time by the caller.
+
+    extra='ignore' so legacy rows written under the pre-refactor schema
+    (e.g., top-level session_max_age) load cleanly. New fields go under
+    `settings`; old top-level fields are dropped on next write.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     org_id: str
     name: str
@@ -44,9 +48,11 @@ class User(BaseModel):
 
     `display_timezone` is UI-only. All timestamps at the API/DB boundary
     are UTC; this tells the frontend how to format them.
+
+    extra='ignore' to tolerate legacy columns — same rationale as Org.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     user_id: str
     email: str  # format not validated here; see TenancyStore for uniqueness

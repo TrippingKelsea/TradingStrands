@@ -21,9 +21,13 @@ class StrategyStatus(StrEnum):
 
 
 class Strategy(BaseModel):
-    """A trading strategy owned by an org and authored by a user."""
+    """A trading strategy owned by an org and authored by a user.
 
-    model_config = ConfigDict(extra="forbid")
+    extra='ignore' so legacy pre-refactor strategies can be read by
+    bootstrap's delete_legacy_strategies path before being pruned.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     strategy_id: str
     org_id: str

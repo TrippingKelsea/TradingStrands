@@ -106,6 +106,26 @@ def test_ensure_system_org_returns_existing(table: Any) -> None:
     assert org2.org_id == org1.org_id
 
 
+def test_bootstrap_tolerates_legacy_org_rows(table: Any) -> None:
+    """ORG# rows written by the pre-refactor API carry extra columns
+    (session_max_age, no org_type). They must load without error so
+    a system-org check on an existing deploy doesn't crash."""
+
+    import time
+    table.put_item(Item={
+        "pk": "ORG#legacy-1",
+        "org_id": "legacy-1",
+        "name": "Pre-refactor Org",
+        "created_at": int(time.time()),
+        "updated_at": int(time.time()),
+        "session_max_age": 31_536_000,
+        # deliberately missing org_type
+    })
+    # bootstrap scans orgs; this must not raise
+    report = bootstrap(table)
+    assert report.system_org is not None
+
+
 def test_ensure_superwoman_user_adds_missing_membership(table: Any) -> None:
     """If the user exists but isn't a member of system org, add the membership."""
 
