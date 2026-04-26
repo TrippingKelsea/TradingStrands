@@ -28,6 +28,7 @@ class BootstrapReport(NamedTuple):
     superwoman: User
     superwoman_created: bool
     superwoman_membership_added: bool
+    superwoman_sysadmin_granted: bool
     legacy_strategies_deleted: int
 
 
@@ -49,11 +50,19 @@ def ensure_system_org(tenancy: TenancyStore) -> tuple[Org, bool]:
 
 def ensure_superwoman_user(
     tenancy: TenancyStore, system_org: Org,
-) -> tuple[User, bool, bool]:
-    """Return (user, created, membership_added).
+) -> tuple[User, bool, bool, bool]:
+    """Return (user, created, membership_added, sysadmin_granted).
 
-    Creates the superwoman user if missing. Ensures she's a member of
-    the system org (role=orgadmin; NOT sysadmin — grant that separately).
+    First-deploy behavior: if superwoman doesn't exist yet, create her,
+    add her as orgadmin of the system org, AND grant sysadmin. This is
+    how a fresh deploy produces an operable account without the operator
+    having to touch DynamoDB by hand.
+
+    Re-run safety: if superwoman already exists, we DON'T re-grant
+    sysadmin. Once someone deliberately revokes sysadmin (to demote the
+    default account), bootstrap must not un-do that on the next deploy.
+    Grant-on-first-create, never grant-on-rerun, is the rule.
+
     Does NOT touch Cognito — Cognito provisioning happens in CI after
     CDK deploy. If Cognito has no superwoman user, login will fail; if
     Cognito has one, login will find-or-create the matching USER# and
@@ -75,7 +84,14 @@ def ensure_superwoman_user(
     else:
         membership_added = False
 
-    return user, created, membership_added
+    # Sysadmin grant: ONLY on first creation. Do not re-grant on re-runs,
+    # so a revocation stays sticky.
+    sysadmin_granted = False
+    if created and not tenancy.is_sysadmin(user.user_id):
+        tenancy.grant_sysadmin(user.user_id)
+        sysadmin_granted = True
+
+    return user, created, membership_added, sysadmin_granted
 
 
 def delete_legacy_strategies(table: Any) -> int:
@@ -107,9 +123,9 @@ def bootstrap(table: Any) -> BootstrapReport:
 
     tenancy = TenancyStore(table)
     system_org, system_org_created = ensure_system_org(tenancy)
-    superwoman, sw_created, membership_added = ensure_superwoman_user(
-        tenancy, system_org,
-    )
+    (
+        superwoman, sw_created, membership_added, sysadmin_granted,
+    ) = ensure_superwoman_user(tenancy, system_org)
     legacy_count = delete_legacy_strategies(table)
     return BootstrapReport(
         system_org=system_org,
@@ -117,5 +133,6 @@ def bootstrap(table: Any) -> BootstrapReport:
         superwoman=superwoman,
         superwoman_created=sw_created,
         superwoman_membership_added=membership_added,
+        superwoman_sysadmin_granted=sysadmin_granted,
         legacy_strategies_deleted=legacy_count,
     )

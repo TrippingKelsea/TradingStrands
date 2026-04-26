@@ -25,11 +25,15 @@ def test_bootstrap_on_empty_table_creates_everything(table: Any) -> None:
     assert report.superwoman.email == SUPERWOMAN_EMAIL
     assert report.superwoman_created is True
     assert report.superwoman_membership_added is True
+    assert report.superwoman_sysadmin_granted is True
     assert report.legacy_strategies_deleted == 0
 
     tenancy = TenancyStore(table)
     role = tenancy.role_of(report.superwoman.user_id, report.system_org.org_id)
     assert role == Role.ORGADMIN
+    # First-deploy default: superwoman is sysadmin so the operator has
+    # an operable account without hitting DynamoDB by hand.
+    assert tenancy.is_sysadmin(report.superwoman.user_id) is True
 
 
 def test_bootstrap_is_idempotent(table: Any) -> None:
@@ -42,15 +46,26 @@ def test_bootstrap_is_idempotent(table: Any) -> None:
     assert second.superwoman.user_id == first.superwoman.user_id
     assert second.superwoman_created is False
     assert second.superwoman_membership_added is False
+    assert second.superwoman_sysadmin_granted is False  # already granted
     assert second.legacy_strategies_deleted == 0
 
 
-def test_bootstrap_does_not_grant_sysadmin(table: Any) -> None:
-    """Explicit invariant: superwoman is NOT automatically sysadmin."""
+def test_bootstrap_does_not_regrant_sysadmin_after_revocation(
+    table: Any,
+) -> None:
+    """If sysadmin is deliberately revoked, bootstrap must NOT re-grant on
+    the next run. Grant-on-first-create, never grant-on-rerun — otherwise
+    an operator can't demote the default account."""
 
-    report = bootstrap(table)
+    first = bootstrap(table)
+    assert first.superwoman_sysadmin_granted is True
+
     tenancy = TenancyStore(table)
-    assert tenancy.is_sysadmin(report.superwoman.user_id) is False
+    tenancy.revoke_sysadmin(first.superwoman.user_id)
+
+    second = bootstrap(table)
+    assert second.superwoman_sysadmin_granted is False
+    assert tenancy.is_sysadmin(first.superwoman.user_id) is False
 
 
 def test_bootstrap_deletes_legacy_strategies(table: Any) -> None:
@@ -127,17 +142,25 @@ def test_bootstrap_tolerates_legacy_org_rows(table: Any) -> None:
 
 
 def test_ensure_superwoman_user_adds_missing_membership(table: Any) -> None:
-    """If the user exists but isn't a member of system org, add the membership."""
+    """If the user exists but isn't a member of system org, add the membership.
+
+    Critically: a pre-existing user that's missing the membership does
+    NOT get sysadmin auto-granted — grant is first-create-only. The
+    operator who made the user out-of-band had their chance to grant
+    sysadmin explicitly; bootstrap won't elevate them retroactively.
+    """
 
     tenancy = TenancyStore(table)
-    # Create system org without superwoman
     system_org = tenancy.create_org(SYSTEM_ORG_NAME, OrgType.SYSTEM)
-    # Create the user, no membership
     sw = tenancy.create_user(email=SUPERWOMAN_EMAIL)
     assert tenancy.role_of(sw.user_id, system_org.org_id) is None
 
-    user, created, added = ensure_superwoman_user(tenancy, system_org)
+    user, created, added, sysadmin_granted = ensure_superwoman_user(
+        tenancy, system_org,
+    )
     assert user.user_id == sw.user_id
     assert created is False
     assert added is True
+    assert sysadmin_granted is False  # pre-existing user: not granted
     assert tenancy.role_of(user.user_id, system_org.org_id) == Role.ORGADMIN
+    assert tenancy.is_sysadmin(user.user_id) is False

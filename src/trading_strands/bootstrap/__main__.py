@@ -33,7 +33,8 @@ def _main() -> int:
           f"created={report.system_org_created}")
     print(f"  superwoman: {report.superwoman.user_id} ({report.superwoman.email}) "
           f"created={report.superwoman_created} "
-          f"membership_added={report.superwoman_membership_added}")
+          f"membership_added={report.superwoman_membership_added} "
+          f"sysadmin_granted={report.superwoman_sysadmin_granted}")
     print(f"  legacy_strategies_deleted: {report.legacy_strategies_deleted}")
     return 0
 
