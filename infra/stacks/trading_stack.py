@@ -621,6 +621,25 @@ class TradingStrandsStack(cdk.Stack):
             "TradingTaskDef should have an execution role by this point"
         )
 
+        # Env the supervisor and the one-shot reconciler both need to
+        # create/manage per-bot Fargate services. Defined once so the
+        # two Lambdas stay in lockstep.
+        supervisor_env = {
+            "ECS_CLUSTER": cluster.cluster_name,
+            "TASK_DEFINITION_FAMILY": "ts-bot",
+            "CONTAINER_IMAGE": f"{repository.repository_uri}:latest",
+            "TASK_ROLE_ARN": trading_task_role.role_arn,
+            "EXECUTION_ROLE_ARN": bot_exec_role.role_arn,
+            "SUBNET_IDS": ",".join(
+                s.subnet_id for s in vpc.public_subnets
+            ),
+            "SECURITY_GROUP_IDS": bot_task_sg.security_group_id,
+            "LOG_GROUP_NAME": trading_log_group.log_group_name,
+            "DYNAMODB_TABLE": table.table_name,
+            "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+            "SECRETS_MANAGER_SECRET_NAME": alpaca_secret.secret_name,
+        }
+
         strategy_supervisor_fn = lambda_.DockerImageFunction(
             self,
             "StrategySupervisorFunction",
@@ -634,49 +653,37 @@ class TradingStrandsStack(cdk.Stack):
             ),
             memory_size=256,
             timeout=cdk.Duration.minutes(2),
-            environment={
-                "ECS_CLUSTER": cluster.cluster_name,
-                "TASK_DEFINITION_FAMILY": "ts-bot",
-                "CONTAINER_IMAGE": f"{repository.repository_uri}:latest",
-                "TASK_ROLE_ARN": trading_task_role.role_arn,
-                "EXECUTION_ROLE_ARN": bot_exec_role.role_arn,
-                "SUBNET_IDS": ",".join(
-                    s.subnet_id for s in vpc.public_subnets
-                ),
-                "SECURITY_GROUP_IDS": bot_task_sg.security_group_id,
-                "LOG_GROUP_NAME": trading_log_group.log_group_name,
-                "DYNAMODB_TABLE": table.table_name,
-                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
-                "SECRETS_MANAGER_SECRET_NAME": alpaca_secret.secret_name,
-            },
+            environment=supervisor_env,
         )
         cdk.Tags.of(strategy_supervisor_fn).add(
             "Component", "strategy-supervisor",
         )
 
-        # ECS admin on the cluster's services. Register task defs; scope
-        # by resource where we can, * where the API requires it (RTD +
-        # PassRole need resource="*" / role-arn respectively).
-        strategy_supervisor_fn.add_to_role_policy(iam.PolicyStatement(
-            actions=[
-                "ecs:DescribeServices",
-                "ecs:CreateService",
-                "ecs:UpdateService",
-                "ecs:DeleteService",
-                "ecs:RegisterTaskDefinition",
-                "ecs:DescribeTaskDefinition",
-            ],
-            resources=["*"],
-        ))
-        # PassRole is required to create services using the task/exec
-        # roles we defined. Scoped to exactly those two roles.
-        strategy_supervisor_fn.add_to_role_policy(iam.PolicyStatement(
-            actions=["iam:PassRole"],
-            resources=[
-                trading_task_role.role_arn,
-                bot_exec_role.role_arn,
-            ],
-        ))
+        # Shared IAM for supervisor-family Lambdas: ECS admin on the
+        # cluster's services + RegisterTaskDefinition + PassRole scoped
+        # to the two roles per-bot tasks need. Factored so the one-shot
+        # reconciler can get exactly the same grants.
+        def _grant_supervisor_iam(fn: lambda_.IFunction) -> None:
+            fn.add_to_role_policy(iam.PolicyStatement(
+                actions=[
+                    "ecs:DescribeServices",
+                    "ecs:CreateService",
+                    "ecs:UpdateService",
+                    "ecs:DeleteService",
+                    "ecs:RegisterTaskDefinition",
+                    "ecs:DescribeTaskDefinition",
+                ],
+                resources=["*"],
+            ))
+            fn.add_to_role_policy(iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[
+                    trading_task_role.role_arn,
+                    bot_exec_role.role_arn,
+                ],
+            ))
+
+        _grant_supervisor_iam(strategy_supervisor_fn)
 
         # Hook the supervisor to DDB Streams. Batch size 10 so we reconcile
         # quickly without overwhelming ECS API limits. TRIM_HORIZON on
@@ -692,6 +699,36 @@ class TradingStrandsStack(cdk.Stack):
                 retry_attempts=3,
             ),
         )
+
+        # -- One-shot reconciler ---------------------------------------------
+        #
+        # Manually invoked at cutover to bring every active strategy onto
+        # per-bot Fargate (the streams handler starts at LATEST, so
+        # pre-existing strategies don't auto-spawn services). Reuses the
+        # supervisor's reconcile path — one code flow for service creation.
+        # Run dry-run first:
+        #     aws lambda invoke --function-name trading-strands-reconcile-all \
+        #         --payload '{"dry_run": true}' /tmp/out.json
+        reconcile_all_fn = lambda_.DockerImageFunction(
+            self,
+            "ReconcileAllFunction",
+            function_name="trading-strands-reconcile-all",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.supervisor.reconcile_all.handler",
+                ],
+            ),
+            memory_size=256,
+            timeout=cdk.Duration.minutes(5),
+            environment=supervisor_env,
+        )
+        cdk.Tags.of(reconcile_all_fn).add(
+            "Component", "strategy-supervisor",
+        )
+        table.grant_read_data(reconcile_all_fn)
+        _grant_supervisor_iam(reconcile_all_fn)
 
         # -- Outputs ----------------------------------------------------------
 
