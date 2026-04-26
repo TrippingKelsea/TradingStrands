@@ -225,11 +225,15 @@ class TradingStrandsStack(cdk.Stack):
         )
         # Dashboard needs read/write: reads snapshots+events, writes strategies
         table.grant_read_write_data(dashboard_task_role)
-        # Dashboard needs Cognito admin access for user management
+        # Dashboard needs Cognito admin access for user management.
+        # AdminGetUser is needed by /api/admin/users to read enabled/status
+        # for each user on the admin page — without it the UI shows every
+        # user as disabled.
         dashboard_task_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "cognito-idp:ListUsers",
+                    "cognito-idp:AdminGetUser",
                     "cognito-idp:AdminCreateUser",
                     "cognito-idp:AdminDeleteUser",
                     "cognito-idp:AdminSetUserPassword",

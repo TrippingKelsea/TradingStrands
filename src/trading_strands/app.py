@@ -207,11 +207,19 @@ async def run(
                     break
 
             async def _poll_strategies() -> None:
-                """Periodically check DynamoDB for new/changed strategies."""
+                """Periodically check DynamoDB for new/changed strategies.
+
+                Loop is unconditional (no `while orchestrator._running` guard)
+                so it starts polling whether or not orchestrator.run has been
+                scheduled yet. The task group cancels us on shutdown; the
+                body's try/except keeps transient DDB failures from killing
+                the loop.
+                """
+
                 if publisher is None:
                     return
-                while orchestrator._running:
-                    await anyio.sleep(30)
+                await anyio.sleep(1)  # small delay so orchestrator can log first
+                while True:
                     try:
                         strategies = publisher.get_strategies()
                         active_ids = set()
@@ -249,6 +257,7 @@ async def run(
                                 )
                     except Exception:
                         await logger.aexception("strategy_poll.error")
+                    await anyio.sleep(30)
 
             tg.start_soon(_watch_signals)
             tg.start_soon(_poll_strategies)
