@@ -75,6 +75,23 @@ def test_append_lesson_and_read(s3_client: Any) -> None:
     assert "Post-FOMC" in content
 
 
+def test_append_recommendation_and_read(s3_client: Any) -> None:
+    """Review agents (Risk/Compliance/Auditor) write to a distinct file
+    so the UI can surface recommendations separately from lessons."""
+
+    store = _store(s3_client)
+    assert store.read_recommendations() == ""
+    store.append_recommendation("## 2026-04-26 — risk review")
+    store.append_recommendation(
+        "Concentration in NVDA exceeds 40% of equity.",
+    )
+    content = store.read_recommendations()
+    assert "## 2026-04-26" in content
+    assert "NVDA" in content
+    # Lessons file is untouched — separate stream.
+    assert store.read_lessons() == ""
+
+
 def test_compressed_falls_back_to_raw_when_missing(s3_client: Any) -> None:
     """If the end-of-day compactor hasn't run, reading compressed
     returns the raw daily content so downstream readers aren't

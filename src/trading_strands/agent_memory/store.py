@@ -96,6 +96,13 @@ class AgentMemoryStore:
     def _lessons_key(self) -> str:
         return f"{self._prefix}/lessons.md"
 
+    def _recommendations_key(self) -> str:
+        """Recommendations file — mirror of lessons.md for review
+        agents (Risk, Compliance, Auditor). Kept as a separate file so
+        consumers can filter UI or notifications by type."""
+
+        return f"{self._prefix}/recommendations.md"
+
     # ── Reads ─────────────────────────────────────────────────────────
 
     def _read(self, key: str) -> str:
@@ -187,6 +194,25 @@ class AgentMemoryStore:
         if not text.endswith("\n"):
             text = text + "\n"
         self._write(self._lessons_key(), current + text)
+
+    def read_recommendations(self) -> str:
+        return self._read(self._recommendations_key())
+
+    def append_recommendation(self, text: str) -> None:
+        """Append a block to recommendations.md.
+
+        Review agents (Risk/Compliance/Auditor) write here. The file
+        is append-only so orgadmins see the full history of what was
+        flagged over time — they reference past recommendations when
+        deciding whether the same issue is recurring.
+        """
+
+        current = self._read(self._recommendations_key())
+        if current and not current.endswith("\n"):
+            current += "\n"
+        if not text.endswith("\n"):
+            text = text + "\n"
+        self._write(self._recommendations_key(), current + text)
 
     # ── Range / recent days helper ────────────────────────────────────
 
