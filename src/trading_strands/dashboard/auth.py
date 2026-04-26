@@ -1,4 +1,27 @@
-"""Authentication module — Cognito-backed auth with session cookies."""
+"""Authentication — Cognito login, session cookies, and request gating.
+
+Responsibilities:
+  - Validate email/password against Cognito.
+  - Find or create the corresponding `USER#` record in DynamoDB so every
+    authenticated user has a first-class identity (survives Cognito rebuilds).
+  - Issue a signed session cookie carrying `user_id` + `active_org_id`.
+  - Enforce 'you must be logged in' at the middleware boundary. Per-endpoint
+    authorization (viewer vs operator vs orgadmin etc.) is handled by the
+    authz module via the Principal on request.state — this file only checks
+    authentication, not authorization.
+
+Session cookie shape (v2 — introduced with the privacy refactor):
+    {
+        "user_id":        <our USER# id>,            # REQUIRED; v1 sessions lack this
+        "active_org_id":  <org_id or None>,           # scope of current requests
+        "email":          <cognito email>,            # cached for display
+        "access_token":   <cognito access token>,     # kept for lower-level calls
+        "login_at":       <unix ts>,
+    }
+
+v1 sessions (those without `user_id`) are invalidated on load — users
+must re-login. Acceptable because v1 was a pre-alpha shape.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +38,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+from trading_strands.tenancy.store import TenancyStore
+
 logger = structlog.get_logger()
 
 # Session cookie name
@@ -28,16 +53,6 @@ URL_TOKEN_MAX_AGE = 60  # 60 seconds
 
 # Paths that don't require authentication
 PUBLIC_PATHS = frozenset({"/health", "/login", "/auth/login", "/auth/logout"})
-
-# Write operations that require the operator role
-WRITE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
-READ_ONLY_API_PATHS = frozenset({
-    "/api/snapshot", "/api/events", "/api/stream",
-    "/api/strategies", "/api/telemetry",
-})
-
-# Admin paths require operator role regardless of HTTP method
-ADMIN_PATH_PREFIX = "/api/admin/"
 
 # Module-level Cognito client (set during startup or mocked in tests)
 _cognito_client: Any = None
@@ -103,8 +118,13 @@ def decode_url_token(token: str) -> dict[str, Any] | None:
 # ── Authentication ─────────────────────────────────────────────────────
 
 
-def authenticate(email: str, password: str) -> dict[str, Any] | None:
-    """Authenticate a user against Cognito and return user info + tokens."""
+def _cognito_login(email: str, password: str) -> dict[str, Any] | None:
+    """Raw Cognito auth. Returns the access token + email, or None on failure.
+
+    Pulled out of `authenticate()` so the tenancy-store lookup can be tested
+    independently of Cognito.
+    """
+
     client_id = os.environ.get("COGNITO_CLIENT_ID", "")
     cognito = _get_cognito_client()
 
@@ -129,33 +149,91 @@ def authenticate(email: str, password: str) -> dict[str, Any] | None:
     tokens = auth_result.get("AuthenticationResult", {})
     access_token = tokens.get("AccessToken", "")
 
-    # Get user attributes
     try:
         user_resp = cognito.get_user(AccessToken=access_token)
         attrs = {a["Name"]: a["Value"] for a in user_resp.get("UserAttributes", [])}
+        cognito_sub = attrs.get("sub") or user_resp.get("Username", "")
     except Exception:
         logger.exception("auth.get_user_failed")
         attrs = {}
+        cognito_sub = ""
 
     return {
         "email": attrs.get("email", email),
-        "role": attrs.get("custom:role", "viewer"),
-        "org_id": attrs.get("custom:org_id", ""),
+        "cognito_sub": cognito_sub,
         "access_token": access_token,
-        "refresh_token": tokens.get("RefreshToken", ""),
+    }
+
+
+def authenticate(
+    email: str, password: str, tenancy: TenancyStore,
+) -> dict[str, Any] | None:
+    """Full login: Cognito verify + find-or-create local USER# + build session dict.
+
+    The `tenancy` argument is injected so tests can pass a store backed by
+    moto without having to mock DynamoDB globally. On a legitimate successful
+    login we guarantee a `USER#` record exists for this email; the caller
+    then calls `create_session_cookie(user_info)` with the returned dict.
+    """
+
+    cognito_result = _cognito_login(email, password)
+    if cognito_result is None:
+        return None
+
+    normalized_email = cognito_result["email"]
+
+    existing = tenancy.find_user_by_email(normalized_email)
+    if existing is not None:
+        user = existing
+    else:
+        # Cognito said yes but we have no local record. Provision one.
+        user = tenancy.create_user(
+            email=normalized_email,
+            cognito_sub=cognito_result["cognito_sub"] or None,
+        )
+        logger.info(
+            "auth.user_provisioned", email=normalized_email, user_id=user.user_id,
+        )
+
+    # Resolve active org: prefer last-active (if still valid), else
+    # auto-select if user has exactly one membership, else None.
+    memberships = tenancy.memberships_for_user(user.user_id)
+    member_org_ids = {m.org_id for m in memberships}
+    active_org_id: str | None
+    if user.last_active_org_id and user.last_active_org_id in member_org_ids:
+        active_org_id = user.last_active_org_id
+    elif len(memberships) == 1:
+        active_org_id = memberships[0].org_id
+    else:
+        active_org_id = None
+
+    return {
+        "user_id": user.user_id,
+        "email": normalized_email,
+        "active_org_id": active_org_id,
+        "access_token": cognito_result["access_token"],
         "login_at": int(time.time()),
     }
 
 
 def create_session_cookie(user_info: dict[str, Any]) -> str:
-    """Create a signed session cookie value."""
+    """Sign and return the session cookie value for the given session dict.
+
+    Accepts any subset of the session fields plus a required `user_id` —
+    callers who want to update a single field (e.g., switch active org)
+    can pass an updated dict without re-running authenticate().
+    """
+
+    if not user_info.get("user_id"):
+        msg = "create_session_cookie requires user_id"
+        raise ValueError(msg)
     serializer = _get_serializer()
     return serializer.dumps({
-        "email": user_info["email"],
-        "role": user_info["role"],
-        "org_id": user_info.get("org_id", ""),
-        "access_token": user_info["access_token"],
-        "login_at": user_info["login_at"],
+        "user_id": user_info["user_id"],
+        "email": user_info.get("email", ""),
+        "active_org_id": user_info.get("active_org_id"),
+        "access_token": user_info.get("access_token", ""),
+        "login_at": user_info.get("login_at", int(time.time())),
     }, salt="session")
 
 
@@ -163,68 +241,49 @@ def validate_session(
     cookie_value: str,
     max_age: int = SESSION_MAX_AGE_DEFAULT,
 ) -> dict[str, Any] | None:
-    """Validate and decode a session cookie. Returns user info or None."""
+    """Decode + verify a session cookie. Returns the session dict, or None
+    if the signature is bad, the cookie is expired, or the cookie is in
+    the pre-refactor v1 shape (no `user_id`)."""
+
     serializer = _get_serializer()
     try:
         data = serializer.loads(cookie_value, salt="session", max_age=max_age)
-        return dict(data)
     except (BadSignature, SignatureExpired):
         return None
 
-
-def _is_read_only_request(request: Request) -> bool:
-    """Check if this is a read-only request that a viewer can make."""
-    if request.method == "GET":
-        # GET on API strategy detail like /api/strategies/abc is also read-only
-        path = request.url.path
-        if path in READ_ONLY_API_PATHS:
-            return True
-        # /api/strategies/{id} is read-only for GET
-        if path.startswith("/api/strategies/") and "/" not in path[17:]:
-            return True
-        # Root page and non-API GETs are read-only
-        if not path.startswith("/api/") or path == "/":
-            return True
-    return False
+    if not isinstance(data, dict) or not data.get("user_id"):
+        # v1 cookie or tampering — force re-login.
+        return None
+    return dict(data)
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Middleware that enforces authentication via session cookies."""
+    """Authenticate only. Authorization is done per-endpoint via authz.can().
+
+    On a valid session cookie we attach the decoded session dict to
+    `request.state.session`. Endpoint handlers then call a dependency that
+    builds a Principal from that session + a fresh DynamoDB read and passes
+    the result to authz. Role-string checks at the middleware level were
+    removed — they were coarse, wrong in places, and violated deny-by-default.
+    """
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint,
     ) -> Response:
         path = request.url.path
 
-        # Skip auth for public paths
         if path in PUBLIC_PATHS:
             return await call_next(request)
 
-        # Check for valid session
         session_cookie = request.cookies.get(SESSION_COOKIE)
         if not session_cookie:
             return self._unauthorized(request)
 
-        user = validate_session(session_cookie)
-        if user is None:
+        session = validate_session(session_cookie)
+        if session is None:
             return self._unauthorized(request)
 
-        # Admin paths require operator role
-        if path.startswith(ADMIN_PATH_PREFIX) and user.get("role") != "operator":
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Admin access requires operator role"},
-            )
-
-        # Role-based access: viewers can only read
-        if user.get("role") == "viewer" and not _is_read_only_request(request):
-            return JSONResponse(
-                status_code=403,
-                content={"detail": "Viewer role cannot perform write operations"},
-            )
-
-        # Attach user info to request state for handlers to use
-        request.state.user = user
+        request.state.session = session
         return await call_next(request)
 
     def _unauthorized(self, request: Request) -> Response:

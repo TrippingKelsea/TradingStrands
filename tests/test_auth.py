@@ -1,106 +1,116 @@
-"""Tests for the authentication module."""
+"""Tests for authentication, login flow, and v1-session invalidation.
+
+Uses moto for the DDB layer (same as dashboard tests) so the end-to-end
+login → tenancy provisioning → session cookie path exercises real code.
+Cognito is mocked via a patch on `trading_strands.dashboard.auth.boto3`.
+"""
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import boto3
 import pytest
 from fastapi.testclient import TestClient
+from moto import mock_aws
+
+os.environ.setdefault("COGNITO_USER_POOL_ID", "us-west-2_testpool")
+os.environ.setdefault("COGNITO_CLIENT_ID", "testclientid")
+os.environ.setdefault("COGNITO_CLIENT_SECRET", "testclientsecret")
+os.environ.setdefault("DYNAMODB_TABLE", "trading-strands-state")
+os.environ.setdefault("SESSION_SECRET", "test-secret")
 
 
-@pytest.fixture()
-def _mock_boto3():
-    with patch("trading_strands.dashboard.api.boto3") as mock:
-        table = MagicMock()
-        table.get_item.return_value = {}
-        table.scan.return_value = {"Items": []}
-        mock.resource.return_value.Table.return_value = table
-        yield mock
+@pytest.fixture(autouse=True)
+def _reset_clients() -> Iterator[None]:
+    """Reset lazy module singletons between tests."""
+
+    import trading_strands.dashboard.auth as auth_mod
+    auth_mod._cognito_client = None
+    auth_mod._serializer = None
+    yield
+    auth_mod._cognito_client = None
+    auth_mod._serializer = None
 
 
-@pytest.fixture()
-def _mock_cognito():
-    with patch("trading_strands.dashboard.auth.boto3") as mock:
-        yield mock
+def _create_table() -> Any:
+    ddb = boto3.resource("dynamodb", region_name="us-west-2")
+    ddb.create_table(
+        TableName="trading-strands-state",
+        KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    return ddb.Table("trading-strands-state")
 
 
-@pytest.fixture()
-def _mock_auth_config():
-    with patch.dict("os.environ", {
-        "COGNITO_USER_POOL_ID": "us-west-2_testpool",
-        "COGNITO_CLIENT_ID": "testclientid",
-        "COGNITO_CLIENT_SECRET": "testclientsecret",
-    }):
-        yield
+# ── Public routes ─────────────────────────────────────────────────────
 
 
-# ── Public routes don't require auth ──────────────────────────────────
+def test_health_no_auth_required() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
 
 
-def test_health_no_auth_required(_mock_boto3: None, _mock_auth_config: None) -> None:
-    from trading_strands.dashboard.api import app
+def test_login_page_no_auth_required() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
-    resp = client.get("/health")
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
-
-
-def test_login_page_no_auth_required(
-    _mock_boto3: None, _mock_auth_config: None,
-) -> None:
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)
-    resp = client.get("/login", follow_redirects=False)
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
+        client = TestClient(app)
+        resp = client.get("/login", follow_redirects=False)
+        assert resp.status_code == 200
 
 
-# ── Protected routes redirect to login ────────────────────────────────
+# ── Unauthenticated access ────────────────────────────────────────────
 
 
-def test_dashboard_redirects_without_auth(
-    _mock_boto3: None, _mock_auth_config: None,
-) -> None:
-    from trading_strands.dashboard.api import app
+def test_dashboard_redirects_without_auth() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
-    resp = client.get("/", follow_redirects=False)
-    assert resp.status_code == 307
-    assert "/login" in resp.headers["location"]
-
-
-def test_api_returns_401_without_auth(
-    _mock_boto3: None, _mock_auth_config: None,
-) -> None:
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)
-    resp = client.get("/api/snapshot")
-    assert resp.status_code == 401
+        client = TestClient(app)
+        resp = client.get("/", follow_redirects=False)
+        assert resp.status_code == 307
+        assert "/login" in resp.headers["location"]
 
 
-def test_sse_returns_401_without_auth(
-    _mock_boto3: None, _mock_auth_config: None,
-) -> None:
-    from trading_strands.dashboard.api import app
+def test_api_returns_401_without_auth() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
-    resp = client.get("/api/stream")
-    assert resp.status_code == 401
+        client = TestClient(app)
+        resp = client.get("/api/snapshot")
+        assert resp.status_code == 401
+
+
+def test_sse_returns_401_without_auth() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/api/stream")
+        assert resp.status_code == 401
 
 
 # ── Login flow ────────────────────────────────────────────────────────
 
 
-def test_login_success(
-    _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
-) -> None:
-    import trading_strands.dashboard.auth as auth_mod
+def _mock_cognito_success(email: str = "test@example.com") -> MagicMock:
+    """Produce a Cognito client mock that returns a successful auth."""
 
-    auth_mod._cognito_client = _mock_cognito.client.return_value
-    cognito = _mock_cognito.client.return_value
+    cognito = MagicMock()
     cognito.initiate_auth.return_value = {
         "AuthenticationResult": {
             "IdToken": "fake.id.token",
@@ -109,184 +119,143 @@ def test_login_success(
         },
     }
     cognito.get_user.return_value = {
-        "Username": "testuser",
+        "Username": f"{email}-sub",
         "UserAttributes": [
-            {"Name": "email", "Value": "test@example.com"},
-            {"Name": "custom:role", "Value": "operator"},
+            {"Name": "email", "Value": email},
+            {"Name": "sub", "Value": f"{email}-sub"},
         ],
     }
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)
-    resp = client.post("/auth/login", data={
-        "email": "test@example.com",
-        "password": "TestPass123!",
-    }, follow_redirects=False)
-
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/"
-    assert "session" in resp.cookies
+    return cognito
 
 
-def test_login_failure(
-    _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
-) -> None:
-    import trading_strands.dashboard.auth as auth_mod
+def test_login_success_creates_user_and_sets_session() -> None:
+    cognito = _mock_cognito_success("test@example.com")
 
-    auth_mod._cognito_client = _mock_cognito.client.return_value
-    cognito = _mock_cognito.client.return_value
+    with mock_aws(), patch(
+        "trading_strands.dashboard.auth.boto3"
+    ) as mock_auth_boto3:
+        _create_table()
+        mock_auth_boto3.client.return_value = cognito
+
+        from trading_strands.dashboard.api import app
+        from trading_strands.tenancy.store import TenancyStore
+
+        client = TestClient(app)
+        resp = client.post(
+            "/auth/login",
+            data={"email": "test@example.com", "password": "x"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+        assert "session" in resp.cookies
+
+        # USER# record should exist in DynamoDB.
+        ddb = boto3.resource("dynamodb", region_name="us-west-2")
+        store = TenancyStore(ddb.Table("trading-strands-state"))
+        user = store.find_user_by_email("test@example.com")
+        assert user is not None
+
+
+def test_login_idempotent_for_existing_user() -> None:
+    """Second login should not create a second USER# record."""
+
+    cognito = _mock_cognito_success("test@example.com")
+
+    with mock_aws(), patch(
+        "trading_strands.dashboard.auth.boto3"
+    ) as mock_auth_boto3:
+        _create_table()
+        mock_auth_boto3.client.return_value = cognito
+
+        from trading_strands.dashboard.api import app
+        from trading_strands.tenancy.store import TenancyStore
+
+        client = TestClient(app)
+        client.post(
+            "/auth/login",
+            data={"email": "test@example.com", "password": "x"},
+            follow_redirects=False,
+        )
+        # Drop cookies so the second call goes through login again.
+        client2 = TestClient(app)
+        client2.post(
+            "/auth/login",
+            data={"email": "test@example.com", "password": "x"},
+            follow_redirects=False,
+        )
+
+        ddb = boto3.resource("dynamodb", region_name="us-west-2")
+        store = TenancyStore(ddb.Table("trading-strands-state"))
+        users = [u for u in store.list_users() if u.email == "test@example.com"]
+        assert len(users) == 1
+
+
+def test_login_failure_redirects_with_signed_error_token() -> None:
+    cognito = MagicMock()
     cognito.initiate_auth.side_effect = Exception("NotAuthorizedException")
 
-    from trading_strands.dashboard.api import app
+    with mock_aws(), patch(
+        "trading_strands.dashboard.auth.boto3"
+    ) as mock_auth_boto3:
+        _create_table()
+        mock_auth_boto3.client.return_value = cognito
 
-    client = TestClient(app)
-    resp = client.post("/auth/login", data={
-        "email": "test@example.com",
-        "password": "wrong",
-    }, follow_redirects=False)
+        from trading_strands.dashboard.api import app
+        from trading_strands.dashboard.auth import decode_url_token
 
-    assert resp.status_code == 303
-    location = resp.headers["location"]
-    assert "?t=" in location
-    # Verify the signed token decodes to the error message
-    from trading_strands.dashboard.auth import decode_url_token
-
-    token = location.split("?t=")[1]
-    data = decode_url_token(token)
-    assert data is not None
-    assert data["error"] == "Invalid email or password"
-
-
-def test_logout_clears_session(
-    _mock_boto3: None, _mock_auth_config: None,
-) -> None:
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)
-    resp = client.post("/auth/logout", follow_redirects=False)
-    assert resp.status_code == 303
-    assert resp.headers["location"] == "/login"
-    # Session cookie should be deleted (set to empty or max-age=0)
-    assert "session" in resp.headers.get("set-cookie", "")
+        client = TestClient(app)
+        resp = client.post(
+            "/auth/login",
+            data={"email": "test@example.com", "password": "wrong"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+        assert "?t=" in location
+        token = location.split("?t=")[1]
+        decoded = decode_url_token(token)
+        assert decoded is not None
+        assert decoded["error"] == "Invalid email or password"
 
 
-# ── Role-based access ────────────────────────────────────────────────
+def test_logout_clears_session() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.post("/auth/logout", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/login"
+        assert "session" in resp.headers.get("set-cookie", "")
 
 
-def test_viewer_cannot_halt(
-    _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
-) -> None:
-    """Viewer role should be rejected from write endpoints."""
-    import trading_strands.dashboard.auth as auth_mod
-
-    auth_mod._cognito_client = _mock_cognito.client.return_value
-    cognito = _mock_cognito.client.return_value
-
-    # Login as viewer
-    cognito.initiate_auth.return_value = {
-        "AuthenticationResult": {
-            "IdToken": "fake.id.token",
-            "AccessToken": "viewer.access.token",
-            "RefreshToken": "fake.refresh.token",
-        },
-    }
-    cognito.get_user.return_value = {
-        "Username": "viewer",
-        "UserAttributes": [
-            {"Name": "email", "Value": "viewer@example.com"},
-            {"Name": "custom:role", "Value": "viewer"},
-        ],
-    }
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)
-    # Login
-    login_resp = client.post("/auth/login", data={
-        "email": "viewer@example.com",
-        "password": "ViewerPass123!",
-    }, follow_redirects=False)
-    session_cookie = login_resp.cookies.get("session")
-
-    # Try to halt — should be forbidden
-    client.cookies.set("session", session_cookie)
-    resp = client.post("/api/halt")
-    assert resp.status_code == 403
+# ── Authenticated access ─────────────────────────────────────────────
 
 
-def test_viewer_cannot_access_admin(
-    _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
-) -> None:
-    """Viewer role should be rejected from admin endpoints."""
-    import trading_strands.dashboard.auth as auth_mod
+def test_login_then_read_snapshot() -> None:
+    """End-to-end: login, then the resulting cookie works on /api/snapshot."""
 
-    auth_mod._cognito_client = _mock_cognito.client.return_value
-    cognito = _mock_cognito.client.return_value
+    cognito = _mock_cognito_success("viewer@example.com")
 
-    cognito.initiate_auth.return_value = {
-        "AuthenticationResult": {
-            "IdToken": "fake.id.token",
-            "AccessToken": "viewer.access.token",
-            "RefreshToken": "fake.refresh.token",
-        },
-    }
-    cognito.get_user.return_value = {
-        "Username": "viewer",
-        "UserAttributes": [
-            {"Name": "email", "Value": "viewer@example.com"},
-            {"Name": "custom:role", "Value": "viewer"},
-        ],
-    }
+    with mock_aws(), patch(
+        "trading_strands.dashboard.auth.boto3"
+    ) as mock_auth_boto3:
+        _create_table()
+        mock_auth_boto3.client.return_value = cognito
 
-    from trading_strands.dashboard.api import app
+        from trading_strands.dashboard.api import app
 
-    client = TestClient(app)
-    login_resp = client.post("/auth/login", data={
-        "email": "viewer@example.com",
-        "password": "ViewerPass123!",
-    }, follow_redirects=False)
-    session_cookie = login_resp.cookies.get("session")
+        client = TestClient(app)
+        login_resp = client.post(
+            "/auth/login",
+            data={"email": "viewer@example.com", "password": "x"},
+            follow_redirects=False,
+        )
+        session = login_resp.cookies.get("session")
+        assert session is not None
 
-    client.cookies.set("session", session_cookie)
-    resp = client.get("/api/admin/users")
-    assert resp.status_code == 403
-    assert "operator" in resp.json()["detail"].lower()
-
-
-def test_viewer_can_read_snapshot(
-    _mock_boto3: None, _mock_cognito: None, _mock_auth_config: None,
-) -> None:
-    """Viewer role should be able to read endpoints."""
-    import trading_strands.dashboard.auth as auth_mod
-
-    auth_mod._cognito_client = _mock_cognito.client.return_value
-    cognito = _mock_cognito.client.return_value
-
-    cognito.initiate_auth.return_value = {
-        "AuthenticationResult": {
-            "IdToken": "fake.id.token",
-            "AccessToken": "viewer.access.token",
-            "RefreshToken": "fake.refresh.token",
-        },
-    }
-    cognito.get_user.return_value = {
-        "Username": "viewer",
-        "UserAttributes": [
-            {"Name": "email", "Value": "viewer@example.com"},
-            {"Name": "custom:role", "Value": "viewer"},
-        ],
-    }
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)
-    login_resp = client.post("/auth/login", data={
-        "email": "viewer@example.com",
-        "password": "ViewerPass123!",
-    }, follow_redirects=False)
-    session_cookie = login_resp.cookies.get("session")
-
-    client.cookies.set("session", session_cookie)
-    resp = client.get("/api/snapshot")
-    assert resp.status_code == 200
+        client.cookies.set("session", session)
+        resp = client.get("/api/snapshot")
+        assert resp.status_code == 200

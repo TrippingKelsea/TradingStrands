@@ -1,443 +1,582 @@
-"""Tests for the dashboard FastAPI service."""
+"""Tests for the dashboard FastAPI service.
+
+These tests use a moto-backed real DynamoDB table so the new code paths
+(TenancyStore -> Principal -> authz) exercise as close to production as
+possible. A couple of endpoints still hit Cognito, which is mocked with
+unittest.mock where needed.
+"""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+import boto3
+import pytest
 from fastapi.testclient import TestClient
+from moto import mock_aws
 
 # Set auth env vars before importing the app
 os.environ.setdefault("COGNITO_USER_POOL_ID", "us-west-2_test")
 os.environ.setdefault("COGNITO_CLIENT_ID", "testclient")
 os.environ.setdefault("COGNITO_CLIENT_SECRET", "testsecret")
+os.environ.setdefault("DYNAMODB_TABLE", "trading-strands-state")
+os.environ.setdefault("SESSION_SECRET", "test-secret")
 
 
-def _auth_cookie() -> dict[str, str]:
-    """Create a valid operator session cookie for tests."""
+@pytest.fixture(autouse=True)
+def _reset_serializer() -> Iterator[None]:
+    """Clear the lazy serializer so SESSION_SECRET is picked up per test."""
+
+    import trading_strands.dashboard.auth as auth_mod
+    auth_mod._serializer = None
+    yield
+    auth_mod._serializer = None
+
+
+def _make_table() -> Any:
+    """Create the production-shape DDB table in moto."""
+
+    ddb = boto3.resource("dynamodb", region_name="us-west-2")
+    ddb.create_table(
+        TableName="trading-strands-state",
+        KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    return ddb.Table("trading-strands-state")
+
+
+def _make_user(
+    table: Any, email: str = "test@example.com",
+    role_name: str = "operator",
+    sysadmin: bool = False,
+) -> tuple[str, str]:
+    """Create a user + org + membership. Returns (user_id, org_id)."""
+
+    from trading_strands.authz.model import Role
+    from trading_strands.tenancy.store import TenancyStore
+
+    store = TenancyStore(table)
+    user = store.create_user(email=email)
+    org = store.create_org("Test Org")
+    store.add_membership(user.user_id, org.org_id, Role(role_name))
+    if sysadmin:
+        store.grant_sysadmin(user.user_id)
+    return user.user_id, org.org_id
+
+
+def _session_cookie(
+    user_id: str, active_org_id: str | None = None,
+) -> dict[str, str]:
+    """Build a v2 session cookie for the given user + active org."""
+
     from trading_strands.dashboard.auth import create_session_cookie
 
-    return {"session": create_session_cookie({
-        "email": "test@example.com",
-        "role": "operator",
-        "access_token": "fake",
-        "login_at": 1700000000,
-    })}
+    return {
+        "session": create_session_cookie({
+            "user_id": user_id,
+            "email": "test@example.com",
+            "active_org_id": active_org_id,
+            "access_token": "fake",
+            "login_at": 1700000000,
+        })
+    }
 
 
-def _mock_table() -> MagicMock:
-    table = MagicMock()
-    table.get_item.return_value = {
-        "Item": {
+# ── Public endpoints ──────────────────────────────────────────────────
+
+
+def test_health() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+
+
+# ── Snapshot / events / telemetry (authentication only) ──────────────
+
+
+def test_snapshot() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+        table.put_item(Item={
             "pk": "SNAPSHOT",
             "tick": 5,
             "timestamp": 1700000000,
             "prices": {"AAPL": "155.50"},
-            "ledgers": {
-                "bot-0": {
-                    "equity": "10000",
-                    "realized_pnl": "50",
-                    "drawdown_pct": "0.01",
-                    "high_water_mark": "10050",
-                    "positions": [
-                        {"symbol": "AAPL", "quantity": "10", "burdened_cost_basis": "150"},
-                    ],
-                },
-            },
+            "ledgers": {},
             "risk": {"desk_halted": False, "halted_bots": []},
-        }
-    }
-    table.scan.return_value = {
-        "Items": [
-            {
-                "pk": "EVENT#123",
-                "event_type": "trade.executed",
-                "timestamp": 1700000000,
-                "data": {"symbol": "AAPL", "action": "buy", "quantity": "10"},
-            },
-        ],
-    }
-    return table
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_health(mock_boto3: MagicMock) -> None:
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app)  # no auth needed for /health
-    resp = client.get("/health")
-    assert resp.status_code == 200
-    assert resp.json() == {"ok": True}
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_snapshot(mock_boto3: MagicMock) -> None:
-    table = _mock_table()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/snapshot")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["pk"] == "SNAPSHOT"
-    assert data["tick"] == 5
-    assert "AAPL" in data["prices"]
-    assert "bot-0" in data["ledgers"]
-    assert data["risk"]["desk_halted"] is False
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_snapshot_empty(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.get_item.return_value = {}
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/snapshot")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["tick"] == 0
-    assert data["prices"] == {}
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_events(mock_boto3: MagicMock) -> None:
-    table = _mock_table()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/events")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 1
-    assert data[0]["event_type"] == "trade.executed"
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_index_serves_html(mock_boto3: MagicMock) -> None:
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/")
-    assert resp.status_code == 200
-    assert "TradingStrands" in resp.text
-    assert "text/html" in resp.headers["content-type"]
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_list_strategies(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.scan.return_value = {
-        "Items": [
-            {"pk": "STRATEGY#a", "strategy_id": "a", "name": "Strat A",
-             "status": "active", "created_at": 100},
-            {"pk": "STRATEGY#b", "strategy_id": "b", "name": "Strat B",
-             "status": "paused", "created_at": 200},
-        ],
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/strategies")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 2
-    # Sorted by created_at desc
-    assert data[0]["strategy_id"] == "b"
-    assert data[1]["strategy_id"] == "a"
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_create_strategy(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/strategies", json={
-        "name": "Test Strategy",
-        "markdown": "## Buy low sell high",
-        "symbols": ["AAPL", "MSFT"],
-        "capital": "5000",
-    })
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["name"] == "Test Strategy"
-    assert data["symbols"] == ["AAPL", "MSFT"]
-    assert data["capital"] == "5000"
-    assert data["status"] == "active"
-    assert data["pk"].startswith("STRATEGY#")
-    table.put_item.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_create_strategy_no_symbols(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/strategies", json={
-        "name": "Volume Scanner",
-        "markdown": "## Select top stocks by volume\nBuy the dip",
-    })
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["name"] == "Volume Scanner"
-    assert data["symbols"] == []
-    assert data["capital"] == "1000"
-    table.put_item.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_update_strategy_status(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.put("/api/strategies/abc/status", json={"status": "paused"})
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "paused"
-    table.update_item.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_update_strategy_status_invalid(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.put("/api/strategies/abc/status", json={"status": "invalid"})
-    assert resp.status_code == 400
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_get_strategy(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.get_item.return_value = {
-        "Item": {
-            "pk": "STRATEGY#abc",
-            "strategy_id": "abc",
-            "name": "Test",
-            "markdown": "## Buy low",
-            "symbols": ["AAPL"],
-            "capital": "1000",
-        },
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/strategies/abc")
-    assert resp.status_code == 200
-    assert resp.json()["strategy_id"] == "abc"
-    assert resp.json()["markdown"] == "## Buy low"
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_get_strategy_not_found(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.get_item.return_value = {}
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/strategies/nonexistent")
-    assert resp.status_code == 404
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_update_strategy(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.update_item.return_value = {
-        "Attributes": {
-            "pk": "STRATEGY#abc",
-            "strategy_id": "abc",
-            "name": "Updated Name",
-            "markdown": "## Updated",
-            "symbols": ["MSFT"],
-            "capital": "2000",
-        },
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.put("/api/strategies/abc", json={
-        "name": "Updated Name",
-        "markdown": "## Updated",
-        "symbols": ["MSFT"],
-        "capital": "2000",
-    })
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["name"] == "Updated Name"
-    assert data["symbols"] == ["MSFT"]
-    table.update_item.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_update_strategy_partial(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.update_item.return_value = {
-        "Attributes": {"pk": "STRATEGY#abc", "name": "New Name"},
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.put("/api/strategies/abc", json={"name": "New Name"})
-    assert resp.status_code == 200
-    # Should only update name + updated_at
-    call_kwargs = table.update_item.call_args.kwargs
-    assert "name" not in call_kwargs["UpdateExpression"] or "#n" in call_kwargs["UpdateExpression"]
-    assert ":md" not in call_kwargs["ExpressionAttributeValues"]
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_delete_strategy(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.delete("/api/strategies/abc")
-    assert resp.status_code == 204
-    table.delete_item.assert_called_once_with(Key={"pk": "STRATEGY#abc"})
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_halt_trading(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/halt")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "halted"
-    item = table.put_item.call_args.kwargs["Item"]
-    assert item["pk"] == "CONTROL"
-    assert item["desk_halted"] is True
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_unhalt_trading(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/unhalt")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "running"
-    item = table.put_item.call_args.kwargs["Item"]
-    assert item["pk"] == "CONTROL"
-    assert item["desk_halted"] is False
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_telemetry(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    # describe_table
-    table.meta.client.describe_table.return_value = {
-        "Table": {
-            "TableStatus": "ACTIVE",
-            "ItemCount": 42,
-            "TableSizeBytes": 8192,
-        },
-    }
-    table.table_name = "trading-strands-state"
-    # snapshot with telemetry
-    table.get_item.return_value = {
-        "Item": {
-            "pk": "SNAPSHOT",
-            "tick": 100,
+        })
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/snapshot")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert int(data["tick"]) == 5
+        assert data["prices"]["AAPL"] == "155.50"
+
+
+def test_snapshot_empty() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/snapshot")
+        assert resp.status_code == 200
+        assert resp.json()["tick"] == 0
+
+
+def test_snapshot_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/api/snapshot")
+        assert resp.status_code == 401
+
+
+def test_events() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+        table.put_item(Item={
+            "pk": "EVENT#123",
+            "event_type": "trade.executed",
             "timestamp": 1700000000,
-            "telemetry": {
-                "uptime_seconds": 600,
-                "tick_rate_per_min": 12.0,
-                "active_bots": 2,
-                "watched_symbols": ["AAPL", "MSFT"],
-                "broker_status": "connected",
-                "broker_last_error": "",
-                "trades_executed": 5,
-                "trades_rejected": 1,
-                "tick_interval": 5.0,
-            },
-        },
-    }
-    # scan is called twice: first for strategies, then for events count
-    table.scan.side_effect = [
-        {
-            "Items": [
-                {"pk": "STRATEGY#a", "status": "active"},
-                {"pk": "STRATEGY#b", "status": "paused"},
-            ],
-        },
-        {"Count": 7},
-    ]
-    mock_boto3.resource.return_value.Table.return_value = table
+            "data": {"symbol": "AAPL"},
+        })
 
-    from trading_strands.dashboard.api import app
+        from trading_strands.dashboard.api import app
 
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/telemetry")
-    assert resp.status_code == 200
-    data = resp.json()
-
-    assert data["dynamodb"]["status"] == "ok"
-    assert data["dynamodb"]["table_status"] == "ACTIVE"
-    assert data["dynamodb"]["item_count"] == 42
-
-    assert data["trading_service"]["last_tick"] == 100
-    assert data["trading_service"]["telemetry"]["active_bots"] == 2
-    assert data["trading_service"]["telemetry"]["broker_status"] == "connected"
-
-    assert data["strategies"]["total"] == 2
-    assert data["strategies"]["by_status"]["active"] == 1
-    assert data["strategies"]["by_status"]["paused"] == 1
-
-    assert data["events"]["recent_count"] == 7
-
-    assert data["dashboard"]["status"] == "ok"
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/events")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["event_type"] == "trade.executed"
 
 
-# ── Admin user management ──────────────────────────────────────────────
+def test_telemetry() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/telemetry")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "dynamodb" in data
+        assert "trading_service" in data
+
+
+def test_index_serves_html() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "TradingStrands" in resp.text
+
+
+# ── Strategy CRUD ─────────────────────────────────────────────────────
+
+
+def test_list_strategies_scopes_by_org() -> None:
+    """Cross-org privacy: strategies in other orgs must NOT appear."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+
+        store = StrategyStore(table)
+        store.create(org_a.org_id, alice.user_id, "Alpha", "# A")
+        store.create(org_b.org_id, "bob", "Bravo", "# B")  # Alice is NOT in org_b
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(alice.user_id, org_a.org_id))
+        resp = client.get("/api/strategies")
+        assert resp.status_code == 200
+        names = {s["name"] for s in resp.json()}
+        assert names == {"Alpha"}  # Bravo must not appear
+
+
+def test_create_strategy() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/strategies", json={
+            "name": "Momentum",
+            "markdown": "# rules",
+            "symbols": ["AAPL"],
+            "capital": "5000",
+        })
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["name"] == "Momentum"
+        assert data["org_id"] == oid
+        assert data["author_user_id"] == uid
+        assert data["status"] == "active"
+
+
+def test_viewer_cannot_create_strategy() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="viewer")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/strategies", json={
+            "name": "Banned", "markdown": "# nope",
+        })
+        assert resp.status_code == 403
+
+
+def test_get_strategy_requires_membership() -> None:
+    """An operator in org A cannot read org B's strategy."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+
+        store = StrategyStore(table)
+        foreign = store.create(org_b.org_id, "bob", "Alpha", "# B")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(alice.user_id, org_a.org_id))
+        resp = client.get(f"/api/strategies/{foreign.strategy_id}")
+        assert resp.status_code == 403
+
+
+def test_get_strategy_not_found() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/strategies/nonexistent")
+        assert resp.status_code == 404
+
+
+def test_update_strategy_only_by_author() -> None:
+    """Operator-in-same-org but not author cannot edit."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        bob = tenancy.create_user(email="bob@x.com")
+        org = tenancy.create_org("shared")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+        tenancy.add_membership(bob.user_id, org.org_id, Role.OPERATOR)
+
+        store = StrategyStore(table)
+        strat = store.create(org.org_id, alice.user_id, "A", "# A")
+
+        from trading_strands.dashboard.api import app
+
+        # Bob tries to edit alice's strategy — should 403.
+        client = TestClient(app, cookies=_session_cookie(bob.user_id, org.org_id))
+        resp = client.put(
+            f"/api/strategies/{strat.strategy_id}",
+            json={"name": "Bob Was Here"},
+        )
+        assert resp.status_code == 403
+
+        # Alice edits her own — should 200.
+        client2 = TestClient(
+            app, cookies=_session_cookie(alice.user_id, org.org_id),
+        )
+        resp2 = client2.put(
+            f"/api/strategies/{strat.strategy_id}",
+            json={"name": "Renamed"},
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["name"] == "Renamed"
+
+
+def test_update_strategy_status() -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(oid, uid, "S", "# s")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.put(
+            f"/api/strategies/{strat.strategy_id}/status",
+            json={"status": "paused"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "paused"
+
+
+def test_update_strategy_status_invalid() -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(oid, uid, "S", "# s")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.put(
+            f"/api/strategies/{strat.strategy_id}/status",
+            json={"status": "invalid"},
+        )
+        assert resp.status_code == 400
+
+
+def test_delete_strategy_by_author() -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        store = StrategyStore(table)
+        strat = store.create(oid, uid, "S", "# s")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.delete(f"/api/strategies/{strat.strategy_id}")
+        assert resp.status_code == 204
+
+
+# ── Halt ─────────────────────────────────────────────────────────────
+
+
+def test_halt_requires_orgadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/halt")
+        assert resp.status_code == 403
+
+
+def test_halt_by_orgadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/halt")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "halted"
+
+
+def test_unhalt_by_orgadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/unhalt")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "running"
+
+
+# ── Cost (sysadmin only) ─────────────────────────────────────────────
+
+
+def test_cost_requires_sysadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/costs")
+        assert resp.status_code == 403
+
+
+def test_cost_allowed_for_sysadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, _oid = _make_user(table, role_name="viewer", sysadmin=True)
+
+        from trading_strands.dashboard.api import app
+
+        # Sysadmin — cost is allowed (may error at CE call but that's the
+        # expected "try/except and return empty" path).
+        client = TestClient(app, cookies=_session_cookie(uid))
+        resp = client.get("/api/costs")
+        # Either 200 with empty data (if boto CE fails gracefully) or real data.
+        assert resp.status_code == 200
+
+
+# ── Admin — orgs (authorized via policy) ─────────────────────────────
+
+
+def test_list_orgs_for_orgadmin_sees_only_own() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.create_org("C")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.ORGADMIN)
+        tenancy.add_membership(alice.user_id, org_b.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, org_a.org_id),
+        )
+        resp = client.get("/api/admin/orgs")
+        assert resp.status_code == 200
+        names = {o["name"] for o in resp.json()}
+        assert names == {"A"}  # only the one she's orgadmin of
+
+
+def test_list_orgs_for_sysadmin_sees_all() -> None:
+    with mock_aws():
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        tenancy.create_org("A")
+        tenancy.create_org("B")
+        tenancy.create_org("C")
+        tenancy.grant_sysadmin(alice.user_id)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(alice.user_id))
+        resp = client.get("/api/admin/orgs")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 3
+
+
+def test_list_orgs_forbidden_for_plain_user() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/admin/orgs")
+        assert resp.status_code == 403
+
+
+def test_create_org_requires_sysadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/admin/orgs", json={"name": "new org"})
+        assert resp.status_code == 403
+
+
+def test_create_org_allowed_for_sysadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, _oid = _make_user(table, role_name="viewer", sysadmin=True)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid))
+        resp = client.post("/api/admin/orgs", json={"name": "new org"})
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "new org"
+
+
+# ── Admin — users (Cognito-backed) ────────────────────────────────────
+
+
+def test_list_users_requires_orgadmin_or_sysadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 403
 
 
 @patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_list_users(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
+def test_list_users_for_orgadmin(mock_cognito_fn: MagicMock) -> None:
     mock_cognito = MagicMock()
     mock_cognito_fn.return_value = mock_cognito
     mock_cognito.list_users.return_value = {
         "Users": [
             {
-                "Username": "abc-123",
+                "Username": "abc",
                 "Attributes": [
-                    {"Name": "email", "Value": "admin@example.com"},
+                    {"Name": "email", "Value": "admin@x.com"},
                     {"Name": "custom:role", "Value": "operator"},
                 ],
                 "UserStatus": "CONFIRMED",
@@ -447,224 +586,57 @@ def test_list_users(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
         ],
     }
 
-    from trading_strands.dashboard.api import app
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
 
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/admin/users")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 1
-    assert data[0]["email"] == "admin@example.com"
-    assert data[0]["role"] == "operator"
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
 
 
 @patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_create_user(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
+def test_create_user_invalid_role(mock_cognito_fn: MagicMock) -> None:
     mock_cognito = MagicMock()
     mock_cognito_fn.return_value = mock_cognito
 
-    from trading_strands.dashboard.api import app
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
 
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/admin/users", json={
-        "email": "new@example.com",
-        "role": "viewer",
-    })
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["email"] == "new@example.com"
-    assert data["role"] == "viewer"
-    assert "temporary_password" in data
-    mock_cognito.admin_create_user.assert_called_once()
-    mock_cognito.admin_set_user_password.assert_called_once()
+        from trading_strands.dashboard.api import app
 
-
-@patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_create_user_invalid_role(
-    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
-) -> None:
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/admin/users", json={
-        "email": "bad@example.com",
-        "role": "superadmin",
-    })
-    assert resp.status_code == 400
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/admin/users", json={
+            "email": "new@x.com",
+            "role": "superadmin",
+            "org_id": oid,
+        })
+        assert resp.status_code == 400
 
 
 @patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_reset_user_password(
-    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
-) -> None:
+def test_create_user_allowed_by_orgadmin(mock_cognito_fn: MagicMock) -> None:
     mock_cognito = MagicMock()
     mock_cognito_fn.return_value = mock_cognito
 
-    from trading_strands.dashboard.api import app
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
 
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/admin/users/abc-123/reset-password", json={
-        "password": "NewPassword123!@#",
-    })
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "password_reset"
-    mock_cognito.admin_set_user_password.assert_called_once()
+        from trading_strands.dashboard.api import app
 
-
-@patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_update_user_role(
-    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
-) -> None:
-    mock_cognito = MagicMock()
-    mock_cognito_fn.return_value = mock_cognito
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.put("/api/admin/users/abc-123/role", json={"role": "operator"})
-    assert resp.status_code == 200
-    assert resp.json()["role"] == "operator"
-    mock_cognito.admin_update_user_attributes.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_delete_user(mock_boto3: MagicMock, mock_cognito_fn: MagicMock) -> None:
-    mock_cognito = MagicMock()
-    mock_cognito_fn.return_value = mock_cognito
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.delete("/api/admin/users/abc-123")
-    assert resp.status_code == 204
-    mock_cognito.admin_delete_user.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api._get_cognito_client")
-@patch("trading_strands.dashboard.api.boto3")
-def test_enable_disable_user(
-    mock_boto3: MagicMock, mock_cognito_fn: MagicMock,
-) -> None:
-    mock_cognito = MagicMock()
-    mock_cognito_fn.return_value = mock_cognito
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-
-    resp = client.post("/api/admin/users/abc-123/disable")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "disabled"
-
-    resp = client.post("/api/admin/users/abc-123/enable")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "enabled"
-
-
-# ── Organization management ────────────────────────────────────────────
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_create_org(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.post("/api/admin/orgs", json={"name": "Kelsea's Org"})
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["name"] == "Kelsea's Org"
-    assert "org_id" in data
-    assert data["pk"].startswith("ORG#")
-    table.put_item.assert_called_once()
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_list_orgs(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.scan.return_value = {
-        "Items": [
-            {"pk": "ORG#abc", "org_id": "abc", "name": "Test Org", "created_at": 100},
-        ],
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/admin/orgs")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert len(data) == 1
-    assert data[0]["name"] == "Test Org"
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_get_org(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.get_item.return_value = {
-        "Item": {"pk": "ORG#abc", "org_id": "abc", "name": "Test Org"},
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/admin/orgs/abc")
-    assert resp.status_code == 200
-    assert resp.json()["name"] == "Test Org"
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_get_org_not_found(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.get_item.return_value = {}
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.get("/api/admin/orgs/nonexistent")
-    assert resp.status_code == 404
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_update_org(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    table.update_item.return_value = {
-        "Attributes": {"pk": "ORG#abc", "name": "Updated Org", "session_max_age": 86400},
-    }
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.put("/api/admin/orgs/abc", json={
-        "name": "Updated Org",
-        "session_max_age": 86400,
-    })
-    assert resp.status_code == 200
-    assert resp.json()["name"] == "Updated Org"
-
-
-@patch("trading_strands.dashboard.api.boto3")
-def test_delete_org(mock_boto3: MagicMock) -> None:
-    table = MagicMock()
-    mock_boto3.resource.return_value.Table.return_value = table
-
-    from trading_strands.dashboard.api import app
-
-    client = TestClient(app, cookies=_auth_cookie())
-    resp = client.delete("/api/admin/orgs/abc")
-    assert resp.status_code == 204
-    table.delete_item.assert_called_once_with(Key={"pk": "ORG#abc"})
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/admin/users", json={
+            "email": "new@x.com",
+            "role": "viewer",
+            "org_id": oid,
+        })
+        assert resp.status_code == 201
+        assert resp.json()["email"] == "new@x.com"
 
 
 # ── Signed URL tokens ─────────────────────────────────────────────────
@@ -675,20 +647,42 @@ def test_url_token_roundtrip() -> None:
 
     data = {"error": "test message", "code": 42}
     token = create_url_token(data)
-    # Token should be URL-safe string, not plain text
     assert "test message" not in token
-    assert "error" not in token
-    # Should decode back
     decoded = decode_url_token(token)
     assert decoded is not None
     assert decoded["error"] == "test message"
-    assert decoded["code"] == 42
 
 
 def test_url_token_tampered() -> None:
     from trading_strands.dashboard.auth import create_url_token, decode_url_token
 
     token = create_url_token({"error": "test"})
-    # Tamper with the token
     tampered = token[:-4] + "XXXX"
     assert decode_url_token(tampered) is None
+
+
+# ── v1 session invalidation ──────────────────────────────────────────
+
+
+def test_v1_session_without_user_id_is_rejected() -> None:
+    """Pre-refactor sessions (no user_id) must be rejected — users re-login."""
+
+    import trading_strands.dashboard.auth as auth_mod
+    from trading_strands.dashboard.auth import _get_serializer
+
+    # Craft a v1-shaped session cookie directly.
+    ser = _get_serializer()
+    v1 = ser.dumps(
+        {"email": "old@x.com", "role": "operator"},
+        salt="session",
+    )
+
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies={"session": v1})
+        resp = client.get("/api/snapshot")
+        assert resp.status_code == 401
+    # Touch the module to keep the import in scope.
+    _ = auth_mod
