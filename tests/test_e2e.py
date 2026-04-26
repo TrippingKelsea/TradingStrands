@@ -86,7 +86,8 @@ class TestEndToEnd:
         ))
         ledger = Ledger(starting_capital=Decimal(capital))
         coordinator = TradeCoordinator(
-            broker=broker,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker,
             risk_manager=risk_mgr,
             ledgers={"turtle-bot": ledger},
         )
@@ -98,7 +99,7 @@ class TestEndToEnd:
         coord, ledger, _broker = self._make_system()
 
         # 1. Buy 10 AAPL at ~$150
-        buy_result = await coord.execute(TradeIntent(
+        buy_result = await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot",
             symbol="AAPL",
             action=IntentAction.BUY,
@@ -117,7 +118,7 @@ class TestEndToEnd:
         assert ledger.fee_ledger[0].sec_fee == Decimal("0.02")
 
         # 2. Hold (no-op)
-        hold_result = await coord.execute(TradeIntent(
+        hold_result = await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot",
             symbol="AAPL",
             action=IntentAction.HOLD,
@@ -129,7 +130,7 @@ class TestEndToEnd:
         assert len(ledger.open_positions) == 1  # unchanged
 
         # 3. Sell 10 AAPL at ~$150
-        sell_result = await coord.execute(TradeIntent(
+        sell_result = await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot",
             symbol="AAPL",
             action=IntentAction.SELL,
@@ -151,7 +152,7 @@ class TestEndToEnd:
         coord, ledger, broker = self._make_system()
 
         # Buy at $150
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("10"),
         ))
@@ -159,7 +160,7 @@ class TestEndToEnd:
         # Price goes to $160
         broker.fill_prices["AAPL"] = Decimal("160.00")
 
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.SELL, quantity=Decimal("10"),
         ))
@@ -176,14 +177,14 @@ class TestEndToEnd:
         """Losses include fees — fully burdened."""
         coord, ledger, broker = self._make_system()
 
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("10"),
         ))
 
         broker.fill_prices["AAPL"] = Decimal("140.00")
 
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.SELL, quantity=Decimal("10"),
         ))
@@ -199,7 +200,7 @@ class TestEndToEnd:
         coord, ledger, _ = self._make_system()
 
         # Try to buy $15000 worth (30% of $50000 equity, limit is 20%)
-        result = await coord.execute(TradeIntent(
+        result = await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("100"),
         ))
@@ -214,13 +215,13 @@ class TestEndToEnd:
         coord, _ledger, _ = self._make_system()
 
         # Buy $9000 AAPL (18% of equity, under 20% per-position)
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("60"),
         ))
 
         # Buy $8000 MSFT (16% of equity, under 20% per-position)
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="MSFT",
             action=IntentAction.BUY, quantity=Decimal("20"),
         ))
@@ -228,7 +229,7 @@ class TestEndToEnd:
         # Now at $17000 / $50000 = 34% exposure. Try to buy $9000 more AAPL.
         # Would be $26000 / $50000 = 52%, still under 80%... let's push harder.
         # Actually let's buy enough to breach 80%
-        result = await coord.execute(TradeIntent(
+        result = await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("200"),
         ))
@@ -242,7 +243,7 @@ class TestEndToEnd:
         coord, ledger, _broker = self._make_system()
 
         for _ in range(3):
-            await coord.execute(TradeIntent(
+            await coord.execute(TradeIntent(org_id="test-org",
                 bot_id="turtle-bot", symbol="AAPL",
                 action=IntentAction.BUY, quantity=Decimal("5"),
             ))
@@ -261,14 +262,14 @@ class TestEndToEnd:
         coord.risk_manager._config.max_total_exposure_pct = Decimal("0.90")
 
         # Buy and sell at a big loss to trigger drawdown
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("50"),
         ))
         assert len(ledger.open_positions) == 1
 
         broker.fill_prices["AAPL"] = Decimal("120.00")
-        await coord.execute(TradeIntent(
+        await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="AAPL",
             action=IntentAction.SELL, quantity=Decimal("50"),
         ))
@@ -279,7 +280,7 @@ class TestEndToEnd:
 
         # New buy should be blocked
         broker.fill_prices["MSFT"] = Decimal("50.00")
-        result = await coord.execute(TradeIntent(
+        result = await coord.execute(TradeIntent(org_id="test-org",
             bot_id="turtle-bot", symbol="MSFT",
             action=IntentAction.BUY, quantity=Decimal("5"),
         ))

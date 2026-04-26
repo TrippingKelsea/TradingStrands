@@ -106,12 +106,14 @@ class StrategyBot:
     def __init__(
         self,
         bot_id: str,
+        org_id: str,
         strategy_prompt: str,
         symbols: list[str],
         tta: Predicate | None = None,
         model: str | None = None,
     ) -> None:
         self.bot_id = bot_id
+        self.org_id = org_id
         self.strategy_prompt = strategy_prompt
         self.symbols = symbols
         self.tta = tta
@@ -175,6 +177,7 @@ class StrategyBot:
 
         return TradeIntent(
             bot_id=self.bot_id,
+            org_id=self.org_id,
             symbol=decision.symbol,
             action=action,
             quantity=Decimal(decision.quantity),

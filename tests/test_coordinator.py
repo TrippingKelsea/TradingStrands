@@ -65,7 +65,7 @@ def _intent(
     quantity: str = "10",
     bot_id: str = "bot-1",
 ) -> TradeIntent:
-    return TradeIntent(
+    return TradeIntent(org_id="test-org",
         bot_id=bot_id, symbol=symbol, action=action, quantity=Decimal(quantity),
     )
 
@@ -75,8 +75,7 @@ def coordinator() -> TradeCoordinator:
     broker = StubBroker(fill_price=Decimal("100.00"))
     risk_mgr = RiskManager(RiskConfig())
     ledger = Ledger(starting_capital=Decimal("10000"))
-    return TradeCoordinator(
-        broker=broker,
+    return TradeCoordinator(broker_factory=lambda _o, _b=broker: _b, default_broker=broker,
         risk_manager=risk_mgr,
         ledgers={"bot-1": ledger},
     )
@@ -120,8 +119,11 @@ class TestTradeCoordinator:
         assert result.risk_decision is not None
         assert not result.risk_decision.approved
 
-        # Broker should not have received any orders
-        assert len(coordinator.broker.submitted_orders) == 0  # type: ignore[attr-defined]
+        # Broker should not have received any orders.
+        # Access the org-scoped broker via the coordinator's cache; post-
+        # per-org refactor, coordinator.broker is no longer a single attr.
+        broker = coordinator.broker_for("test-org")
+        assert len(broker.submitted_orders) == 0  # type: ignore[attr-defined]
 
     @pytest.mark.anyio
     async def test_hold_is_noop(self, coordinator: TradeCoordinator) -> None:
@@ -147,3 +149,119 @@ class TestTradeCoordinator:
         result = await coordinator.execute(_intent())
         # If we got here without error, market prices were fetched and passed
         assert result.approved
+
+
+class TestPerOrgBrokerRouting:
+    """Per-org broker factory: each org gets its own broker instance, trades
+    route to the right one, missing-creds rejects the intent cleanly."""
+
+    @pytest.mark.anyio
+    async def test_intent_routes_to_owning_org_broker(self) -> None:
+        broker_a = StubBroker(fill_price=Decimal("100"))
+        broker_b = StubBroker(fill_price=Decimal("200"))
+        brokers: dict[str, StubBroker] = {"org-a": broker_a, "org-b": broker_b}
+
+        coordinator = TradeCoordinator(
+            broker_factory=lambda org_id: brokers[org_id],
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={
+                "bot-a": Ledger(starting_capital=Decimal("10000")),
+                "bot-b": Ledger(starting_capital=Decimal("10000")),
+            },
+        )
+
+        await coordinator.execute(TradeIntent(
+            bot_id="bot-a", org_id="org-a", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+        await coordinator.execute(TradeIntent(
+            bot_id="bot-b", org_id="org-b", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+
+        # Each broker received exactly its own org's trade — no cross-org
+        # leak through the coordinator.
+        assert len(broker_a.submitted_orders) == 1
+        assert len(broker_b.submitted_orders) == 1
+
+    @pytest.mark.anyio
+    async def test_broker_cached_after_first_use(self) -> None:
+        """Factory is invoked once per org; subsequent intents reuse the cached
+        instance. Matters because building a live broker is expensive."""
+
+        call_count = 0
+
+        def factory(org_id: str) -> StubBroker:
+            nonlocal call_count
+            call_count += 1
+            return StubBroker()
+
+        coordinator = TradeCoordinator(
+            broker_factory=factory,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+        )
+
+        for _ in range(3):
+            await coordinator.execute(TradeIntent(
+                bot_id="bot-1", org_id="org-a", symbol="AAPL",
+                action=IntentAction.BUY, quantity=Decimal("1"),
+            ))
+        assert call_count == 1  # factory invoked once, cached thereafter
+
+    @pytest.mark.anyio
+    async def test_missing_broker_rejects_intent_cleanly(self) -> None:
+        """An org with no Alpaca creds must not crash the coordinator — the
+        intent is rejected with a reason the Strategy Agent can log."""
+
+        def failing_factory(org_id: str) -> StubBroker:
+            msg = f"no credentials configured for org {org_id}"
+            raise RuntimeError(msg)
+
+        coordinator = TradeCoordinator(
+            broker_factory=failing_factory,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+        )
+
+        result = await coordinator.execute(TradeIntent(
+            bot_id="bot-1", org_id="org-nocreds", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+
+        assert not result.approved
+        assert result.risk_decision is not None
+        assert not result.risk_decision.approved
+        assert "no credentials" in result.risk_decision.reason
+
+    @pytest.mark.anyio
+    async def test_invalidate_broker_forces_rebuild(self) -> None:
+        """When an orgadmin rotates Alpaca creds, invalidate_broker drops
+        the cache so the next intent rebuilds from the fresh secret."""
+
+        call_count = 0
+
+        def factory(org_id: str) -> StubBroker:
+            nonlocal call_count
+            call_count += 1
+            return StubBroker()
+
+        coordinator = TradeCoordinator(
+            broker_factory=factory,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+        )
+
+        await coordinator.execute(TradeIntent(
+            bot_id="bot-1", org_id="org-a", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+        assert call_count == 1
+
+        coordinator.invalidate_broker("org-a")
+
+        await coordinator.execute(TradeIntent(
+            bot_id="bot-1", org_id="org-a", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+        assert call_count == 2

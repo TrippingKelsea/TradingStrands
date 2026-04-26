@@ -63,7 +63,8 @@ def _make_orchestrator(
     risk_mgr = RiskManager(RiskConfig())
     ledger = Ledger(starting_capital=Decimal("50000"))
     coordinator = TradeCoordinator(
-        broker=broker,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker,
         risk_manager=risk_mgr,
         ledgers={"test-bot": ledger},
     )
@@ -103,7 +104,7 @@ class TestOrchestrator:
             bot_id: str, prices: dict[str, Decimal], ledger: Ledger,
         ) -> TradeIntent | None:
             if len(ledger.open_positions) == 0:
-                return TradeIntent(
+                return TradeIntent(org_id="test-org",
                     bot_id=bot_id, symbol="AAPL",
                     action=IntentAction.BUY, quantity=Decimal("10"),
                 )
@@ -328,7 +329,9 @@ class TestTTAIntegration:
         risk_mgr = RiskManager(RiskConfig())
         ledger = Ledger(starting_capital=Decimal("50000"))
         coordinator = TradeCoordinator(
-            broker=broker, risk_manager=risk_mgr,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker,
+            risk_manager=risk_mgr,
             ledgers={"test-bot": ledger},
         )
         market_data = MarketDataProvider(broker)
@@ -358,7 +361,9 @@ class TestTTAIntegration:
         broker = StubBroker()
         risk_mgr = RiskManager(RiskConfig())
         coordinator = TradeCoordinator(
-            broker=broker, risk_manager=risk_mgr, ledgers={},
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker,
+            risk_manager=risk_mgr, ledgers={},
         )
         market_data = MarketDataProvider(broker)
         orch = Orchestrator(
@@ -380,7 +385,9 @@ class TestTTAIntegration:
         risk_mgr = RiskManager(RiskConfig())
         ledger = Ledger(starting_capital=Decimal("50000"))
         coordinator = TradeCoordinator(
-            broker=broker, risk_manager=risk_mgr,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker,
+            risk_manager=risk_mgr,
             ledgers={"test-bot": ledger},
         )
         market_data = MarketDataProvider(broker)

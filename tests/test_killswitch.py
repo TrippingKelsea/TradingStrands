@@ -58,7 +58,8 @@ def _make_system() -> tuple[KillSwitch, TradeCoordinator, Ledger, StubBroker]:
     risk_mgr = RiskManager(RiskConfig())
     ledger = Ledger(starting_capital=Decimal("50000"))
     coordinator = TradeCoordinator(
-        broker=broker, risk_manager=risk_mgr,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker, risk_manager=risk_mgr,
         ledgers={"bot-1": ledger},
     )
     ks = KillSwitch(coordinator=coordinator, risk_manager=risk_mgr)
@@ -72,7 +73,7 @@ class TestHaltAndStopTrading:
         await ks.execute(KillSwitchVerb.HALT_AND_STOP, bot_id="bot-1")
 
         # Bot should be halted — new trades rejected
-        result = await coordinator.execute(TradeIntent(
+        result = await coordinator.execute(TradeIntent(org_id="test-org",
             bot_id="bot-1", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("10"),
         ))
@@ -83,7 +84,7 @@ class TestHaltAndStopTrading:
         ks, coordinator, _ledger, _broker = _make_system()
         await ks.execute(KillSwitchVerb.HALT_AND_STOP)
 
-        result = await coordinator.execute(TradeIntent(
+        result = await coordinator.execute(TradeIntent(org_id="test-org",
             bot_id="bot-1", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("10"),
         ))
@@ -141,7 +142,7 @@ class TestHaltAndLiquidate:
         await ks.execute(KillSwitchVerb.HALT_AND_LIQUIDATE, bot_id="bot-1")
 
         # New trades should be rejected
-        result = await coordinator.execute(TradeIntent(
+        result = await coordinator.execute(TradeIntent(org_id="test-org",
             bot_id="bot-1", symbol="AAPL",
             action=IntentAction.BUY, quantity=Decimal("5"),
         ))

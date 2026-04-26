@@ -90,7 +90,8 @@ class TestFullSystemIntegration:
         risk_mgr = RiskManager(RiskConfig())
         ledger = Ledger(starting_capital=Decimal("50000"))
         coordinator = TradeCoordinator(
-            broker=broker, risk_manager=risk_mgr,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker, risk_manager=risk_mgr,
             ledgers={"breakout-bot": ledger},
         )
         market_data = MarketDataProvider(broker)
@@ -111,14 +112,14 @@ class TestFullSystemIntegration:
 
             if not bot_ledger.open_positions and price > buy_threshold:
                 trade_log.append(f"BUY@{price}")
-                return TradeIntent(
+                return TradeIntent(org_id="test-org",
                     bot_id=bot_id, symbol="AAPL",
                     action=IntentAction.BUY, quantity=Decimal("10"),
                     rationale=f"breakout above {buy_threshold}",
                 )
             elif bot_ledger.open_positions and price < sell_threshold:
                 trade_log.append(f"SELL@{price}")
-                return TradeIntent(
+                return TradeIntent(org_id="test-org",
                     bot_id=bot_id, symbol="AAPL",
                     action=IntentAction.SELL, quantity=Decimal("10"),
                     rationale=f"breakdown below {sell_threshold}",
@@ -165,7 +166,8 @@ class TestFullSystemIntegration:
         ))
         ledger = Ledger(starting_capital=Decimal("10000"))
         coordinator = TradeCoordinator(
-            broker=broker, risk_manager=risk_mgr,
+            broker_factory=lambda _o, _b=broker: _b,
+            default_broker=broker, risk_manager=risk_mgr,
             ledgers={"risk-bot": ledger},
         )
         market_data = MarketDataProvider(broker)
@@ -182,13 +184,13 @@ class TestFullSystemIntegration:
             price = market_prices.get("AAPL", Decimal("0"))
             if not bot_ledger.open_positions and price > Decimal("100"):
                 trade_log.append(f"INTENT_BUY@{price}")
-                return TradeIntent(
+                return TradeIntent(org_id="test-org",
                     bot_id=bot_id, symbol="AAPL",
                     action=IntentAction.BUY, quantity=Decimal("30"),
                 )
             elif bot_ledger.open_positions and price < Decimal("80"):
                 trade_log.append(f"INTENT_SELL@{price}")
-                return TradeIntent(
+                return TradeIntent(org_id="test-org",
                     bot_id=bot_id, symbol="AAPL",
                     action=IntentAction.SELL, quantity=Decimal("30"),
                 )

@@ -1,7 +1,22 @@
-"""Trade coordinator — pipeline between bots and execution (§5.3)."""
+"""Trade coordinator — pipeline between bots and execution (§5.3).
+
+The coordinator routes trade intents to the correct per-org broker. A bot
+running under org A must execute its trades through org A's broker
+credentials only; the coordinator enforces this by using `intent.org_id`
+to select the broker rather than relying on a shared global broker.
+
+Brokers are built lazily by a factory the caller supplies — we don't
+spin up one broker per org at startup, since most orgs are idle most of
+the time. On the first intent from org X, we build and cache org X's
+broker; subsequent intents reuse that instance.
+
+This is the v0 multi-org execution path. The v1 target (per-org Broker
+Agent as separate Fargate service) is described in docs/SPEC/agents.md.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -18,6 +33,9 @@ from trading_strands.coordinator.types import (
 from trading_strands.ledger.models import Fill, Ledger
 from trading_strands.risk.manager import RiskManager
 
+BrokerFactory = Callable[[str], Any]
+"""Signature: (org_id) -> BrokerAdapter. Raises if creds unavailable."""
+
 
 class ExecutionResult(BaseModel):
     """Result of processing a trade intent through the full pipeline."""
@@ -33,23 +51,64 @@ class ExecutionResult(BaseModel):
         return self.risk_decision.approved
 
 
+class BrokerUnavailableError(Exception):
+    """Raised when the broker factory can't produce a broker for an org
+    (e.g., the org has no Alpaca credentials configured)."""
+
+
 class TradeCoordinator:
-    """Accepts trade intents, runs risk checks, routes to broker, updates ledgers."""
+    """Accepts trade intents, runs risk checks, routes to per-org brokers,
+    updates ledgers.
+
+    Pass a `broker_factory(org_id)` callable; the coordinator caches
+    produced brokers per org. If you need a platform-level broker for
+    market-data-only reads, pass `default_broker` — the coordinator
+    uses it for price fetches when no org-scoped broker is appropriate.
+    """
 
     def __init__(
         self,
-        broker: Any,  # BrokerAdapter protocol
+        broker_factory: BrokerFactory,
         risk_manager: RiskManager,
         ledgers: dict[str, Ledger],
+        default_broker: Any | None = None,
     ) -> None:
-        self.broker = broker
+        self._broker_factory = broker_factory
+        self._broker_cache: dict[str, Any] = {}
         self.risk_manager = risk_manager
         self.ledgers = ledgers
+        self._default_broker = default_broker
+
+    def broker_for(self, org_id: str) -> Any:
+        """Return the broker adapter for this org, creating it on first use.
+
+        Errors from the factory are wrapped as BrokerUnavailableError so
+        callers can handle missing creds as a routable failure rather than
+        a generic exception. Once a broker is cached, subsequent calls are
+        a plain dict lookup.
+        """
+
+        cached = self._broker_cache.get(org_id)
+        if cached is not None:
+            return cached
+        try:
+            broker = self._broker_factory(org_id)
+        except Exception as exc:
+            msg = f"broker unavailable for org {org_id}: {exc}"
+            raise BrokerUnavailableError(msg) from exc
+        self._broker_cache[org_id] = broker
+        return broker
+
+    def invalidate_broker(self, org_id: str) -> None:
+        """Drop the cached broker for an org. Called when credentials
+        rotate — next broker_for() rebuilds from the factory."""
+
+        self._broker_cache.pop(org_id, None)
 
     async def execute(self, intent: TradeIntent) -> ExecutionResult:
         """Process a trade intent through the full pipeline.
 
-        Intent → risk check → broker execution → ledger update.
+        Intent → per-org broker → risk check → broker execution → ledger update.
         """
         if intent.bot_id not in self.ledgers:
             msg = f"unknown bot: {intent.bot_id}"
@@ -65,10 +124,25 @@ class TradeCoordinator:
                 ),
             )
 
+        # Resolve the broker for this org BEFORE risk-checking. If the org
+        # can't produce a broker (missing creds), reject the intent up-front
+        # rather than running risk checks that will be wasted work.
+        try:
+            broker = self.broker_for(intent.org_id)
+        except BrokerUnavailableError as exc:
+            return ExecutionResult(
+                intent=intent,
+                risk_decision=RiskDecision(
+                    verdict=RiskVerdict.REJECTED,
+                    intent=intent,
+                    reason=str(exc),
+                ),
+            )
+
         ledger = self.ledgers[intent.bot_id]
 
         # Fetch market prices for risk evaluation
-        market_prices = await self._get_market_prices(intent, ledger)
+        market_prices = await self._get_market_prices(broker, intent, ledger)
 
         # Risk check
         risk_decision = self.risk_manager.evaluate(intent, ledger, market_prices)
@@ -80,7 +154,7 @@ class TradeCoordinator:
 
         # Convert intent to order and submit
         order = self._intent_to_order(intent)
-        order_result = await self.broker.submit_order(order)
+        order_result = await broker.submit_order(order)
 
         # Record fill in ledger
         self._record_fill(intent, order_result, ledger)
@@ -92,15 +166,20 @@ class TradeCoordinator:
         )
 
     async def _get_market_prices(
-        self, intent: TradeIntent, ledger: Ledger,
+        self, broker: Any, intent: TradeIntent, ledger: Ledger,
     ) -> dict[str, Decimal]:
-        """Fetch current prices for the intent symbol and all open positions."""
+        """Fetch current prices for the intent symbol and all open positions.
+
+        Uses the org-scoped broker. Price data via Alpaca is the same across
+        credentials (market data isn't per-account-segregated), but using
+        the org's broker keeps rate-limit accounting clean and auditable."""
+
         symbols = {intent.symbol}
         symbols.update(pos.symbol for pos in ledger.open_positions)
 
         prices: dict[str, Decimal] = {}
         for symbol in symbols:
-            quote = await self.broker.get_quote(symbol)
+            quote = await broker.get_quote(symbol)
             price = quote.get("price")
             if isinstance(price, Decimal):
                 prices[symbol] = price

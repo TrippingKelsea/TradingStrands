@@ -13,7 +13,7 @@ def _make_intent(
     quantity: str = "10",
     bot_id: str = "bot-1",
 ) -> TradeIntent:
-    return TradeIntent(
+    return TradeIntent(org_id="test-org",
         bot_id=bot_id,
         symbol=symbol,
         action=action,

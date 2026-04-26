@@ -18,9 +18,16 @@ class IntentAction(StrEnum):
 
 
 class TradeIntent(BaseModel):
-    """A trade intent emitted by a strategy bot (§4.3)."""
+    """A trade intent emitted by a strategy bot (§4.3).
+
+    `org_id` is required because the coordinator uses it to route the trade
+    to the correct per-org broker. A strategy in org A must never execute
+    through org B's broker credentials; that invariant is enforced by
+    having the intent carry the scope rather than being inferred.
+    """
 
     bot_id: str
+    org_id: str
     symbol: str
     action: IntentAction
     quantity: Decimal

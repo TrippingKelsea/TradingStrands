@@ -41,6 +41,21 @@ class KillSwitch:
         self._risk_manager = risk_manager
         self.log: list[dict[str, Any]] = []
 
+    def _liquidation_broker(self) -> Any:
+        """Broker used for kill-switch liquidation orders.
+
+        Kill switches are platform-initiated (orgadmin / sysadmin / risk
+        auto-trigger) and operate across bots whose origin org is not
+        directly addressable from the ledger. v0 approach: use the
+        coordinator's default (platform) broker. v1 routes this through
+        the per-org Broker Agent — deferred, see docs/SPEC/agents.md.
+        """
+
+        if self._coordinator._default_broker is None:
+            msg = "kill switch requires coordinator.default_broker; none configured"
+            raise RuntimeError(msg)
+        return self._coordinator._default_broker
+
     async def execute(
         self,
         verb: KillSwitchVerb,
@@ -79,7 +94,7 @@ class KillSwitch:
                     quantity=pos.quantity,
                     order_type=OrderType.MARKET,
                 )
-                result = await self._coordinator.broker.submit_order(order)
+                result = await self._liquidation_broker().submit_order(order)
                 # Record the fill in the ledger
                 from trading_strands.ledger.models import Fill
 
@@ -119,7 +134,7 @@ class KillSwitch:
                         quantity=pos.quantity,
                         order_type=OrderType.MARKET,
                     )
-                    result = await self._coordinator.broker.submit_order(order)
+                    result = await self._liquidation_broker().submit_order(order)
 
                     from trading_strands.ledger.models import Fill
 
