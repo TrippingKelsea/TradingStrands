@@ -27,6 +27,7 @@ from typing import Any
 import anyio
 import structlog
 
+from trading_strands.agent_memory.store import AgentMemoryStore
 from trading_strands.alpaca_secrets.store import secret_name_for
 from trading_strands.auditor.reconciler import AuditConfig, Reconciler
 from trading_strands.broker.alpaca import AlpacaAdapter
@@ -41,6 +42,10 @@ from trading_strands.risk.manager import RiskConfig, RiskManager
 from trading_strands.strategies.bot import StrategyBot
 from trading_strands.token_telemetry.store import TokenUsageStore
 from trading_strands.whatif.tracker import WhatIfTracker
+
+# S3 bucket name for the shared agent-memory store (v0). In v1 each Agent
+# gets a dedicated bucket managed by BotProvisioner.
+AGENT_MEMORY_BUCKET_ENV = "AGENT_MEMORY_BUCKET"
 
 logger = structlog.get_logger()
 
@@ -161,6 +166,8 @@ def _register_strategy(
     capital: Decimal,
     token_store: TokenUsageStore | None = None,
     ledger_store: LedgerStore | None = None,
+    s3_client: Any | None = None,
+    memory_bucket: str | None = None,
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
@@ -187,12 +194,20 @@ def _register_strategy(
         ledger = Ledger(starting_capital=capital)
     coordinator.ledgers[bot_id] = ledger
 
+    memory_store: AgentMemoryStore | None = None
+    if s3_client is not None and memory_bucket:
+        memory_store = AgentMemoryStore(
+            s3_client=s3_client, bucket=memory_bucket,
+            org_id=org_id, agent_type="strategy", agent_id=bot_id,
+        )
+
     bot = StrategyBot(
         bot_id=bot_id,
         org_id=org_id,
         strategy_prompt=strategy_prompt,
         symbols=symbols,
         token_store=token_store,
+        memory_store=memory_store,
     )
 
     orchestrator.register_bot(
@@ -248,6 +263,8 @@ async def run(
     marketdata_store: MarketDataStore | None = None
     token_store: TokenUsageStore | None = None
     ledger_store: LedgerStore | None = None
+    s3_client: Any | None = None
+    memory_bucket: str | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
     if table_name:
         publisher = StatePublisher(table_name)
@@ -262,6 +279,18 @@ async def run(
         await logger.ainfo("marketdata_store.enabled", table=table_name)
         await logger.ainfo("token_store.enabled", table=table_name)
         await logger.ainfo("ledger_store.enabled", table=table_name)
+
+        memory_bucket = os.environ.get(AGENT_MEMORY_BUCKET_ENV)
+        if memory_bucket:
+            s3_client = _boto3.client("s3")
+            await logger.ainfo(
+                "agent_memory.enabled", bucket=memory_bucket,
+            )
+        else:
+            await logger.ainfo(
+                "agent_memory.disabled",
+                reason=f"{AGENT_MEMORY_BUCKET_ENV} not set",
+            )
 
     risk_manager = RiskManager(RiskConfig())
     coordinator = TradeCoordinator(
@@ -304,6 +333,8 @@ async def run(
             capital=capital,
             token_store=token_store,
             ledger_store=ledger_store,
+            s3_client=s3_client,
+            memory_bucket=memory_bucket,
         )
         await logger.ainfo(
             "system.start.local",
@@ -339,6 +370,8 @@ async def run(
                 capital=strat_capital,
                 token_store=token_store,
                 ledger_store=ledger_store,
+                s3_client=s3_client,
+                memory_bucket=memory_bucket,
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -409,6 +442,8 @@ async def run(
                                     capital=strat_capital,
                                     token_store=token_store,
                                     ledger_store=ledger_store,
+                                    s3_client=s3_client,
+                                    memory_bucket=memory_bucket,
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

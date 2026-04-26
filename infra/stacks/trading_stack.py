@@ -42,6 +42,9 @@ from aws_cdk import (
     aws_route53_targets as targets,
 )
 from aws_cdk import (
+    aws_s3 as s3,
+)
+from aws_cdk import (
     aws_secretsmanager as secretsmanager,
 )
 from constructs import Construct
@@ -97,6 +100,35 @@ class TradingStrandsStack(cdk.Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=cdk.RemovalPolicy.DESTROY,
+            time_to_live_attribute="ttl",  # used by EVENT#, TOKENEVENT#, LEDGER_EVENT#
+        )
+
+        # Agent memory bucket (v0: single shared bucket, prefix-isolated per
+        # Agent; v1: replaced by per-Agent buckets provisioned by
+        # BotProvisioner — see docs/SPEC/deployment.md). Bucket name is
+        # account-suffixed so re-deploys into a clean account don't collide
+        # with a retained bucket from a prior tenant.
+        agent_memory_bucket = s3.Bucket(
+            self,
+            "AgentMemoryBucket",
+            bucket_name=f"trading-strands-agent-memory-{self.account}",
+            versioned=True,  # recoverable from accidental overwrites
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+            auto_delete_objects=True,  # dev; production would RETAIN
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="raw-daily-to-glacier",
+                    prefix="",  # applies to all objects
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                            transition_after=cdk.Duration.days(90),
+                        ),
+                    ],
+                ),
+            ],
         )
 
         # Secrets Manager secret (seeded manually by operator)
@@ -174,6 +206,21 @@ class TradingStrandsStack(cdk.Stack):
         )
         alpaca_secret.grant_read(trading_task_role)
         table.grant_read_write_data(trading_task_role)
+        # Trading service reads per-org Alpaca secrets at runtime
+        # (trading-strands/org/{org_id}/alpaca). Scoped to those paths so
+        # the trading service cannot touch the Cognito client secret or
+        # any other unrelated secret.
+        trading_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:"
+                    "secret:trading-strands/org/*",
+                ],
+            ),
+        )
+        # Agent memory bucket — read/write scoped to this one bucket.
+        agent_memory_bucket.grant_read_write(trading_task_role)
 
         trading_task_def = ecs.FargateTaskDefinition(
             self,
@@ -196,6 +243,7 @@ class TradingStrandsStack(cdk.Stack):
                 "DYNAMODB_TABLE": table.table_name,
                 "SECRETS_MANAGER_SECRET_NAME": alpaca_secret.secret_name,
                 "ALPACA_PAPER": "true",
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
             },
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="trading",

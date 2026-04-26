@@ -113,6 +113,7 @@ class StrategyBot:
         tta: Predicate | None = None,
         model: str | None = None,
         token_store: Any | None = None,
+        memory_store: Any | None = None,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -121,6 +122,7 @@ class StrategyBot:
         self.tta = tta
         self.model = model or ""
         self._token_store = token_store
+        self._memory_store = memory_store
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
@@ -178,13 +180,20 @@ class StrategyBot:
 
         decision = cast(BotDecision, raw_decision)
 
-        # Record decision for history
+        # Record decision for short-term in-process history (context seed
+        # on next invocation's prompt).
         self._recent_decisions.append(
             f"{decision.action} {decision.symbol} x{decision.quantity}: "
             f"{decision.rationale}"
         )
         if len(self._recent_decisions) > self._max_history:
             self._recent_decisions = self._recent_decisions[-self._max_history :]
+
+        # Durable memory: append a structured line to today's markdown file.
+        # v0 format is minimal (timestamp + action + rationale). v1 will
+        # expand this with MARKETDATA# pointers per the anti-confabulation
+        # rule in docs/SPEC/agent_memory.md.
+        self._append_memory_line(decision, prices, ledger)
 
         action = _map_action(decision.action)
         if action == IntentAction.HOLD:
@@ -198,6 +207,37 @@ class StrategyBot:
             quantity=Decimal(decision.quantity),
             rationale=decision.rationale,
         )
+
+    def _append_memory_line(
+        self,
+        decision: BotDecision,
+        prices: dict[str, Decimal],
+        ledger: Ledger,
+    ) -> None:
+        """Append one line about this decision to the agent's daily memory.
+
+        Failures are swallowed — memory is useful but the tick loop must
+        never crash on S3 issues. If writes fail repeatedly that'll
+        surface in the health check (v1).
+        """
+
+        if self._memory_store is None:
+            return
+        import time as _time
+
+        ts = _time.gmtime()
+        ts_str = f"{ts.tm_hour:02d}:{ts.tm_min:02d}:{ts.tm_sec:02d}Z"
+        # Price reference; v1 will include the MARKETDATA# bucket pointer.
+        price_ref = prices.get(decision.symbol, "?")
+        line = (
+            f"- {ts_str} {decision.action.upper()} {decision.symbol} "
+            f"x{decision.quantity} @ ~{price_ref} "
+            f"(equity ${ledger.equity}). {decision.rationale}"
+        )
+        try:
+            self._memory_store.append_to_today(line)
+        except Exception:
+            logger.exception("memory.append_failed", bot_id=self.bot_id)
 
     def _format_recent(self) -> str:
         if not self._recent_decisions:
