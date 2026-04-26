@@ -503,11 +503,8 @@ class TradingStrandsStack(cdk.Stack):
 
         # -- Self-Critique Agent (weekend Lambda) ----------------------------
         #
-        # Runs Saturday early morning UTC. One invocation per active Strategy
-        # Agent; an operator Lambda (added in Gate B with BotProvisioner) will
-        # enumerate strategies and invoke this function per bot. For v0 the
-        # function exists and is manually invokable; the enumeration loop
-        # is the next iteration's work.
+        # Runs one invocation per active Strategy Agent; the BotProvisioner
+        # Lambda below enumerates strategies and calls this function per bot.
         self_critique_fn = lambda_.DockerImageFunction(
             self,
             "SelfCritiqueFunction",
@@ -539,24 +536,52 @@ class TradingStrandsStack(cdk.Stack):
             resources=["*"],
         ))
 
+        # -- BotProvisioner (weekend fan-out) --------------------------------
+        #
+        # Enumerates active strategies and invokes the Self-Critique function
+        # once per bot. Async (Event) invocations, so one slow critique
+        # doesn't starve the rest of the fleet.
+        bot_provisioner_fn = lambda_.DockerImageFunction(
+            self,
+            "BotProvisionerFunction",
+            function_name="trading-strands-bot-provisioner",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=["trading_strands.provisioner.bot_provisioner.handler"],
+            ),
+            memory_size=256,
+            timeout=cdk.Duration.minutes(2),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "SELF_CRITIQUE_FUNCTION_NAME": self_critique_fn.function_name,
+            },
+        )
+        cdk.Tags.of(bot_provisioner_fn).add("Component", "bot-provisioner")
+        table.grant_read_data(bot_provisioner_fn)
+        self_critique_fn.grant_invoke(bot_provisioner_fn)
+
         # EventBridge schedule: Saturday 10:00 UTC = 6am ET. Markets are
         # closed on Saturday; strategies have finished their week; the
         # current week's memory is available for review.
-        events.Rule(
+        weekend_rule = events.Rule(
             self,
             "SelfCritiqueWeekendSchedule",
             description=(
-                "Saturday 10:00 UTC trigger — caller passes "
-                "{org_id, bot_id} per invocation"
+                "Saturday 10:00 UTC — BotProvisioner enumerates active "
+                "strategies and fans out Self-Critique invocations."
             ),
             schedule=events.Schedule.cron(
                 minute="0", hour="10",
                 week_day="SAT",
             ),
-            # No default target — v1 operator Lambda will invoke per-bot. This
-            # rule is here as a placeholder so CDK creates it on first deploy;
-            # attaching targets later (in Gate B) is a surgical change.
+            # Disabled in this deploy. Enable once we've seen at least one
+            # successful manual run in prod and verified the reflection
+            # lands in the agent-memory bucket.
             enabled=False,
+        )
+        weekend_rule.add_target(
+            events_targets.LambdaFunction(bot_provisioner_fn),
         )
 
         # -- Outputs ----------------------------------------------------------
