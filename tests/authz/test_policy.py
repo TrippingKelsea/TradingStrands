@@ -223,6 +223,14 @@ def test_orgadmin_manages_alpaca_secrets_in_their_org() -> None:
     admin_a = orgadmin(USER_ALICE, ORG_A)
     assert can(admin_a, Action.UPDATE, alpaca_resource(org=ORG_A)).allowed
     assert can(admin_a, Action.READ, alpaca_resource(org=ORG_A)).allowed
+    assert can(admin_a, Action.DELETE, alpaca_resource(org=ORG_A)).allowed
+
+
+def test_non_orgadmin_cannot_touch_alpaca_secrets() -> None:
+    for role_factory in (viewer, operator, auditor):
+        p = role_factory(USER_ALICE, ORG_A)
+        assert not can(p, Action.UPDATE, alpaca_resource(org=ORG_A)).allowed
+        assert not can(p, Action.READ, alpaca_resource(org=ORG_A)).allowed
 
 
 # ── Sysadmin ──────────────────────────────────────────────────────────

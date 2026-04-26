@@ -247,6 +247,25 @@ class TradingStrandsStack(cdk.Stack):
                 resources=["*"],
             )
         )
+        # Dashboard writes per-org Alpaca credentials to Secrets Manager.
+        # Deliberately scoped to /org/*/alpaca — the dashboard never needs
+        # to touch the global trading-strands/alpaca secret, which remains
+        # readable only by the trading service.
+        dashboard_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:PutSecretValue",
+                    "secretsmanager:DeleteSecret",
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:GetSecretValue",
+                ],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:"
+                    "secret:trading-strands/org/*",
+                ],
+            )
+        )
 
         dashboard_task_def = ecs.FargateTaskDefinition(
             self,

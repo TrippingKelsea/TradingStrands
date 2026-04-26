@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from trading_strands.alpaca_secrets.store import AlpacaSecretsStore
 from trading_strands.authz.model import Action, Principal, Resource, ResourceType
 from trading_strands.authz.policy import Unauthorized, require
 from trading_strands.dashboard.auth import (
@@ -1024,6 +1025,77 @@ async def disable_user(request: Request, username: str) -> dict[str, str]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"status": "disabled"}
+
+
+# ── Admin: per-org Alpaca credentials ─────────────────────────────────
+
+
+def _get_secrets_client() -> Any:
+    return boto3.client("secretsmanager")
+
+
+class AlpacaCredsSubmit(BaseModel):
+    api_key: str
+    secret_key: str
+    paper: bool = True
+
+
+@app.get("/api/admin/orgs/{org_id}/alpaca")
+async def get_alpaca_status(request: Request, org_id: str) -> dict[str, Any]:
+    """Report whether this org has Alpaca creds configured + paper/live mode.
+
+    Returns NO key/secret material. Reading actual credentials is only
+    ever done by the trading service's task role — dashboard principals
+    (including sysadmin) have no business seeing customer keys.
+    """
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(ResourceType.ALPACA_SECRET, org_id=org_id),
+    )
+    store = AlpacaSecretsStore(_get_secrets_client())
+    status = store.status(org_id)
+    return {
+        "org_id": org_id,
+        "configured": status.configured,
+        "paper": status.paper,
+    }
+
+
+@app.put("/api/admin/orgs/{org_id}/alpaca")
+async def put_alpaca_creds(
+    request: Request, org_id: str, body: AlpacaCredsSubmit,
+) -> dict[str, Any]:
+    """Write Alpaca credentials for this org.
+
+    Requires ALPACA_SECRET UPDATE which the authz policy grants to
+    orgadmin of the owning org (and NOT to sysadmin — see policy)."""
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.UPDATE,
+        Resource(ResourceType.ALPACA_SECRET, org_id=org_id),
+    )
+    store = AlpacaSecretsStore(_get_secrets_client())
+    store.upsert(
+        org_id=org_id,
+        api_key=body.api_key,
+        secret_key=body.secret_key,
+        paper=body.paper,
+    )
+    return {"org_id": org_id, "configured": True, "paper": body.paper}
+
+
+@app.delete("/api/admin/orgs/{org_id}/alpaca", status_code=204)
+async def delete_alpaca_creds(request: Request, org_id: str) -> None:
+    principal = _get_principal(request)
+    _require(
+        principal, Action.DELETE,
+        Resource(ResourceType.ALPACA_SECRET, org_id=org_id),
+    )
+    store = AlpacaSecretsStore(_get_secrets_client())
+    store.delete(org_id)
 
 
 # ── Exception handler for Unauthorized ─────────────────────────────────

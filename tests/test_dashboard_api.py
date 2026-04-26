@@ -643,6 +643,125 @@ def test_create_user_allowed_by_orgadmin(mock_cognito_fn: MagicMock) -> None:
         assert resp.json()["email"] == "new@x.com"
 
 
+# ── Per-org Alpaca credentials ───────────────────────────────────────
+
+
+def test_alpaca_status_requires_orgadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(f"/api/admin/orgs/{oid}/alpaca")
+        assert resp.status_code == 403
+
+
+def test_alpaca_status_reports_not_configured_for_orgadmin() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(f"/api/admin/orgs/{oid}/alpaca")
+        assert resp.status_code == 200
+        assert resp.json()["configured"] is False
+
+
+def test_alpaca_upsert_and_status_roundtrip() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        put = client.put(
+            f"/api/admin/orgs/{oid}/alpaca",
+            json={"api_key": "K", "secret_key": "S", "paper": True},
+        )
+        assert put.status_code == 200
+        assert put.json()["configured"] is True
+
+        status = client.get(f"/api/admin/orgs/{oid}/alpaca")
+        assert status.status_code == 200
+        assert status.json()["configured"] is True
+        assert status.json()["paper"] is True
+
+
+def test_alpaca_creds_never_returned_by_any_endpoint() -> None:
+    """Hard invariant: the raw API key must never surface to the dashboard."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        client.put(
+            f"/api/admin/orgs/{oid}/alpaca",
+            json={"api_key": "supersecret", "secret_key": "alsosecret", "paper": True},
+        )
+        status = client.get(f"/api/admin/orgs/{oid}/alpaca")
+        body = status.json()
+        assert "supersecret" not in str(body)
+        assert "alsosecret" not in str(body)
+        assert "api_key" not in body
+        assert "secret_key" not in body
+
+
+def test_alpaca_creds_foreign_org_forbidden() -> None:
+    """Orgadmin in org A cannot write creds for org B."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(alice.user_id, org_a.org_id))
+        resp = client.put(
+            f"/api/admin/orgs/{org_b.org_id}/alpaca",
+            json={"api_key": "X", "secret_key": "Y", "paper": True},
+        )
+        assert resp.status_code == 403
+
+
+def test_alpaca_sysadmin_cannot_read_or_write() -> None:
+    """Hard invariant: sysadmin is blocked from Alpaca secrets."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, _oid = _make_user(table, role_name="viewer", sysadmin=True)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid))
+        # Create a different org the sysadmin isn't a member of.
+        from trading_strands.tenancy.store import TenancyStore
+        customer_org = TenancyStore(table).create_org("Customer")
+
+        resp = client.get(f"/api/admin/orgs/{customer_org.org_id}/alpaca")
+        assert resp.status_code == 403
+
+        put = client.put(
+            f"/api/admin/orgs/{customer_org.org_id}/alpaca",
+            json={"api_key": "X", "secret_key": "Y", "paper": True},
+        )
+        assert put.status_code == 403
+
+
 # ── Signed URL tokens ─────────────────────────────────────────────────
 
 
