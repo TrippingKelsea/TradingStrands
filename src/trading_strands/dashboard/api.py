@@ -13,6 +13,7 @@ return org-scoped data is through an explicit authz check.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 from trading_strands.alpaca_secrets.store import AlpacaSecretsStore
-from trading_strands.authz.model import Action, Principal, Resource, ResourceType
+from trading_strands.authz.model import Action, Principal, Resource, ResourceType, Role
 from trading_strands.authz.policy import Unauthorized, require
 from trading_strands.dashboard.auth import (
     CHALLENGE_NEW_PASSWORD_REQUIRED,
@@ -816,10 +817,18 @@ async def delete_org(request: Request, org_id: str) -> None:
 # ── Admin: Users (Cognito pass-through for now) ────────────────────────
 
 
+# All per-org roles supported by the authz policy. Sysadmin is handled
+# via a separate grant endpoint — it's a global flag, not a per-org role,
+# and is NEVER surfaced through user-create or role-update. This keeps
+# it impossible to accidentally mint a new sysadmin from the user-create
+# form.
+VALID_ROLES = frozenset({"viewer", "operator", "auditor", "orgadmin"})
+
+
 class UserCreate(BaseModel):
     email: str
     role: str = "viewer"
-    org_id: str = ""
+    org_id: str = ""  # if empty, user is created without any memberships
 
 
 class UserPasswordReset(BaseModel):
@@ -828,6 +837,7 @@ class UserPasswordReset(BaseModel):
 
 class UserRoleUpdate(BaseModel):
     role: str
+    org_id: str  # role is always per-org now
 
 
 def _require_user_mgmt(principal: Principal, org_id: str | None) -> None:
@@ -842,94 +852,170 @@ def _require_user_mgmt(principal: Principal, org_id: str | None) -> None:
 
 @app.get("/api/admin/users")
 async def list_users(request: Request) -> list[dict[str, Any]]:
+    """Return visible users joined with their per-org memberships.
+
+    Source of truth for role information is DynamoDB (USER# + USERORG#),
+    NOT Cognito attributes. Cognito holds only authentication state
+    (email + password state); everything about roles and orgs lives in
+    our own store so it can't be dropped by a Cognito pool rebuild.
+
+    Visibility:
+      - sysadmin sees every USER#
+      - orgadmin sees only users in orgs they admin (via ORGUSER# scan)
+    """
+
     principal = _get_principal(request)
-    # Listing users is orgadmin-in-the-org or sysadmin. For now we scope
-    # by the principal's active org; a later commit will add a proper
-    # org filter.
-    if not principal.sysadmin:
-        admined = [
+
+    tenancy = TenancyStore(_get_table())
+    cognito = _get_cognito_client()
+    pool_id = _get_user_pool_id()
+
+    # Determine which users this principal is allowed to see.
+    if principal.sysadmin:
+        visible_users = tenancy.list_users()
+    else:
+        admined_orgs = [
             oid for oid, role in principal.memberships.items()
             if role.value == "orgadmin"
         ]
-        if not admined:
+        if not admined_orgs:
             raise HTTPException(status_code=403, detail="orgadmin required")
+        # Collect the set of user_ids in any admined org.
+        seen_ids: set[str] = set()
+        for oid in admined_orgs:
+            for m in tenancy.memberships_for_org(oid):
+                seen_ids.add(m.user_id)
+        visible_users = [
+            u for u in tenancy.list_users() if u.user_id in seen_ids
+        ]
 
-    cognito = _get_cognito_client()
-    pool_id = _get_user_pool_id()
-    users: list[dict[str, Any]] = []
+    # Fetch Cognito status (enabled / CONFIRMED / FORCE_CHANGE_PASSWORD)
+    # by email so the UI can render disabled/new-user badges. Best-effort —
+    # if Cognito is unreachable or the user isn't in Cognito, fall back to
+    # 'UNKNOWN' rather than crashing.
+    result: list[dict[str, Any]] = []
+    for user in visible_users:
+        memberships = tenancy.memberships_for_user(user.user_id)
+        cog_status = "UNKNOWN"
+        cog_enabled = False
+        with contextlib.suppress(Exception):
+            resp = cognito.admin_get_user(
+                UserPoolId=pool_id, Username=user.email,
+            )
+            cog_status = resp.get("UserStatus", "UNKNOWN")
+            cog_enabled = resp.get("Enabled", False)
 
-    paginator_token: str | None = None
-    while True:
-        kwargs: dict[str, Any] = {"UserPoolId": pool_id, "Limit": 60}
-        if paginator_token:
-            kwargs["PaginationToken"] = paginator_token
-        resp = cognito.list_users(**kwargs)
-        for u in resp.get("Users", []):
-            attrs = {a["Name"]: a["Value"] for a in u.get("Attributes", [])}
-            users.append({
-                "username": u["Username"],
-                "email": attrs.get("email", ""),
-                "role": attrs.get("custom:role", "viewer"),
-                "org_id": attrs.get("custom:org_id", ""),
-                "status": u.get("UserStatus", "UNKNOWN"),
-                "enabled": u.get("Enabled", False),
-                "created": u.get("UserCreateDate", "").isoformat()
-                if hasattr(u.get("UserCreateDate", ""), "isoformat")
-                else str(u.get("UserCreateDate", "")),
-            })
-        paginator_token = resp.get("PaginationToken")
-        if not paginator_token:
-            break
+        result.append({
+            "user_id": user.user_id,
+            "email": user.email,
+            "memberships": [
+                {"org_id": m.org_id, "role": m.role.value} for m in memberships
+            ],
+            "sysadmin": tenancy.is_sysadmin(user.user_id),
+            "status": cog_status,
+            "enabled": cog_enabled,
+            "created_at": user.created_at,
+        })
 
-    return users
+    return result
 
 
 @app.post("/api/admin/users", status_code=201)
 async def create_user(request: Request, body: UserCreate) -> dict[str, Any]:
+    """Create a Cognito user AND the corresponding DDB USER# + membership.
+
+    All four per-org roles are assignable here (viewer, operator, auditor,
+    orgadmin). Sysadmin is NEVER settable via this endpoint — use the
+    dedicated /api/admin/users/{user_id}/sysadmin grant instead.
+
+    Rollback semantics: if either the Cognito create or the DDB writes
+    fail after the other succeeded, the orphan is cleaned up before the
+    error returns to the caller. This avoids half-provisioned accounts.
+    """
+
     import secrets
     import string
 
     principal = _get_principal(request)
     _require_user_mgmt(principal, body.org_id or None)
 
-    if body.role not in ("operator", "viewer"):
+    if body.role not in VALID_ROLES:
         raise HTTPException(
             status_code=400,
-            detail="Role must be 'operator' or 'viewer'",
+            detail=f"Role must be one of {sorted(VALID_ROLES)}",
+        )
+    if not body.org_id:
+        raise HTTPException(
+            status_code=400,
+            detail="org_id is required — users must be created into an org",
+        )
+
+    tenancy = TenancyStore(_get_table())
+
+    # Guard: does the org exist? A frontend bug shouldn't let you create
+    # a user membership pointing at a non-existent org.
+    try:
+        tenancy.get_org(body.org_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Organization not found") from None
+
+    # Email uniqueness check done first — cheaper to fail fast than to
+    # create the Cognito user and then fail on the DDB uniqueness guard.
+    if tenancy.find_user_by_email(body.email) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A user with that email already exists",
         )
 
     cognito = _get_cognito_client()
     pool_id = _get_user_pool_id()
 
+    # Random starter password meeting Cognito policy (12+ chars,
+    # upper+lower+digit+symbol). The user must change it on first login.
     alphabet = string.ascii_letters + string.digits + "!@#$%"
-    temp_password = "".join(secrets.choice(alphabet) for _ in range(16))
-
-    user_attrs = [
-        {"Name": "email", "Value": body.email},
-        {"Name": "email_verified", "Value": "true"},
-        {"Name": "custom:role", "Value": body.role},
-    ]
-    if body.org_id:
-        user_attrs.append({"Name": "custom:org_id", "Value": body.org_id})
+    temp_password = "".join(secrets.choice(alphabet) for _ in range(20))
 
     try:
-        cognito.admin_create_user(
+        cog_resp = cognito.admin_create_user(
             UserPoolId=pool_id,
             Username=body.email,
-            UserAttributes=user_attrs,
+            UserAttributes=[
+                {"Name": "email", "Value": body.email},
+                {"Name": "email_verified", "Value": "true"},
+            ],
             TemporaryPassword=temp_password,
             MessageAction="SUPPRESS",
         )
-        # Deliberately NOT setting Permanent=True. Leaving the user in
-        # FORCE_CHANGE_PASSWORD state triggers the NEW_PASSWORD_REQUIRED
-        # challenge on their first login so they must pick their own
-        # password before gaining a session.
     except cognito.exceptions.UsernameExistsException:
         raise HTTPException(status_code=409, detail="User already exists") from None
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from None
 
+    cognito_sub = ""
+    for attr in cog_resp.get("User", {}).get("Attributes", []):
+        if attr.get("Name") == "sub":
+            cognito_sub = attr.get("Value", "")
+            break
+
+    # Create the DDB USER# + membership. If this fails, delete the Cognito
+    # user so we don't leave an orphan that can log in with no USER# record.
+    try:
+        user = tenancy.create_user(
+            email=body.email, cognito_sub=cognito_sub or None,
+        )
+        tenancy.add_membership(
+            user.user_id, body.org_id, Role(body.role),
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            cognito.admin_delete_user(UserPoolId=pool_id, Username=body.email)
+        raise HTTPException(
+            status_code=500,
+            detail="failed to record user in store; Cognito account rolled back",
+        ) from None
+
     return {
+        "user_id": user.user_id,
         "email": body.email,
         "role": body.role,
         "org_id": body.org_id,
@@ -937,20 +1023,29 @@ async def create_user(request: Request, body: UserCreate) -> dict[str, Any]:
     }
 
 
-@app.post("/api/admin/users/{username}/reset-password")
+def _resolve_user_email(tenancy: TenancyStore, user_id: str) -> str:
+    """Load a user record and return its email so Cognito admin calls can
+    find the matching Cognito user. 404 if the user_id doesn't resolve."""
+
+    try:
+        return tenancy.get_user(user_id).email
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="User not found") from None
+
+
+@app.post("/api/admin/users/{user_id}/reset-password")
 async def reset_user_password(
-    request: Request, username: str, body: UserPasswordReset,
+    request: Request, user_id: str, body: UserPasswordReset,
 ) -> dict[str, str]:
     principal = _get_principal(request)
     _require_user_mgmt(principal, None)
 
+    email = _resolve_user_email(TenancyStore(_get_table()), user_id)
     cognito = _get_cognito_client()
-    pool_id = _get_user_pool_id()
-
     try:
         cognito.admin_set_user_password(
-            UserPoolId=pool_id,
-            Username=username,
+            UserPoolId=_get_user_pool_id(),
+            Username=email,
             Password=body.password,
             Permanent=True,
         )
@@ -959,72 +1054,162 @@ async def reset_user_password(
     return {"status": "password_reset"}
 
 
-@app.put("/api/admin/users/{username}/role")
+@app.put("/api/admin/users/{user_id}/role")
 async def update_user_role(
-    request: Request, username: str, body: UserRoleUpdate,
+    request: Request, user_id: str, body: UserRoleUpdate,
 ) -> dict[str, str]:
-    principal = _get_principal(request)
-    _require_user_mgmt(principal, None)
+    """Set a user's role in a specific org. Sysadmin grants are NOT done
+    here — see /api/admin/users/{user_id}/sysadmin. This route deliberately
+    cannot mint a sysadmin: the role enum doesn't include it."""
 
-    if body.role not in ("operator", "viewer"):
+    principal = _get_principal(request)
+    _require_user_mgmt(principal, body.org_id)
+
+    if body.role not in VALID_ROLES:
         raise HTTPException(
             status_code=400,
-            detail="Role must be 'operator' or 'viewer'",
+            detail=f"Role must be one of {sorted(VALID_ROLES)}",
         )
 
-    cognito = _get_cognito_client()
-    pool_id = _get_user_pool_id()
-
+    tenancy = TenancyStore(_get_table())
     try:
-        cognito.admin_update_user_attributes(
-            UserPoolId=pool_id,
-            Username=username,
-            UserAttributes=[{"Name": "custom:role", "Value": body.role}],
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    return {"status": "role_updated", "role": body.role}
+        tenancy.get_user(user_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="User not found") from None
+    try:
+        tenancy.get_org(body.org_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="Organization not found") from None
+
+    # add_membership is an upsert on (user, org).
+    tenancy.add_membership(user_id, body.org_id, Role(body.role))
+    return {"status": "role_updated", "role": body.role, "org_id": body.org_id}
 
 
-@app.delete("/api/admin/users/{username}", status_code=204)
-async def delete_user(request: Request, username: str) -> None:
+@app.delete("/api/admin/users/{user_id}", status_code=204)
+async def delete_user(request: Request, user_id: str) -> None:
+    """Aggressive cleanup: memberships, USER#, email index, sysadmin
+    sentinel, and the Cognito account. Anything left behind would block
+    re-creating a user with the same email later."""
+
     principal = _get_principal(request)
     _require_user_mgmt(principal, None)
 
-    cognito = _get_cognito_client()
-    pool_id = _get_user_pool_id()
+    tenancy = TenancyStore(_get_table())
+    table = _get_table()
+
     try:
-        cognito.admin_delete_user(UserPoolId=pool_id, Username=username)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+        user = tenancy.get_user(user_id)
+    except NotFoundError:
+        return  # idempotent
+
+    for m in tenancy.memberships_for_user(user_id):
+        tenancy.remove_membership(user_id, m.org_id)
+    tenancy.revoke_sysadmin(user_id)
+    with contextlib.suppress(Exception):
+        table.delete_item(Key={"pk": f"USEREMAIL#{user.email.lower().strip()}"})
+    with contextlib.suppress(Exception):
+        table.delete_item(Key={"pk": f"USER#{user_id}"})
+
+    cognito = _get_cognito_client()
+    with contextlib.suppress(Exception):
+        cognito.admin_delete_user(
+            UserPoolId=_get_user_pool_id(), Username=user.email,
+        )
 
 
-@app.post("/api/admin/users/{username}/enable")
-async def enable_user(request: Request, username: str) -> dict[str, str]:
+@app.post("/api/admin/users/{user_id}/enable")
+async def enable_user(request: Request, user_id: str) -> dict[str, str]:
     principal = _get_principal(request)
     _require_user_mgmt(principal, None)
+    email = _resolve_user_email(TenancyStore(_get_table()), user_id)
 
     cognito = _get_cognito_client()
-    pool_id = _get_user_pool_id()
     try:
-        cognito.admin_enable_user(UserPoolId=pool_id, Username=username)
+        cognito.admin_enable_user(
+            UserPoolId=_get_user_pool_id(), Username=email,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"status": "enabled"}
 
 
-@app.post("/api/admin/users/{username}/disable")
-async def disable_user(request: Request, username: str) -> dict[str, str]:
+@app.post("/api/admin/users/{user_id}/disable")
+async def disable_user(request: Request, user_id: str) -> dict[str, str]:
     principal = _get_principal(request)
     _require_user_mgmt(principal, None)
+    email = _resolve_user_email(TenancyStore(_get_table()), user_id)
 
     cognito = _get_cognito_client()
-    pool_id = _get_user_pool_id()
     try:
-        cognito.admin_disable_user(UserPoolId=pool_id, Username=username)
+        cognito.admin_disable_user(
+            UserPoolId=_get_user_pool_id(), Username=email,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     return {"status": "disabled"}
+
+
+# ── Sysadmin grant/revoke (sysadmin-only) ─────────────────────────────
+#
+# Dedicated endpoint so the global sysadmin flag is never settable via
+# the user-create or role-update forms. Guard rails:
+#   - Only sysadmin may call it
+#   - Target must be a member of the system org (no bypassing trust via
+#     creating a user in a random customer org and promoting them)
+#   - Cannot revoke the last sysadmin (would lock the platform out of
+#     ever making another one)
+
+
+class SysadminUpdate(BaseModel):
+    sysadmin: bool
+
+
+@app.put("/api/admin/users/{user_id}/sysadmin")
+async def update_sysadmin(
+    request: Request, user_id: str, body: SysadminUpdate,
+) -> dict[str, Any]:
+    principal = _get_principal(request)
+    if not principal.sysadmin:
+        raise HTTPException(status_code=403, detail="sysadmin required")
+
+    tenancy = TenancyStore(_get_table())
+    try:
+        target = tenancy.get_user(user_id)
+    except NotFoundError:
+        raise HTTPException(status_code=404, detail="User not found") from None
+
+    if body.sysadmin:
+        system_org = tenancy.find_system_org()
+        if system_org is None:
+            raise HTTPException(
+                status_code=500,
+                detail="system org missing — bootstrap broken",
+            )
+        if tenancy.role_of(user_id, system_org.org_id) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="target must be a member of the system org first",
+            )
+        tenancy.grant_sysadmin(user_id)
+    else:
+        # Refuse to remove the last sysadmin.
+        remaining = sum(
+            1 for u in tenancy.list_users()
+            if u.user_id != user_id and tenancy.is_sysadmin(u.user_id)
+        )
+        if remaining == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="cannot revoke the last remaining sysadmin",
+            )
+        tenancy.revoke_sysadmin(user_id)
+
+    return {
+        "user_id": user_id,
+        "email": target.email,
+        "sysadmin": tenancy.is_sysadmin(user_id),
+    }
 
 
 # ── Admin: per-org Alpaca credentials ─────────────────────────────────

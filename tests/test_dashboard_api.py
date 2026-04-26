@@ -572,22 +572,16 @@ def test_list_users_requires_orgadmin_or_sysadmin() -> None:
 
 
 @patch("trading_strands.dashboard.api._get_cognito_client")
-def test_list_users_for_orgadmin(mock_cognito_fn: MagicMock) -> None:
+def test_list_users_for_orgadmin_shows_real_memberships(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    """List-users reads from DynamoDB now, so memberships + sysadmin flag
+    reflect real state (not the old Cognito custom:role attr)."""
+
     mock_cognito = MagicMock()
     mock_cognito_fn.return_value = mock_cognito
-    mock_cognito.list_users.return_value = {
-        "Users": [
-            {
-                "Username": "abc",
-                "Attributes": [
-                    {"Name": "email", "Value": "admin@x.com"},
-                    {"Name": "custom:role", "Value": "operator"},
-                ],
-                "UserStatus": "CONFIRMED",
-                "Enabled": True,
-                "UserCreateDate": "2026-01-01T00:00:00Z",
-            },
-        ],
+    mock_cognito.admin_get_user.return_value = {
+        "UserStatus": "CONFIRMED", "Enabled": True,
     }
 
     with mock_aws():
@@ -599,7 +593,37 @@ def test_list_users_for_orgadmin(mock_cognito_fn: MagicMock) -> None:
         client = TestClient(app, cookies=_session_cookie(uid, oid))
         resp = client.get("/api/admin/users")
         assert resp.status_code == 200
-        assert len(resp.json()) == 1
+        users = resp.json()
+        assert len(users) == 1
+        assert users[0]["email"] == "test@example.com"
+        assert users[0]["memberships"] == [
+            {"org_id": oid, "role": "orgadmin"},
+        ]
+        assert users[0]["sysadmin"] is False
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_list_users_for_sysadmin_shows_sysadmin_flag(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+    mock_cognito.admin_get_user.return_value = {
+        "UserStatus": "CONFIRMED", "Enabled": True,
+    }
+
+    with mock_aws():
+        table = _make_table()
+        uid, _oid = _make_user(table, role_name="viewer", sysadmin=True)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid))
+        resp = client.get("/api/admin/users")
+        assert resp.status_code == 200
+        users = resp.json()
+        assert len(users) == 1
+        assert users[0]["sysadmin"] is True
 
 
 @patch("trading_strands.dashboard.api._get_cognito_client")
@@ -641,6 +665,206 @@ def test_create_user_allowed_by_orgadmin(mock_cognito_fn: MagicMock) -> None:
         })
         assert resp.status_code == 201
         assert resp.json()["email"] == "new@x.com"
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_create_user_accepts_all_four_per_org_roles(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    """Every role in VALID_ROLES must be settable via user-create."""
+
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    for role in ("viewer", "operator", "auditor", "orgadmin"):
+        with mock_aws():
+            table = _make_table()
+            uid, oid = _make_user(table, role_name="orgadmin")
+            from trading_strands.dashboard.api import app
+
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.post("/api/admin/users", json={
+                "email": f"{role}@x.com", "role": role, "org_id": oid,
+            })
+            assert resp.status_code == 201, f"role {role} should be accepted"
+            assert resp.json()["role"] == role
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_create_user_rejects_sysadmin_as_role(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    """Sysadmin is a global flag, not a role. Setting it here must 400."""
+
+    mock_cognito = MagicMock()
+    mock_cognito_fn.return_value = mock_cognito
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/admin/users", json={
+            "email": "god@x.com", "role": "sysadmin", "org_id": oid,
+        })
+        assert resp.status_code == 400
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_update_role_requires_org_id_and_writes_membership(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    """New role-update takes user_id + (body.org_id, body.role) and writes
+    a membership via the tenancy store. The old Cognito-attribute path is
+    gone."""
+
+    mock_cognito_fn.return_value = MagicMock()
+
+    with mock_aws():
+        from trading_strands.authz.model import Role as AuthzRole
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        admin_uid, oid = _make_user(table, role_name="orgadmin")
+        bob = TenancyStore(table).create_user(email="bob@x.com")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(
+            app, cookies=_session_cookie(admin_uid, oid),
+        )
+        resp = client.put(
+            f"/api/admin/users/{bob.user_id}/role",
+            json={"role": "auditor", "org_id": oid},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["role"] == "auditor"
+        role = TenancyStore(table).role_of(bob.user_id, oid)
+        assert role == AuthzRole.AUDITOR
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_sysadmin_endpoint_grants(mock_cognito_fn: MagicMock) -> None:
+    mock_cognito_fn.return_value = MagicMock()
+
+    with mock_aws():
+        from trading_strands.authz.model import Role as AuthzRole
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+
+        # Caller: a sysadmin who's a member of the system org.
+        from trading_strands.tenancy.models import OrgType as _OrgType
+        system_org = tenancy.create_org(
+            "Women with Super Powers", _OrgType.SYSTEM,
+        )
+        caller = tenancy.create_user(email="caller@x.com")
+        tenancy.add_membership(caller.user_id, system_org.org_id, AuthzRole.ORGADMIN)
+        tenancy.grant_sysadmin(caller.user_id)
+
+        # Target: a user who's already a member of the system org (so
+        # they're eligible for sysadmin).
+        target = tenancy.create_user(email="target@x.com")
+        tenancy.add_membership(
+            target.user_id, system_org.org_id, AuthzRole.VIEWER,
+        )
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(caller.user_id))
+        resp = client.put(
+            f"/api/admin/users/{target.user_id}/sysadmin",
+            json={"sysadmin": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["sysadmin"] is True
+        assert tenancy.is_sysadmin(target.user_id) is True
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_sysadmin_endpoint_refuses_non_system_org_member(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    """Cannot grant sysadmin to a user who's not in the system org."""
+
+    mock_cognito_fn.return_value = MagicMock()
+
+    with mock_aws():
+        from trading_strands.authz.model import Role as AuthzRole
+        from trading_strands.tenancy.models import OrgType as _OrgType
+        from trading_strands.tenancy.store import TenancyStore
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        tenancy.create_org("Women with Super Powers", _OrgType.SYSTEM)
+        customer_org = tenancy.create_org("Customer")
+
+        caller = tenancy.create_user(email="caller@x.com")
+        tenancy.grant_sysadmin(caller.user_id)
+
+        target = tenancy.create_user(email="target@x.com")
+        # Only in the customer org, not the system org.
+        tenancy.add_membership(
+            target.user_id, customer_org.org_id, AuthzRole.OPERATOR,
+        )
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(caller.user_id))
+        resp = client.put(
+            f"/api/admin/users/{target.user_id}/sysadmin",
+            json={"sysadmin": True},
+        )
+        assert resp.status_code == 400
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_sysadmin_endpoint_cannot_revoke_last_sysadmin(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    mock_cognito_fn.return_value = MagicMock()
+
+    with mock_aws():
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        uid, _oid = _make_user(
+            table, role_name="orgadmin", sysadmin=True,
+        )
+        tenancy = TenancyStore(table)
+        assert tenancy.is_sysadmin(uid) is True
+        assert sum(1 for u in tenancy.list_users() if tenancy.is_sysadmin(u.user_id)) == 1
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid))
+        resp = client.put(
+            f"/api/admin/users/{uid}/sysadmin",
+            json={"sysadmin": False},
+        )
+        assert resp.status_code == 400
+        # Still sysadmin — the revocation was refused.
+        assert tenancy.is_sysadmin(uid) is True
+
+
+@patch("trading_strands.dashboard.api._get_cognito_client")
+def test_sysadmin_endpoint_forbidden_for_non_sysadmin(
+    mock_cognito_fn: MagicMock,
+) -> None:
+    mock_cognito_fn.return_value = MagicMock()
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.put(
+            f"/api/admin/users/{uid}/sysadmin",
+            json={"sysadmin": True},
+        )
+        assert resp.status_code == 403
 
 
 # ── Per-org Alpaca credentials ───────────────────────────────────────
