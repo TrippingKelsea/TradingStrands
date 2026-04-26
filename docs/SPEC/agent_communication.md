@@ -1,7 +1,11 @@
 # Agent Communication
 
-**Status:** Draft
+**Status:** Target (v1). Not yet implemented.
 **Last updated:** 2026-04-26
+
+> Today agents communicate via in-process Python calls (the orchestrator's
+> tick invokes bot.decide() directly, the coordinator invokes the risk
+> manager directly). This doc describes the A2A-over-AgentCore model for v1.
 
 ## Protocol: AgentCore-native A2A
 

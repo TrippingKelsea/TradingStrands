@@ -1,7 +1,15 @@
 # Observability
 
-**Status:** Draft
+**Status:** Target (v1). Not yet implemented.
 **Last updated:** 2026-04-26
+
+> Today we emit structlog JSON logs to CloudWatch and have a half-wired
+> `/api/costs` endpoint (Cost Explorer call) plus a `/api/telemetry` endpoint
+> that reads the most-recent trading-service snapshot from DynamoDB. There
+> is no EMF emission, no health check contract, no token telemetry.
+>
+> This doc is the target. Token telemetry is the most urgent subset — LLM
+> cost is variable per decision and currently invisible.
 
 ## Telemetry substrate: CloudWatch EMF
 

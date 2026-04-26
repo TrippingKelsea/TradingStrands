@@ -1,7 +1,21 @@
 # Deployment
 
-**Status:** Draft
+**Status:** Partially implemented.
 **Last updated:** 2026-04-26
+
+> **Implemented now (v0):** CDK stack with ECS Fargate services for trading +
+> dashboard, DynamoDB state table, Cognito user pool, per-org Alpaca secrets
+> in Secrets Manager, resource tagging for cost attribution, EventBridge
+> scale-down for the trading service off-hours, CDK-managed placeholder
+> secrets to solve the chicken-and-egg problem with ECS + Secrets Manager.
+>
+> **Target (v1), not implemented:** per-bot Fargate tasks, per-bot IAM roles
+> via STS assume-role from Lambda operators, BotProvisioner + Deprovisioner
+> lifecycle Lambdas, blue-green for dashboard + Broker Agent, Scale
+> Dispatcher Lambda, per-org Risk/Compliance/Auditor mode switches.
+>
+> The below describes the target. See [operational_notes.md](./operational_notes.md)
+> for the discipline and conventions that apply at both v0 and v1 today.
 
 ## Workload classification
 

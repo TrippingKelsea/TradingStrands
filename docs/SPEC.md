@@ -11,14 +11,21 @@ The spec is organized as an **index + leaf documents**. Foundational philosophy,
 
 ## Index
 
+Each leaf doc declares its own status at the top:
+
+- **Current** — the feature is implemented and the doc describes the running code.
+- **Target (v1)** — the doc describes the intended architecture; code is not there yet.
+- **Partially implemented** — some pieces shipped, others pending.
+
 | Doc | What it covers | Status |
 |---|---|---|
-| [agents.md](./SPEC/agents.md) | What an Agent is, the agent types (Strategy, Compliance, Risk, Broker, Auditor, Self-Critique, Platform Supervisor), self-driven loop model, health checks, trade-gating invariant | Draft |
-| [agent_memory.md](./SPEC/agent_memory.md) | Daily markdown memory files, S3 layout, lessons.md, compaction (live + batch), retrieval skill, DynamoDB pointer references | Draft |
-| [agent_communication.md](./SPEC/agent_communication.md) | AgentCore-native A2A for inter-agent calls, identity + provenance, trade-intent message flow | Draft |
-| [deployment.md](./SPEC/deployment.md) | Fargate-for-streaming / Lambda-for-event matrix, per-bot IAM, BotProvisioner + Deprovisioner, blue-green, scale dispatcher, per-org mode switches, break-glass | Draft |
-| [observability.md](./SPEC/observability.md) | CloudWatch EMF metrics, dashboard graph widgets, health check contract, token telemetry, heartbeats | Draft |
-| [multi_tenancy.md](./SPEC/multi_tenancy.md) | Org model, per-org roles (viewer / operator / auditor / orgadmin), sysadmin flag, deny-by-default authz, the `SYSADMIN_CAN_READ_ORG_DATA` switch | Planned |
+| [multi_tenancy.md](./SPEC/multi_tenancy.md) | Org model, per-org roles (viewer / operator / auditor / orgadmin), sysadmin flag, deny-by-default authz, session shape, bootstrap, password policy, schema evolution | **Current** |
+| [operational_notes.md](./SPEC/operational_notes.md) | Resource tagging, SG discipline, IAM role types, CloudFormation chicken-and-egg, moto quirks, deploy ordering, dev vs. production posture | **Current** |
+| [agents.md](./SPEC/agents.md) | Agent definition, types (Strategy / Broker / Risk / Compliance / Auditor / Self-Critique / Platform Supervisor), self-driven loop model, health checks, trade-gating invariant | **Target (v1)** |
+| [agent_memory.md](./SPEC/agent_memory.md) | Daily markdown memory files, S3 layout, lessons.md, compaction (live + batch), retrieval skill, DynamoDB pointer references | **Target (v1)** |
+| [agent_communication.md](./SPEC/agent_communication.md) | AgentCore-native A2A for inter-agent calls, identity + provenance, trade-intent message flow | **Target (v1)** |
+| [deployment.md](./SPEC/deployment.md) | Fargate-for-streaming / Lambda-for-event matrix, per-bot IAM, BotProvisioner + Deprovisioner, blue-green, scale dispatcher, per-org mode switches | **Partially implemented** |
+| [observability.md](./SPEC/observability.md) | CloudWatch EMF metrics, dashboard graph widgets, health check contract, token telemetry, heartbeats | **Target (v1)** |
 
 ---
 

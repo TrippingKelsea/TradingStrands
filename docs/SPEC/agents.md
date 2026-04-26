@@ -1,7 +1,13 @@
 # Agents
 
-**Status:** Draft
+**Status:** Target (v1). Not yet implemented.
 **Last updated:** 2026-04-26
+
+> The code today runs a single trading-service task that hosts all bots,
+> a Trade Coordinator that serializes broker calls, and a deterministic
+> Risk Manager in that same process. This doc describes the target v1
+> shape: one Agent per task, Broker Agent as per-org chokepoint, AgentCore
+> A2A for inter-agent messages. See `CLAUDE.md` for the v0 → v1 mapping.
 
 ## Definition
 

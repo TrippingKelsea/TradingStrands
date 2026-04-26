@@ -1,7 +1,14 @@
 # Agent Memory
 
-**Status:** Draft
+**Status:** Target (v1). Not yet implemented.
 **Last updated:** 2026-04-26
+
+> Today's Strategy Bot has only an in-process `_recent_decisions` list (cap 10)
+> and loses everything on task restart. The durable ledger is in-memory and
+> reconstituted-from-scratch each morning — a known gap blocking the
+> scale-down scheduler from being safe across nightly cycles. This doc is
+> the target model. The durable ledger (item 1 below) is the most urgent
+> subset, because without it the reconciler starts from zero every day.
 
 ## Premise
 
