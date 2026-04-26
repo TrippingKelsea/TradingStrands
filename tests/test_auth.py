@@ -22,6 +22,10 @@ os.environ.setdefault("COGNITO_CLIENT_ID", "testclientid")
 os.environ.setdefault("COGNITO_CLIENT_SECRET", "testclientsecret")
 os.environ.setdefault("DYNAMODB_TABLE", "trading-strands-state")
 os.environ.setdefault("SESSION_SECRET", "test-secret")
+# moto fixtures need a default region for boto3 to resolve.
+os.environ.setdefault("AWS_DEFAULT_REGION", "us-west-2")
+os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
 
 
 @pytest.fixture(autouse=True)
