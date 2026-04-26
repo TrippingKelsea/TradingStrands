@@ -313,6 +313,20 @@ class TradingStrandsStack(cdk.Stack):
         # bucket. Read-only — operators view, they don't edit. (Writes are
         # the Self-Critique Lambda's job.)
         agent_memory_bucket.grant_read(dashboard_task_role)
+        # Dashboard reads per-bot Fargate service state to render status
+        # indicators. DescribeServices only — nothing that can change state.
+        # Resource scope is the cluster's services pattern; ECS requires
+        # resources="*" for DescribeServices in practice, but we add a
+        # condition to scope to this cluster.
+        dashboard_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["ecs:DescribeServices"],
+                resources=["*"],
+                conditions={
+                    "ArnEquals": {"ecs:cluster": cluster.cluster_arn},
+                },
+            )
+        )
         # Dashboard writes per-org Alpaca credentials to Secrets Manager.
         # Deliberately scoped to /org/*/alpaca — the dashboard never needs
         # to touch the global trading-strands/alpaca secret, which remains
@@ -355,6 +369,7 @@ class TradingStrandsStack(cdk.Stack):
                 "COGNITO_USER_POOL_ID": user_pool.user_pool_id,
                 "COGNITO_CLIENT_ID": user_pool_client.user_pool_client_id,
                 "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                "ECS_CLUSTER": cluster.cluster_name,
             },
             secrets={
                 "COGNITO_CLIENT_SECRET": ecs.Secret.from_secrets_manager(

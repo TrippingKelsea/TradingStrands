@@ -725,6 +725,95 @@ async def delete_strategy(request: Request, strategy_id: str) -> None:
     store.delete(strategy_id)
 
 
+_ecs_client_cache: Any = None
+
+
+def _get_ecs_client() -> Any:
+    """Lazily-constructed ECS client. Kept behind a helper so tests can
+    patch it without plumbing dependency injection through every
+    endpoint."""
+
+    global _ecs_client_cache
+    if _ecs_client_cache is None:
+        _ecs_client_cache = boto3.client("ecs")
+    return _ecs_client_cache
+
+
+def _parse_td_revision(td_arn: str) -> int | None:
+    """Pull the ':<N>' revision off a task-definition ARN.
+
+    ARN shape: arn:aws:ecs:REGION:ACCT:task-definition/FAMILY:REVISION
+    """
+
+    if ":" not in td_arn:
+        return None
+    tail = td_arn.rsplit(":", 1)[-1]
+    if not tail.isdigit():
+        return None
+    return int(tail)
+
+
+@app.get("/api/strategies/{strategy_id}/service")
+async def get_strategy_service(
+    request: Request, strategy_id: str,
+) -> dict[str, Any]:
+    """Report what the StrategySupervisor has set up in ECS for this
+    strategy. Operators use this to see whether cutover actually
+    landed a per-bot service and what state it's in."""
+
+    from trading_strands.supervisor.strategy_supervisor import (
+        service_name_for,
+    )
+
+    principal = _get_principal(request)
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.READ, resource_for(strat, acl))
+
+    cluster = os.environ.get("ECS_CLUSTER")
+    if not cluster:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Per-bot Fargate not configured (ECS_CLUSTER unset). "
+                "This dashboard cannot report service state."
+            ),
+        )
+
+    service_name = service_name_for(strategy_id)
+    ecs = _get_ecs_client()
+    resp = ecs.describe_services(cluster=cluster, services=[service_name])
+    services = resp.get("services", [])
+    if not services or services[0].get("status") in ("MISSING", "INACTIVE"):
+        return {
+            "exists": False,
+            "service_name": service_name,
+            "status": None,
+            "desired_count": 0,
+            "running_count": 0,
+            "pending_count": 0,
+            "task_definition_revision": None,
+        }
+
+    svc = services[0]
+    return {
+        "exists": True,
+        "service_name": service_name,
+        "status": svc.get("status"),
+        "desired_count": int(svc.get("desiredCount", 0)),
+        "running_count": int(svc.get("runningCount", 0)),
+        "pending_count": int(svc.get("pendingCount", 0)),
+        "task_definition_revision": _parse_td_revision(
+            str(svc.get("taskDefinition", "")),
+        ),
+    }
+
+
 @app.get("/api/strategies/{strategy_id}/lessons")
 async def get_strategy_lessons(
     request: Request, strategy_id: str,

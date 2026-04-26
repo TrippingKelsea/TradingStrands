@@ -1355,3 +1355,233 @@ def test_critique_lessons_503_when_bucket_unconfigured() -> None:
         resp = client.get(f"/api/strategies/{strat.strategy_id}/lessons")
         assert resp.status_code == 503
         assert "AGENT_MEMORY_BUCKET" in resp.json().get("detail", "")
+
+
+# ── Per-bot Fargate service state ───────────────────────────────────
+
+
+def _ecs_client_mock(
+    service_name: str, service: dict[str, Any] | None,
+) -> MagicMock:
+    """Build an ecs client mock whose describe_services returns either
+    the service or the standard 'MISSING' sentinel ECS uses."""
+
+    client = MagicMock()
+    if service is None:
+        client.describe_services.return_value = {
+            "services": [{"status": "MISSING", "serviceName": service_name}],
+        }
+    else:
+        client.describe_services.return_value = {"services": [service]}
+    return client
+
+
+def test_service_state_reports_running() -> None:
+    """Operator sees a healthy per-bot service."""
+
+    os.environ["ECS_CLUSTER"] = "ts-cluster"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("A")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+            store = StrategyStore(table)
+            strat = store.create(org.org_id, alice.user_id, "S", "# rules")
+
+            svc_name = f"ts-strategy-{strat.strategy_id}"
+            ecs_mock = _ecs_client_mock(svc_name, {
+                "serviceName": svc_name,
+                "status": "ACTIVE",
+                "desiredCount": 1,
+                "runningCount": 1,
+                "pendingCount": 0,
+                "taskDefinition": (
+                    "arn:aws:ecs:us-west-2:0:task-definition/ts-bot-"
+                    + strat.strategy_id + ":3"
+                ),
+            })
+            with patch(
+                "trading_strands.dashboard.api._get_ecs_client",
+                return_value=ecs_mock,
+            ):
+                from trading_strands.dashboard.api import app
+                client = TestClient(app, cookies=_session_cookie(
+                    alice.user_id, org.org_id,
+                ))
+                resp = client.get(
+                    f"/api/strategies/{strat.strategy_id}/service",
+                )
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["exists"] is True
+                assert body["status"] == "ACTIVE"
+                assert body["desired_count"] == 1
+                assert body["running_count"] == 1
+                assert body["task_definition_revision"] == 3
+    finally:
+        del os.environ["ECS_CLUSTER"]
+
+
+def test_service_state_reports_missing_when_not_created() -> None:
+    """A strategy created but never transitioned to per-bot — supervisor
+    hasn't made a service yet. Dashboard must distinguish this from
+    'service exists, scaled to zero'."""
+
+    os.environ["ECS_CLUSTER"] = "ts-cluster"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("A")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+            store = StrategyStore(table)
+            strat = store.create(org.org_id, alice.user_id, "S", "# rules")
+
+            svc_name = f"ts-strategy-{strat.strategy_id}"
+            ecs_mock = _ecs_client_mock(svc_name, None)
+            with patch(
+                "trading_strands.dashboard.api._get_ecs_client",
+                return_value=ecs_mock,
+            ):
+                from trading_strands.dashboard.api import app
+                client = TestClient(app, cookies=_session_cookie(
+                    alice.user_id, org.org_id,
+                ))
+                resp = client.get(
+                    f"/api/strategies/{strat.strategy_id}/service",
+                )
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["exists"] is False
+                assert body["status"] is None
+    finally:
+        del os.environ["ECS_CLUSTER"]
+
+
+def test_service_state_reports_paused_when_scaled_to_zero() -> None:
+    """Supervisor scales to 0 on PAUSE. Dashboard must not confuse
+    this with 'missing'."""
+
+    os.environ["ECS_CLUSTER"] = "ts-cluster"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("A")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+            store = StrategyStore(table)
+            strat = store.create(org.org_id, alice.user_id, "S", "# rules")
+
+            svc_name = f"ts-strategy-{strat.strategy_id}"
+            ecs_mock = _ecs_client_mock(svc_name, {
+                "serviceName": svc_name,
+                "status": "ACTIVE",
+                "desiredCount": 0,
+                "runningCount": 0,
+                "pendingCount": 0,
+                "taskDefinition": (
+                    "arn:aws:ecs:us-west-2:0:task-definition/ts-bot-"
+                    + strat.strategy_id + ":1"
+                ),
+            })
+            with patch(
+                "trading_strands.dashboard.api._get_ecs_client",
+                return_value=ecs_mock,
+            ):
+                from trading_strands.dashboard.api import app
+                client = TestClient(app, cookies=_session_cookie(
+                    alice.user_id, org.org_id,
+                ))
+                resp = client.get(
+                    f"/api/strategies/{strat.strategy_id}/service",
+                )
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["exists"] is True
+                assert body["desired_count"] == 0
+    finally:
+        del os.environ["ECS_CLUSTER"]
+
+
+def test_service_state_forbidden_for_other_org() -> None:
+    """Cross-org — supervisor runs no service-state fishing."""
+
+    os.environ["ECS_CLUSTER"] = "ts-cluster"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            bob = tenancy.create_user(email="bob@x.com")
+            org_a = tenancy.create_org("A")
+            org_b = tenancy.create_org("B")
+            tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+            tenancy.add_membership(bob.user_id, org_b.org_id, Role.OPERATOR)
+            store = StrategyStore(table)
+            strat = store.create(org_b.org_id, bob.user_id, "S", "# r")
+
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org_a.org_id,
+            ))
+            resp = client.get(
+                f"/api/strategies/{strat.strategy_id}/service",
+            )
+            assert resp.status_code == 403
+    finally:
+        del os.environ["ECS_CLUSTER"]
+
+
+def test_service_state_503_when_cluster_unconfigured() -> None:
+    """Dev instance or a misdeployed stack: tell the operator."""
+
+    os.environ.pop("ECS_CLUSTER", None)
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+        store = StrategyStore(table)
+        strat = store.create(org.org_id, alice.user_id, "S", "# r")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get(f"/api/strategies/{strat.strategy_id}/service")
+        assert resp.status_code == 503
+        assert "ECS_CLUSTER" in resp.json().get("detail", "")
+
+
+def test_service_state_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/strategies/abc/service")
+        assert resp.status_code == 401

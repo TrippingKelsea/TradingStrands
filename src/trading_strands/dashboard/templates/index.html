@@ -487,6 +487,7 @@
             <div>
               <span class="strat-name">${s.name}</span>
               <span class="badge ${statusClass}">${s.status}</span>
+              <span class="badge svc-badge" data-sid="${s.strategy_id}" style="background:var(--border);color:var(--dim)">service: …</span>
             </div>
             <div class="strat-actions">
               ${s.status === 'active' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','paused')">Pause</button>` : ''}
@@ -500,8 +501,52 @@
         card.addEventListener('click', () => openEditStrategy(s.strategy_id));
         container.appendChild(card);
       });
+
+      // Fire-and-forget service-state fetches per card. Kept out of the
+      // initial render so slow ECS calls don't block the strategies
+      // list from appearing.
+      strategies.forEach(s => fetchServiceState(s.strategy_id));
     } catch(e) {
       container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:16px;">Failed to load strategies.</div>';
+    }
+  }
+
+  async function fetchServiceState(sid) {
+    const badge = document.querySelector('.svc-badge[data-sid="' + sid + '"]');
+    if (!badge) return;
+    try {
+      const resp = await fetch('/api/strategies/' + sid + '/service');
+      if (resp.status === 503) {
+        // Cluster not configured — don't show anything rather than an error.
+        badge.remove();
+        return;
+      }
+      if (!resp.ok) {
+        badge.textContent = 'service: ?';
+        return;
+      }
+      const body = await resp.json();
+      let label, color;
+      if (!body.exists) {
+        label = 'service: not provisioned';
+        color = 'var(--dim)';
+      } else if (body.desired_count === 0) {
+        label = 'service: scaled to 0';
+        color = 'var(--amber, #d4a017)';
+      } else if (body.running_count >= body.desired_count) {
+        label = 'service: running (' + body.running_count + '/' + body.desired_count + ')';
+        color = 'var(--green, #3a9d3a)';
+      } else {
+        label = 'service: starting (' + body.running_count + '/' + body.desired_count + ')';
+        color = 'var(--amber, #d4a017)';
+      }
+      badge.textContent = label;
+      badge.style.color = color;
+      if (body.task_definition_revision != null) {
+        badge.title = 'task-def revision ' + body.task_definition_revision;
+      }
+    } catch(e) {
+      badge.textContent = 'service: ?';
     }
   }
 
