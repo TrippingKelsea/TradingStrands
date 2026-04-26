@@ -40,6 +40,7 @@
     <div class="panel">
       <h2>Market Prices</h2>
       <div id="prices-list" style="font-size:0.8rem;color:var(--dim);">Waiting for data...</div>
+      <div id="price-charts" style="margin-top:8px;"></div>
     </div>
 
     <div class="panel" id="whatif-panel">
@@ -356,13 +357,14 @@
     // Update account bar (equity, PnL, halt state)
     updateAccountBar(snap);
 
-    // Update prices panel
+    // Update prices panel + sparklines for watched symbols.
     const pricesList = $('prices-list');
     const symbols = Object.keys(prices).sort();
     if (symbols.length > 0) {
       pricesList.innerHTML = symbols.map(sym =>
         `<div class="metric"><span class="label">${sym}</span><span class="value">$${fmt(prices[sym])}</span></div>`
       ).join('');
+      ensurePriceCharts(symbols);
     } else {
       pricesList.innerHTML = '<span style="color:var(--dim)">No price data</span>';
     }
@@ -1125,6 +1127,177 @@
       status.style.color = 'var(--red)';
     }
   };
+
+  // ── Market data sparklines ───────────────────────────────────────────
+
+  const _chartState = {
+    // Map<symbol, {bars, canvas, ctx, lastFetched, inflight}>
+  };
+
+  async function ensurePriceCharts(symbols) {
+    const container = $('price-charts');
+    if (!container) return;
+
+    // Remove charts for symbols no longer watched.
+    const existing = new Set(Object.keys(_chartState));
+    const wanted = new Set(symbols);
+    for (const sym of existing) {
+      if (!wanted.has(sym)) {
+        const el = document.getElementById('pchart-' + sym);
+        if (el) el.remove();
+        delete _chartState[sym];
+      }
+    }
+
+    // Create canvases for newly-watched symbols.
+    for (const sym of symbols) {
+      if (!_chartState[sym]) {
+        const wrap = document.createElement('div');
+        wrap.id = 'pchart-' + sym;
+        wrap.style.cssText = 'margin-top:8px; padding-top:8px; border-top: 1px dashed var(--border);';
+        wrap.innerHTML = `
+          <div style="display:flex; justify-content:space-between; font-size:0.7rem; color:var(--dim); margin-bottom:4px;">
+            <span><b style="color:var(--blue);">${sym}</b> <span id="pchart-${sym}-range" style="color:var(--dim);"></span></span>
+            <span id="pchart-${sym}-status" style="color:var(--dim); font-size:0.65rem;">loading…</span>
+          </div>
+          <canvas id="pchart-${sym}-canvas" height="60" style="width:100%; display:block; border: 1px solid var(--border); border-radius: 3px; background: var(--bg);"></canvas>
+        `;
+        container.appendChild(wrap);
+        const canvas = document.getElementById('pchart-' + sym + '-canvas');
+        _chartState[sym] = {
+          bars: [],
+          canvas,
+          ctx: canvas.getContext('2d'),
+          lastFetched: 0,
+          inflight: false,
+        };
+      }
+    }
+
+    // Fire off background loads (throttled per-symbol to once every 60s).
+    const now = Date.now();
+    for (const sym of symbols) {
+      const st = _chartState[sym];
+      if (st.inflight) continue;
+      if (now - st.lastFetched < 60000) {
+        // Skip network; just redraw with the current bar set in case the
+        // canvas was resized etc.
+        drawSparkline(sym);
+        continue;
+      }
+      st.inflight = true;
+      st.lastFetched = now;
+      fetchAndDrawSymbol(sym);
+    }
+  }
+
+  async function fetchAndDrawSymbol(sym) {
+    const st = _chartState[sym];
+    if (!st) return;
+    const statusEl = document.getElementById('pchart-' + sym + '-status');
+    try {
+      const resp = await fetch('/api/marketdata/' + encodeURIComponent(sym) + '?hours=1');
+      if (!resp.ok) {
+        if (statusEl) statusEl.textContent = 'error';
+        return;
+      }
+      const data = await resp.json();
+      st.bars = data.bars || [];
+      drawSparkline(sym);
+      if (statusEl) {
+        statusEl.textContent = st.bars.length === 0 ? 'no data yet' : st.bars.length + ' bars · 1h';
+      }
+    } catch(e) {
+      if (statusEl) statusEl.textContent = 'error';
+    } finally {
+      st.inflight = false;
+    }
+  }
+
+  function drawSparkline(sym) {
+    const st = _chartState[sym];
+    if (!st) return;
+    const canvas = st.canvas;
+    const ctx = st.ctx;
+
+    // Make the canvas backing-store match its display size (for crisp lines
+    // on high-DPR displays). Cheap to redo on every draw.
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = rect.width;
+    const cssH = rect.height;
+    if (canvas.width !== cssW * dpr || canvas.height !== cssH * dpr) {
+      canvas.width = cssW * dpr;
+      canvas.height = cssH * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const bars = st.bars;
+    if (!bars || bars.length < 2) {
+      ctx.fillStyle = '#8b949e';
+      ctx.font = '10px monospace';
+      ctx.fillText('not enough data', 8, cssH / 2 + 3);
+      return;
+    }
+
+    // Pull close prices. Skip null/NaN.
+    const xs = [];
+    const ys = [];
+    for (const bar of bars) {
+      const v = parseFloat(bar.close);
+      if (isNaN(v)) continue;
+      xs.push(bar.ts);
+      ys.push(v);
+    }
+    if (ys.length < 2) return;
+
+    const xMin = xs[0], xMax = xs[xs.length - 1];
+    const yMin = Math.min(...ys), yMax = Math.max(...ys);
+    const xSpan = Math.max(1, xMax - xMin);
+    const ySpan = Math.max(0.0001, yMax - yMin);
+    const pad = 2;
+    const mapX = t => pad + ((t - xMin) / xSpan) * (cssW - 2 * pad);
+    const mapY = v => (cssH - pad) - ((v - yMin) / ySpan) * (cssH - 2 * pad);
+
+    // Gradient fill below the line.
+    const first = ys[0];
+    const last = ys[ys.length - 1];
+    const lineColor = last >= first ? '#3fb950' : '#f85149';
+    const fillColor = last >= first ? 'rgba(63,185,80,0.15)' : 'rgba(248,81,73,0.15)';
+
+    ctx.beginPath();
+    ctx.moveTo(mapX(xs[0]), cssH - pad);
+    for (let i = 0; i < xs.length; i++) {
+      ctx.lineTo(mapX(xs[i]), mapY(ys[i]));
+    }
+    ctx.lineTo(mapX(xs[xs.length - 1]), cssH - pad);
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(mapX(xs[0]), mapY(ys[0]));
+    for (let i = 1; i < xs.length; i++) {
+      ctx.lineTo(mapX(xs[i]), mapY(ys[i]));
+    }
+    ctx.strokeStyle = lineColor;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Price range label in the corner.
+    const rangeEl = document.getElementById('pchart-' + sym + '-range');
+    if (rangeEl) {
+      const pct = ((last - first) / first) * 100;
+      rangeEl.innerHTML = ` · $${yMin.toFixed(2)}–$${yMax.toFixed(2)} ` +
+        `<span style="color: ${lineColor};">(${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)</span>`;
+    }
+  }
+
+  // Redraw all sparklines on window resize so they stay crisp.
+  window.addEventListener('resize', () => {
+    for (const sym of Object.keys(_chartState)) drawSparkline(sym);
+  });
 {% endblock %}
 
 {% block init %}
