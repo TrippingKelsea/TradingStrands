@@ -36,6 +36,9 @@ from aws_cdk import (
     aws_lambda as lambda_,
 )
 from aws_cdk import (
+    aws_lambda_event_sources as lambda_event_sources,
+)
+from aws_cdk import (
     aws_logs as logs,
 )
 from aws_cdk import (
@@ -92,7 +95,10 @@ class TradingStrandsStack(cdk.Stack):
             self, "TradingStrandsRepo", "trading-strands",
         )
 
-        # DynamoDB table — tagged for cost tracking
+        # DynamoDB table — tagged for cost tracking.
+        # Streams enabled with NEW_AND_OLD_IMAGES so the StrategySupervisor
+        # can diff old vs new status on MODIFY events (needed to tell a
+        # markdown edit from a pause transition).
         table = dynamodb.Table(
             self,
             "TradingStrandsState",
@@ -104,6 +110,7 @@ class TradingStrandsStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=cdk.RemovalPolicy.DESTROY,
             time_to_live_attribute="ttl",  # used by EVENT#, TOKENEVENT#, LEDGER_EVENT#
+            stream=dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
         )
 
         # Agent memory bucket (v0: single shared bucket, prefix-isolated per
@@ -582,6 +589,108 @@ class TradingStrandsStack(cdk.Stack):
         )
         weekend_rule.add_target(
             events_targets.LambdaFunction(bot_provisioner_fn),
+        )
+
+        # -- StrategySupervisor (per-bot Fargate lifecycle) ------------------
+        #
+        # Reads DDB Streams (NEW_AND_OLD_IMAGES) and reconciles per-bot ECS
+        # services. Only component with create/update/delete on those
+        # services — concentrates the blast radius of a bug.
+        #
+        # Bot task execution role: the per-bot Fargate tasks the supervisor
+        # creates reuse the existing trading_task_def's execution role.
+        # trading_task_def exposes `.execution_role` only after a container
+        # with logConfiguration is added — which has already happened above.
+        #
+        # Bot task security group: egress-only (bots only make outbound
+        # calls — Bedrock, Alpaca, DDB, S3). No inbound.
+        bot_task_sg = ec2.SecurityGroup(
+            self,
+            "BotTaskSecurityGroup",
+            vpc=vpc,
+            description="Per-bot Fargate tasks; egress only",
+            allow_all_outbound=True,
+        )
+
+        # The supervisor needs references to roles + log group it didn't
+        # create. trading_task_def.execution_role is auto-created by CDK
+        # when add_container is called; we extract its ARN to pass to the
+        # supervisor at runtime.
+        bot_exec_role = trading_task_def.execution_role
+        assert bot_exec_role is not None, (
+            "TradingTaskDef should have an execution role by this point"
+        )
+
+        strategy_supervisor_fn = lambda_.DockerImageFunction(
+            self,
+            "StrategySupervisorFunction",
+            function_name="trading-strands-strategy-supervisor",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.supervisor.strategy_supervisor.handler",
+                ],
+            ),
+            memory_size=256,
+            timeout=cdk.Duration.minutes(2),
+            environment={
+                "ECS_CLUSTER": cluster.cluster_name,
+                "TASK_DEFINITION_FAMILY": "ts-bot",
+                "CONTAINER_IMAGE": f"{repository.repository_uri}:latest",
+                "TASK_ROLE_ARN": trading_task_role.role_arn,
+                "EXECUTION_ROLE_ARN": bot_exec_role.role_arn,
+                "SUBNET_IDS": ",".join(
+                    s.subnet_id for s in vpc.public_subnets
+                ),
+                "SECURITY_GROUP_IDS": bot_task_sg.security_group_id,
+                "LOG_GROUP_NAME": trading_log_group.log_group_name,
+                "DYNAMODB_TABLE": table.table_name,
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                "SECRETS_MANAGER_SECRET_NAME": alpaca_secret.secret_name,
+            },
+        )
+        cdk.Tags.of(strategy_supervisor_fn).add(
+            "Component", "strategy-supervisor",
+        )
+
+        # ECS admin on the cluster's services. Register task defs; scope
+        # by resource where we can, * where the API requires it (RTD +
+        # PassRole need resource="*" / role-arn respectively).
+        strategy_supervisor_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "ecs:DescribeServices",
+                "ecs:CreateService",
+                "ecs:UpdateService",
+                "ecs:DeleteService",
+                "ecs:RegisterTaskDefinition",
+                "ecs:DescribeTaskDefinition",
+            ],
+            resources=["*"],
+        ))
+        # PassRole is required to create services using the task/exec
+        # roles we defined. Scoped to exactly those two roles.
+        strategy_supervisor_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["iam:PassRole"],
+            resources=[
+                trading_task_role.role_arn,
+                bot_exec_role.role_arn,
+            ],
+        ))
+
+        # Hook the supervisor to DDB Streams. Batch size 10 so we reconcile
+        # quickly without overwhelming ECS API limits. TRIM_HORIZON on
+        # first-deploy would replay the whole history; start LATEST so we
+        # only see new changes from the cutover point onward (operators
+        # can manually reconcile existing strategies via a one-shot).
+        strategy_supervisor_fn.add_event_source(
+            lambda_event_sources.DynamoEventSource(
+                table,
+                starting_position=lambda_.StartingPosition.LATEST,
+                batch_size=10,
+                bisect_batch_on_error=True,
+                retry_attempts=3,
+            ),
         )
 
         # -- Outputs ----------------------------------------------------------
