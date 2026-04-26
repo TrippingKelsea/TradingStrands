@@ -34,6 +34,7 @@ from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.dashboard.publisher import StatePublisher
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
+from trading_strands.marketdata_store.store import MarketDataStore
 from trading_strands.orchestrator.engine import Orchestrator
 from trading_strands.risk.manager import RiskConfig, RiskManager
 from trading_strands.strategies.bot import StrategyBot
@@ -229,12 +230,18 @@ async def run(
 
     market_data = MarketDataProvider(market_broker)
 
-    # Optional DynamoDB publisher for dashboard
+    # Optional DynamoDB publisher for dashboard + market data island
     publisher: StatePublisher | None = None
+    marketdata_store: MarketDataStore | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
     if table_name:
         publisher = StatePublisher(table_name)
+        import boto3 as _boto3
+
+        ddb = _boto3.resource("dynamodb")
+        marketdata_store = MarketDataStore(ddb.Table(table_name))
         await logger.ainfo("publisher.enabled", table=table_name)
+        await logger.ainfo("marketdata_store.enabled", table=table_name)
 
     # Auditor reconciler — checks ledger-broker consistency
     reconciler = Reconciler(AuditConfig())
@@ -249,6 +256,7 @@ async def run(
         publisher=publisher,
         whatif_tracker=whatif_tracker,
         reconciler=reconciler,
+        marketdata_store=marketdata_store,
     )
 
     if strategy_path:

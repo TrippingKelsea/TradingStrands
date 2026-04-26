@@ -384,6 +384,61 @@ async def set_active_org(
 # ── Live state ─────────────────────────────────────────────────────────
 
 
+# ── Market data island reads ─────────────────────────────────────────
+
+
+@app.get("/api/marketdata/{symbol}")
+async def get_marketdata(
+    request: Request, symbol: str,
+    hours: int = 1,
+) -> dict[str, Any]:
+    """Read recent minute-bars for `symbol` from the market data island.
+
+    Shared platform data — any authenticated user reads, matching the
+    authz policy's market-data-is-open rule. The trading service writes
+    these items on each tick; the dashboard renders them as charts.
+
+    `hours` query param bounds the lookback. Default 1 hour.
+    """
+
+    import time as _time
+
+    # Authenticate only; authz policy makes market data readable by any
+    # authenticated principal (see docs/SPEC/multi_tenancy.md).
+    _ = _get_principal(request)
+
+    symbol = symbol.upper()
+    if not symbol.isalnum():
+        raise HTTPException(status_code=400, detail="invalid symbol")
+
+    hours = max(1, min(hours, 24 * 7))  # cap to one week
+    now = int(_time.time())
+    start = now - hours * 3600
+
+    from trading_strands.marketdata_store.store import MarketDataStore
+
+    store = MarketDataStore(_get_table())
+    bars = store.get_range(symbol, start, now)
+    # Flatten for a friendlier chart-client shape.
+    series = [
+        {
+            "ts": ts,
+            "open": bar.get("open"),
+            "high": bar.get("high"),
+            "low": bar.get("low"),
+            "close": bar.get("close"),
+            "volume": bar.get("volume"),
+        }
+        for ts, bar in bars
+    ]
+    return {
+        "symbol": symbol,
+        "hours": hours,
+        "count": len(series),
+        "bars": series,
+    }
+
+
 @app.get("/api/snapshot")
 async def snapshot(request: Request) -> dict[str, Any]:
     """Infrastructure telemetry — the trading service's last snapshot.

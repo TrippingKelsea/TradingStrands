@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
+from typing import Any
 
 import anyio
 import structlog
@@ -16,6 +17,7 @@ from trading_strands.dashboard.publisher import StatePublisher
 from trading_strands.ir.tta import Context, Predicate, evaluate
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
+from trading_strands.marketdata_store.store import MarketBar
 from trading_strands.whatif.tracker import WhatIfTracker
 
 logger = structlog.get_logger()
@@ -56,6 +58,7 @@ class Orchestrator:
         publisher: StatePublisher | None = None,
         whatif_tracker: WhatIfTracker | None = None,
         reconciler: Reconciler | None = None,
+        marketdata_store: Any | None = None,
     ) -> None:
         self.coordinator = coordinator
         self.market_data = market_data
@@ -63,6 +66,7 @@ class Orchestrator:
         self._publisher = publisher
         self._whatif = whatif_tracker
         self._reconciler = reconciler
+        self._marketdata_store = marketdata_store
         self._reconciler_cycles_failed: int = 0
         self._last_reconcile_tick: int = -1
         self._reconcile_interval: int = 60  # reconcile every N ticks
@@ -148,6 +152,22 @@ class Orchestrator:
             await logger.aexception("orchestrator.market_data.error")
             self._publish_snapshot(tick_number, {})
             return
+
+        # Record to the market-data island. Failures here are swallowed —
+        # durability is valuable but not worth crashing the tick loop over.
+        # DDB write failures are logged and retried on the next tick's
+        # observation for the same symbol.
+        if self._marketdata_store is not None:
+            now = int(time.time())
+            for symbol, price in prices.items():
+                try:
+                    self._marketdata_store.record_tick(
+                        MarketBar(timestamp=now, symbol=symbol, price=price),
+                    )
+                except Exception:
+                    await logger.aexception(
+                        "orchestrator.marketdata.record_failed", symbol=symbol,
+                    )
 
         await logger.adebug("orchestrator.tick", tick=tick_number,
                             prices={s: str(p) for s, p in prices.items()})
