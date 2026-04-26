@@ -55,8 +55,9 @@ Based on your strategy rules and the current conditions, decide your next action
 - If conditions warrant a trade, specify the action (buy/sell/close), symbol, and quantity.
 - If no action is needed, respond with action "hold".
 - Always provide a clear rationale explaining your reasoning.
-- Quantity should be a whole number of shares.
-- Only trade symbols your strategy covers.
+- Quantity should be a whole number of shares or options.
+- If the strategy contains a list of trade symbols you are only permitted to trade those symbols.
+- If the strategy does not contain a list of trade symbols, you will need to select them yourself.
 """
 
 
