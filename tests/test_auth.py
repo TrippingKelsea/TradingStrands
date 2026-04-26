@@ -238,6 +238,153 @@ def test_logout_clears_session() -> None:
 # ── Authenticated access ─────────────────────────────────────────────
 
 
+def test_login_with_temp_password_redirects_to_change_password() -> None:
+    """Cognito returns NEW_PASSWORD_REQUIRED; user is bounced to the
+    change-password page with a signed token, NOT to the dashboard."""
+
+    cognito = MagicMock()
+    cognito.initiate_auth.return_value = {
+        "ChallengeName": "NEW_PASSWORD_REQUIRED",
+        "Session": "opaque-cognito-session",
+        "ChallengeParameters": {},
+    }
+
+    with mock_aws(), patch(
+        "trading_strands.dashboard.auth.boto3"
+    ) as mock_auth_boto3:
+        _create_table()
+        mock_auth_boto3.client.return_value = cognito
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/auth/login",
+            data={"email": "new@example.com", "password": "TempPw12!"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        loc = resp.headers["location"]
+        assert loc.startswith("/change-password?t=")
+        # No session cookie should have been set — they're not logged in yet.
+        assert not resp.cookies.get("session")
+
+
+def test_change_password_completes_login() -> None:
+    """POST /auth/change-password finishes the challenge + issues a session."""
+
+    cognito = MagicMock()
+    cognito.initiate_auth.return_value = {
+        "ChallengeName": "NEW_PASSWORD_REQUIRED",
+        "Session": "opaque",
+    }
+    # After successful challenge response, Cognito returns real tokens.
+    cognito.respond_to_auth_challenge.return_value = {
+        "AuthenticationResult": {
+            "AccessToken": "fake.access.token",
+            "RefreshToken": "fake.refresh.token",
+            "IdToken": "fake.id.token",
+        },
+    }
+    cognito.get_user.return_value = {
+        "Username": "new-sub",
+        "UserAttributes": [
+            {"Name": "email", "Value": "new@example.com"},
+            {"Name": "sub", "Value": "new-sub"},
+        ],
+    }
+
+    with mock_aws(), patch(
+        "trading_strands.dashboard.auth.boto3"
+    ) as mock_auth_boto3:
+        _create_table()
+        mock_auth_boto3.client.return_value = cognito
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        # Get the challenge token that /auth/login would have produced.
+        login_resp = client.post(
+            "/auth/login",
+            data={"email": "new@example.com", "password": "TempPw12!"},
+            follow_redirects=False,
+        )
+        token = login_resp.headers["location"].split("?t=")[1]
+
+        # Now post to change-password with a matching new password.
+        resp = client.post(
+            "/auth/change-password",
+            data={
+                "token": token,
+                "new_password": "NewPassword123!@#",
+                "confirm_password": "NewPassword123!@#",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+        assert "session" in resp.cookies
+        # Ensure respond_to_auth_challenge was called.
+        cognito.respond_to_auth_challenge.assert_called_once()
+
+
+def test_change_password_rejects_mismatched_confirmation() -> None:
+    with mock_aws(), patch("trading_strands.dashboard.auth.boto3"):
+        _create_table()
+        from trading_strands.dashboard.api import app
+        from trading_strands.dashboard.auth import create_url_token
+
+        client = TestClient(app)
+        token = create_url_token({
+            "email": "new@example.com",
+            "cognito_session": "opaque",
+        })
+        resp = client.post(
+            "/auth/change-password",
+            data={
+                "token": token,
+                "new_password": "A",
+                "confirm_password": "B",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        # Bounced back to the change-password page with an error token.
+        assert resp.headers["location"].startswith("/change-password?t=")
+
+
+def test_change_password_rejects_missing_or_invalid_token() -> None:
+    with mock_aws(), patch("trading_strands.dashboard.auth.boto3"):
+        _create_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.post(
+            "/auth/change-password",
+            data={
+                "token": "not-a-valid-token",
+                "new_password": "X",
+                "confirm_password": "X",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        # Bounced to /login with an error.
+        assert resp.headers["location"].startswith("/login?t=")
+
+
+def test_change_password_page_requires_token() -> None:
+    with mock_aws():
+        _create_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        # No token — should redirect to /login.
+        resp = client.get("/change-password", follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/login"
+
+
 def test_login_then_read_snapshot() -> None:
     """End-to-end: login, then the resulting cookie works on /api/snapshot."""
 

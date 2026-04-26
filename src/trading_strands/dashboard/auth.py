@@ -52,7 +52,14 @@ SESSION_MAX_AGE_DEFAULT = 86400 * 365  # 1 year
 URL_TOKEN_MAX_AGE = 60  # 60 seconds
 
 # Paths that don't require authentication
-PUBLIC_PATHS = frozenset({"/health", "/login", "/auth/login", "/auth/logout"})
+PUBLIC_PATHS = frozenset({
+    "/health", "/login", "/auth/login", "/auth/logout",
+    "/change-password", "/auth/change-password",
+})
+
+# Challenge-name constants exposed so api.py can pattern-match without
+# hard-coding magic strings.
+CHALLENGE_NEW_PASSWORD_REQUIRED = "NEW_PASSWORD_REQUIRED"  # noqa: S105 -- Cognito challenge name, not a credential
 
 # Module-level Cognito client (set during startup or mocked in tests)
 _cognito_client: Any = None
@@ -119,10 +126,15 @@ def decode_url_token(token: str) -> dict[str, Any] | None:
 
 
 def _cognito_login(email: str, password: str) -> dict[str, Any] | None:
-    """Raw Cognito auth. Returns the access token + email, or None on failure.
+    """Raw Cognito auth. Returns one of:
 
-    Pulled out of `authenticate()` so the tenancy-store lookup can be tested
-    independently of Cognito.
+      - Success: {"email", "cognito_sub", "access_token"}
+      - Challenge: {"challenge": "NEW_PASSWORD_REQUIRED",
+                    "cognito_session": ..., "email": ...}
+      - None on failure (bad credentials, Cognito error, etc.)
+
+    `authenticate()` unwraps success → tenancy provisioning.
+    A challenge result short-circuits to the change-password flow.
     """
 
     client_id = os.environ.get("COGNITO_CLIENT_ID", "")
@@ -146,6 +158,15 @@ def _cognito_login(email: str, password: str) -> dict[str, Any] | None:
         logger.exception("auth.login_failed", email=email)
         return None
 
+    # Challenge path: Cognito says "this user needs a new password".
+    challenge = auth_result.get("ChallengeName")
+    if challenge == CHALLENGE_NEW_PASSWORD_REQUIRED:
+        return {
+            "challenge": CHALLENGE_NEW_PASSWORD_REQUIRED,
+            "cognito_session": auth_result.get("Session", ""),
+            "email": email,
+        }
+
     tokens = auth_result.get("AuthenticationResult", {})
     access_token = tokens.get("AccessToken", "")
 
@@ -165,38 +186,77 @@ def _cognito_login(email: str, password: str) -> dict[str, Any] | None:
     }
 
 
-def authenticate(
-    email: str, password: str, tenancy: TenancyStore,
+def respond_to_new_password_challenge(
+    email: str, new_password: str, cognito_session: str,
 ) -> dict[str, Any] | None:
-    """Full login: Cognito verify + find-or-create local USER# + build session dict.
-
-    The `tenancy` argument is injected so tests can pass a store backed by
-    moto without having to mock DynamoDB globally. On a legitimate successful
-    login we guarantee a `USER#` record exists for this email; the caller
-    then calls `create_session_cookie(user_info)` with the returned dict.
+    """Complete the NEW_PASSWORD_REQUIRED challenge by setting a permanent
+    password. On success returns the same success shape `_cognito_login`
+    does (access_token + cognito_sub). On failure returns None.
     """
 
-    cognito_result = _cognito_login(email, password)
-    if cognito_result is None:
+    client_id = os.environ.get("COGNITO_CLIENT_ID", "")
+    cognito = _get_cognito_client()
+
+    responses: dict[str, str] = {
+        "USERNAME": email,
+        "NEW_PASSWORD": new_password,
+    }
+    secret_hash = _compute_secret_hash(email)
+    if secret_hash:
+        responses["SECRET_HASH"] = secret_hash
+
+    try:
+        result = cognito.respond_to_auth_challenge(
+            ClientId=client_id,
+            ChallengeName=CHALLENGE_NEW_PASSWORD_REQUIRED,
+            Session=cognito_session,
+            ChallengeResponses=responses,
+        )
+    except Exception:
+        logger.exception("auth.change_password_failed", email=email)
         return None
 
-    normalized_email = cognito_result["email"]
+    tokens = result.get("AuthenticationResult", {})
+    access_token = tokens.get("AccessToken", "")
+    try:
+        user_resp = cognito.get_user(AccessToken=access_token)
+        attrs = {a["Name"]: a["Value"] for a in user_resp.get("UserAttributes", [])}
+        cognito_sub = attrs.get("sub") or user_resp.get("Username", "")
+    except Exception:
+        logger.exception("auth.get_user_failed")
+        attrs = {}
+        cognito_sub = ""
 
+    return {
+        "email": attrs.get("email", email),
+        "cognito_sub": cognito_sub,
+        "access_token": access_token,
+    }
+
+
+def _finalize_login(
+    cognito_success: dict[str, Any], tenancy: TenancyStore,
+) -> dict[str, Any]:
+    """Convert a successful Cognito result into a session dict.
+
+    Shared between normal login and the post-change-password path.
+    Provisions a USER# record if one doesn't exist for this email and
+    resolves the active org.
+    """
+
+    normalized_email = cognito_success["email"]
     existing = tenancy.find_user_by_email(normalized_email)
     if existing is not None:
         user = existing
     else:
-        # Cognito said yes but we have no local record. Provision one.
         user = tenancy.create_user(
             email=normalized_email,
-            cognito_sub=cognito_result["cognito_sub"] or None,
+            cognito_sub=cognito_success.get("cognito_sub") or None,
         )
         logger.info(
             "auth.user_provisioned", email=normalized_email, user_id=user.user_id,
         )
 
-    # Resolve active org: prefer last-active (if still valid), else
-    # auto-select if user has exactly one membership, else None.
     memberships = tenancy.memberships_for_user(user.user_id)
     member_org_ids = {m.org_id for m in memberships}
     active_org_id: str | None
@@ -211,9 +271,44 @@ def authenticate(
         "user_id": user.user_id,
         "email": normalized_email,
         "active_org_id": active_org_id,
-        "access_token": cognito_result["access_token"],
+        "access_token": cognito_success.get("access_token", ""),
         "login_at": int(time.time()),
     }
+
+
+def authenticate(
+    email: str, password: str, tenancy: TenancyStore,
+) -> dict[str, Any] | None:
+    """Full login: Cognito verify + find-or-create local USER# + session dict.
+
+    If Cognito returns a NEW_PASSWORD_REQUIRED challenge, this returns a
+    dict shaped `{"challenge": "NEW_PASSWORD_REQUIRED", "cognito_session",
+    "email"}` instead of a session dict. The caller (FastAPI route)
+    redirects to the change-password flow in that case.
+    """
+
+    cognito_result = _cognito_login(email, password)
+    if cognito_result is None:
+        return None
+    if cognito_result.get("challenge") == CHALLENGE_NEW_PASSWORD_REQUIRED:
+        return cognito_result  # pass-through for the route to redirect
+    return _finalize_login(cognito_result, tenancy)
+
+
+def complete_new_password(
+    email: str, new_password: str, cognito_session: str,
+    tenancy: TenancyStore,
+) -> dict[str, Any] | None:
+    """Complete the NEW_PASSWORD_REQUIRED flow. Returns a session dict on
+    success, or None if Cognito rejects the new password (e.g., doesn't
+    meet policy)."""
+
+    result = respond_to_new_password_challenge(
+        email, new_password, cognito_session,
+    )
+    if result is None:
+        return None
+    return _finalize_login(result, tenancy)
 
 
 def create_session_cookie(user_info: dict[str, Any]) -> str:

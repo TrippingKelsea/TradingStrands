@@ -26,11 +26,13 @@ from pydantic import BaseModel
 from trading_strands.authz.model import Action, Principal, Resource, ResourceType
 from trading_strands.authz.policy import Unauthorized, require
 from trading_strands.dashboard.auth import (
+    CHALLENGE_NEW_PASSWORD_REQUIRED,
     SESSION_COOKIE,
     SESSION_MAX_AGE_DEFAULT,
     AuthMiddleware,
     _get_cognito_client,
     authenticate,
+    complete_new_password,
     create_session_cookie,
     create_url_token,
     decode_url_token,
@@ -146,6 +148,19 @@ async def auth_login(
         token = create_url_token({"error": "Invalid email or password"})
         return RedirectResponse(url=f"/login?t={token}", status_code=303)
 
+    # Change-password challenge — redirect to the change-password page.
+    # The Cognito session token is signed (via create_url_token) so only
+    # the user who just authenticated with the temp password can complete
+    # the flow; token expires in URL_TOKEN_MAX_AGE (60s).
+    if user_info.get("challenge") == CHALLENGE_NEW_PASSWORD_REQUIRED:
+        token = create_url_token({
+            "email": user_info["email"],
+            "cognito_session": user_info["cognito_session"],
+        })
+        return RedirectResponse(
+            url=f"/change-password?t={token}", status_code=303,
+        )
+
     session_value = create_session_cookie(user_info)
     response = RedirectResponse(url="/", status_code=303)
     response.set_cookie(
@@ -155,6 +170,83 @@ async def auth_login(
         httponly=True,
         secure=True,
         samesite="lax",
+    )
+    return response
+
+
+@app.get("/change-password", response_class=HTMLResponse)
+async def change_password_page(request: Request) -> HTMLResponse:
+    """Present the new-password form. Requires a valid signed challenge
+    token (passed via ?t= from the login redirect). Without a valid token
+    we bounce back to login — the challenge path cannot be entered directly.
+    """
+
+    token = request.query_params.get("t", "")
+    data = decode_url_token(token) if token else None
+    if not data or not data.get("cognito_session") or not data.get("email"):
+        return RedirectResponse(url="/login", status_code=303)  # type: ignore[return-value]
+
+    error = data.get("error", "")
+    # Re-sign the same payload so the form POST carries it forward without
+    # the user ever seeing the raw cognito_session.
+    forward_token = create_url_token({
+        "email": data["email"],
+        "cognito_session": data["cognito_session"],
+    })
+    return _templates.TemplateResponse(
+        request, "change_password.html",
+        {"email": data["email"], "token": forward_token, "error": error},
+    )
+
+
+@app.post("/auth/change-password")
+async def auth_change_password(
+    token: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> RedirectResponse:
+    """Complete the NEW_PASSWORD_REQUIRED challenge.
+
+    The `token` field carries the signed Cognito session (and email) from
+    the prior redirect. We re-validate it on every submit so tampering
+    can't replay or substitute sessions.
+    """
+
+    data = decode_url_token(token)
+    if not data or not data.get("cognito_session") or not data.get("email"):
+        err = create_url_token({"error": "Session expired — please log in again"})
+        return RedirectResponse(url=f"/login?t={err}", status_code=303)
+
+    if new_password != confirm_password:
+        err_tok = create_url_token({
+            "email": data["email"],
+            "cognito_session": data["cognito_session"],
+            "error": "Passwords did not match",
+        })
+        return RedirectResponse(
+            url=f"/change-password?t={err_tok}", status_code=303,
+        )
+
+    tenancy = TenancyStore(_get_table())
+    session_info = complete_new_password(
+        data["email"], new_password, data["cognito_session"], tenancy,
+    )
+    if session_info is None:
+        err_tok = create_url_token({
+            "email": data["email"],
+            "cognito_session": data["cognito_session"],
+            "error": "Password rejected — check requirements and try again",
+        })
+        return RedirectResponse(
+            url=f"/change-password?t={err_tok}", status_code=303,
+        )
+
+    cookie_value = create_session_cookie(session_info)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE, value=cookie_value,
+        max_age=SESSION_MAX_AGE_DEFAULT,
+        httponly=True, secure=True, samesite="lax",
     )
     return response
 
@@ -827,12 +919,10 @@ async def create_user(request: Request, body: UserCreate) -> dict[str, Any]:
             TemporaryPassword=temp_password,
             MessageAction="SUPPRESS",
         )
-        cognito.admin_set_user_password(
-            UserPoolId=pool_id,
-            Username=body.email,
-            Password=temp_password,
-            Permanent=True,
-        )
+        # Deliberately NOT setting Permanent=True. Leaving the user in
+        # FORCE_CHANGE_PASSWORD state triggers the NEW_PASSWORD_REQUIRED
+        # challenge on their first login so they must pick their own
+        # password before gaining a session.
     except cognito.exceptions.UsernameExistsException:
         raise HTTPException(status_code=409, detail="User already exists") from None
     except Exception as exc:
