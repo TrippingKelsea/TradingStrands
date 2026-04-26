@@ -201,6 +201,150 @@ def test_index_serves_html() -> None:
         assert "TradingStrands" in resp.text
 
 
+# ── Session / org switcher ───────────────────────────────────────────
+
+
+def test_session_returns_memberships_and_active_org() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/session")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_id"] == uid
+        assert data["active_org_id"] == oid
+        assert data["sysadmin"] is False
+        assert len(data["memberships"]) == 1
+        assert data["memberships"][0]["role"] == "operator"
+        assert data["memberships"][0]["org_name"] == "Test Org"
+
+
+def test_session_auto_selects_single_membership_when_no_claim() -> None:
+    """Session with no active_org_id but a single membership auto-resolves."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="viewer")
+
+        from trading_strands.dashboard.api import app
+
+        # Cookie without active_org_id.
+        client = TestClient(app, cookies=_session_cookie(uid, active_org_id=None))
+        resp = client.get("/api/session")
+        assert resp.status_code == 200
+        assert resp.json()["active_org_id"] == oid
+
+
+def test_session_null_active_org_when_multiple_orgs_and_no_claim() -> None:
+    """Multi-org user with no session claim lands without an active org;
+    frontend is expected to render the org picker."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        a = tenancy.create_org("A")
+        b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, a.org_id, Role.OPERATOR)
+        tenancy.add_membership(alice.user_id, b.org_id, Role.VIEWER)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(alice.user_id, active_org_id=None))
+        resp = client.get("/api/session")
+        assert resp.status_code == 200
+        assert resp.json()["active_org_id"] is None
+        assert len(resp.json()["memberships"]) == 2
+
+
+def test_session_ignores_stale_active_org_claim() -> None:
+    """If a session claims membership in an org the user is no longer in,
+    the response reports active_org_id=None (or auto-selects a valid org).
+    Privacy guard: we never honor a claimed org without verifying."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        real = tenancy.create_org("Real")
+        tenancy.create_org("Phantom")  # user NOT a member
+        tenancy.add_membership(alice.user_id, real.org_id, Role.VIEWER)
+
+        from trading_strands.dashboard.api import app
+
+        # Session claims "phantom" org the user isn't in.
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, active_org_id="phantom-fake"),
+        )
+        resp = client.get("/api/session")
+        assert resp.status_code == 200
+        # Falls back to the real single membership rather than honoring the claim.
+        assert resp.json()["active_org_id"] == real.org_id
+
+
+def test_set_active_org_persists_and_updates_cookie() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        a = tenancy.create_org("A")
+        b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, a.org_id, Role.OPERATOR)
+        tenancy.add_membership(alice.user_id, b.org_id, Role.VIEWER)
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, active_org_id=a.org_id),
+        )
+        resp = client.put(
+            "/api/session/active-org",
+            json={"org_id": b.org_id},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+        # The response sets a new session cookie.
+        assert "session" in resp.cookies or "session" in resp.headers.get(
+            "set-cookie", "",
+        )
+        # last_active_org_id persisted on the user.
+        refreshed = tenancy.get_user(alice.user_id)
+        assert refreshed.last_active_org_id == b.org_id
+
+
+def test_set_active_org_rejects_non_member_org() -> None:
+    """Final guard: even if the frontend sends a non-member org_id, server
+    refuses. Tampered cookies / frontends cannot leak cross-org access."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, active_org_id=oid))
+        resp = client.put(
+            "/api/session/active-org",
+            json={"org_id": "not-my-org"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 403
+
+
 # ── Strategy CRUD ─────────────────────────────────────────────────────
 
 

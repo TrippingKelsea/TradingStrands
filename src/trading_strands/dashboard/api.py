@@ -285,6 +285,102 @@ async def index(request: Request) -> HTMLResponse:
     return _templates.TemplateResponse(request, "index.html")
 
 
+# ── Session / org switcher ─────────────────────────────────────────────
+
+
+@app.get("/api/session")
+async def get_session(request: Request) -> dict[str, Any]:
+    """Return the current session's principal + memberships + active org.
+
+    The frontend uses this on every page load to decide:
+      - Whether to show the org picker (multiple memberships, no active)
+      - Which org badge to render in the top nav
+      - Which orgs appear in the switcher dropdown
+
+    Returns 401 if the session is stale (user deleted / session invalid).
+    """
+
+    principal = _get_principal(request)
+    tenancy = TenancyStore(_get_table())
+
+    memberships_out: list[dict[str, Any]] = []
+    for org_id, role in principal.memberships.items():
+        try:
+            org = tenancy.get_org(org_id)
+            memberships_out.append({
+                "org_id": org_id,
+                "org_name": org.name,
+                "org_type": org.org_type.value,
+                "role": role.value,
+            })
+        except NotFoundError:
+            # Skip orgs whose metadata is missing — dangling membership. The
+            # Cognito-sync / reconciler will clean this up. For the UI we
+            # just omit it so the picker doesn't show broken entries.
+            continue
+
+    # Resolve active org the same way endpoint handlers do — prefer the
+    # session's claim if still valid, else auto-select if single membership.
+    session = request.state.session
+    active_id = session.get("active_org_id")
+    if active_id and active_id not in principal.memberships:
+        active_id = None  # stale claim; frontend will prompt
+    if active_id is None and len(principal.memberships) == 1:
+        active_id = next(iter(principal.memberships))
+
+    return {
+        "user_id": principal.user_id,
+        "email": principal.email,
+        "sysadmin": principal.sysadmin,
+        "memberships": memberships_out,
+        "active_org_id": active_id,
+    }
+
+
+class ActiveOrgUpdate(BaseModel):
+    org_id: str
+
+
+@app.put("/api/session/active-org")
+async def set_active_org(
+    request: Request, body: ActiveOrgUpdate,
+) -> RedirectResponse:
+    """Change the session's active org and redirect to the dashboard root.
+
+    Writes a fresh session cookie carrying the new active_org_id and also
+    persists `last_active_org_id` on the USER# record so next login lands
+    on the same org by default. Refuses to set an org the user is not a
+    member of — this is the final guard against tampered frontends.
+    """
+
+    principal = _get_principal(request)
+    tenancy = TenancyStore(_get_table())
+
+    if body.org_id not in principal.memberships:
+        raise HTTPException(
+            status_code=403,
+            detail="Not a member of the requested organization",
+        )
+
+    # Persist last-active so future logins skip the picker for this user.
+    tenancy.set_last_active_org(principal.user_id, body.org_id)
+
+    session = dict(request.state.session)
+    session["active_org_id"] = body.org_id
+    new_cookie = create_session_cookie(session)
+
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=new_cookie,
+        max_age=SESSION_MAX_AGE_DEFAULT,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
 # ── Live state ─────────────────────────────────────────────────────────
 
 

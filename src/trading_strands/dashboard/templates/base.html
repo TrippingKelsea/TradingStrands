@@ -89,10 +89,40 @@
     <h1>TradingStrands</h1>
     <span class="status status-waiting" id="status">Connecting...</span>
   </div>
+  <div id="org-switcher" style="position:relative; display:none;">
+    <button id="org-switcher-btn"
+            onclick="toggleOrgMenu()"
+            title="Click to switch organizations"
+            style="padding: 6px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: inherit; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+      <span style="color: var(--dim); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px;">org</span>
+      <span id="active-org-name" style="font-weight: bold; color: var(--blue);">-</span>
+      <span id="active-org-role" class="badge badge-paused" style="font-size: 0.6rem;">-</span>
+      <span style="color: var(--dim);">▾</span>
+    </button>
+    <div id="org-menu"
+         style="display:none; position:absolute; top:100%; right:0; margin-top:4px; min-width:240px; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; z-index: 50; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+      <div style="padding: 8px 12px; font-size: 0.7rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border);">
+        Switch organization
+      </div>
+      <div id="org-menu-list"></div>
+    </div>
+  </div>
   <div style="text-align:right; font-size:0.8rem; color:var(--dim)">
     <div>Tick: <span id="tick">-</span> &middot; <a href="#" onclick="document.getElementById('logout-form').submit();return false;" style="color:var(--dim);text-decoration:none;">Logout</a></div>
-    <div>Updated: <span id="last-update">-</span></div>
+    <div>Updated: <span id="last-update">-</span> &middot; <span id="user-email" style="color: var(--dim);">-</span></div>
     <form id="logout-form" method="POST" action="/auth/logout" style="display:none;"></form>
+  </div>
+</div>
+
+<!-- Pre-dashboard org picker: shown when user has multiple orgs and no active selection -->
+<div id="org-picker-modal"
+     style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.8); z-index:200; align-items:center; justify-content:center;">
+  <div class="panel" style="max-width: 480px; width: 90%;">
+    <h2 style="margin-bottom: 4px;">Select an organization</h2>
+    <p style="font-size: 0.78rem; color: var(--dim); margin-bottom: 14px;">
+      You belong to multiple organizations. Pick one to continue. You can switch at any time from the top-right menu.
+    </p>
+    <div id="org-picker-list"></div>
   </div>
 </div>
 
@@ -255,10 +285,154 @@
   }
   window.haltTrading = haltTrading;
 
+  // ── Session + org switcher ────────────────────────────────────────────
+
+  let _session = null;
+
+  async function loadSession() {
+    try {
+      const resp = await fetch('/api/session');
+      if (!resp.ok) return;
+      _session = await resp.json();
+    } catch(e) {
+      console.error('session load failed', e);
+      return;
+    }
+
+    // Display current user email in the header.
+    if (_session.email) {
+      $('user-email').textContent = _session.email;
+    }
+
+    const memberships = _session.memberships || [];
+    const activeId = _session.active_org_id;
+
+    // No memberships: user has no access to any org yet (edge case, brand-new
+    // account before an orgadmin has added them to anything).
+    if (memberships.length === 0) {
+      // Hide switcher; show a notice in the header instead.
+      $('org-switcher').style.display = 'none';
+      return;
+    }
+
+    // Multi-org, nothing active: show the pre-dashboard picker modal.
+    if (memberships.length > 1 && !activeId) {
+      showOrgPicker(memberships);
+      return;
+    }
+
+    // Render the switcher with current org + dropdown list.
+    renderOrgSwitcher(memberships, activeId);
+  }
+
+  function renderOrgSwitcher(memberships, activeId) {
+    const active = memberships.find(m => m.org_id === activeId);
+    if (!active) return;
+
+    $('org-switcher').style.display = 'block';
+    $('active-org-name').textContent = active.org_name;
+    const roleEl = $('active-org-role');
+    roleEl.textContent = active.role;
+    roleEl.className = 'badge ' + (
+      active.role === 'orgadmin' ? 'badge-active' :
+      active.role === 'operator' ? 'badge-ok' :
+      'badge-paused'
+    );
+
+    // Populate the dropdown list.
+    const list = $('org-menu-list');
+    list.innerHTML = '';
+    memberships.forEach(m => {
+      const row = document.createElement('div');
+      row.style.cssText = 'padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--border); font-size: 0.85rem;' +
+        (m.org_id === activeId ? ' background: var(--bg); border-left: 3px solid var(--blue);' : '');
+      row.onmouseover = () => { if (m.org_id !== activeId) row.style.background = 'var(--bg)'; };
+      row.onmouseout = () => { if (m.org_id !== activeId) row.style.background = ''; };
+      row.innerHTML = `
+        <div style="font-weight: bold; color: var(--blue);">${escapeHtml(m.org_name)}</div>
+        <div style="font-size: 0.72rem; color: var(--dim); margin-top: 2px;">
+          <span class="badge ${m.role === 'orgadmin' ? 'badge-active' : 'badge-paused'}">${m.role}</span>
+          ${m.org_type === 'system' ? '<span class="badge badge-active" style="margin-left: 4px;">system</span>' : ''}
+        </div>
+      `;
+      if (m.org_id !== activeId) {
+        row.onclick = () => switchOrg(m.org_id);
+      }
+      list.appendChild(row);
+    });
+  }
+
+  function showOrgPicker(memberships) {
+    const list = $('org-picker-list');
+    list.innerHTML = '';
+    memberships.forEach(m => {
+      const row = document.createElement('div');
+      row.style.cssText = 'padding: 12px; cursor: pointer; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; background: var(--bg);';
+      row.onmouseover = () => { row.style.borderColor = 'var(--blue)'; };
+      row.onmouseout = () => { row.style.borderColor = 'var(--border)'; };
+      row.onclick = () => switchOrg(m.org_id);
+      row.innerHTML = `
+        <div style="font-size: 0.95rem; font-weight: bold; color: var(--blue);">${escapeHtml(m.org_name)}</div>
+        <div style="font-size: 0.75rem; color: var(--dim); margin-top: 6px;">
+          <span class="badge ${m.role === 'orgadmin' ? 'badge-active' : 'badge-paused'}">${m.role}</span>
+          ${m.org_type === 'system' ? '<span class="badge badge-active" style="margin-left: 4px;">system</span>' : ''}
+        </div>
+      `;
+      list.appendChild(row);
+    });
+    $('org-picker-modal').style.display = 'flex';
+  }
+
+  async function switchOrg(orgId) {
+    // POST to the active-org endpoint as a form submit so we get the
+    // 303 redirect + cookie rewrite. Full page reload is intentional —
+    // clears any JS state (strategies list, etc.) tied to the old org.
+    const form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/api/session/active-org';
+    // The server accepts JSON; we post via fetch instead.
+    try {
+      const resp = await fetch('/api/session/active-org', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({org_id: orgId}),
+        redirect: 'manual',
+      });
+      // Any response (303 redirect, opaqueredirect, or 200) means we're done;
+      // reload to pick up the new cookie + rerender with the new org's data.
+      window.location.href = '/';
+    } catch(e) {
+      alert('Failed to switch organization: ' + e.message);
+    }
+  }
+  window.switchOrg = switchOrg;
+
+  function toggleOrgMenu() {
+    const menu = $('org-menu');
+    menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+  }
+  window.toggleOrgMenu = toggleOrgMenu;
+
+  // Close the menu on outside click.
+  document.addEventListener('click', function(e) {
+    const sw = $('org-switcher');
+    if (sw && !sw.contains(e.target)) {
+      const menu = $('org-menu');
+      if (menu) menu.style.display = 'none';
+    }
+  });
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s || '';
+    return div.innerHTML;
+  }
+
   {% block scripts %}{% endblock %}
 
   // ── Init ──────────────────────────────────────────────────────────────
 
+  loadSession();
   connect();
   {% block init %}{% endblock %}
 })();
