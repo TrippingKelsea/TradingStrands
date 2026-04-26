@@ -55,6 +55,7 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "types-requests",
+    "moto[dynamodb]>=5.0",
 ]
 
 [project.scripts]
