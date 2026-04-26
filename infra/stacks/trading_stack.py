@@ -274,6 +274,65 @@ class TradingStrandsStack(cdk.Stack):
             assign_public_ip=True,
         )
 
+        # -- Market Data Subscriber service ----------------------------------
+        #
+        # Pulls quotes for the union of symbols across active strategies and
+        # writes to MarketDataStore. Runs 24/7 (no weekend scale-down) so
+        # premarket + extended-hours data is captured regardless of whether
+        # any trading task is up. Uses the superwoman org's paper Alpaca
+        # creds — same secret the market-data fetch side of the trading
+        # service already reads.
+        subscriber_task_role = iam.Role(
+            self,
+            "MarketDataSubscriberTaskRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+        )
+        table.grant_read_write_data(subscriber_task_role)
+        alpaca_secret.grant_read(subscriber_task_role)
+
+        subscriber_task_def = ecs.FargateTaskDefinition(
+            self,
+            "MarketDataSubscriberTaskDef",
+            cpu=256,
+            memory_limit_mib=512,
+            task_role=subscriber_task_role,
+        )
+        cdk.Tags.of(subscriber_task_def).add(
+            "Component", "marketdata-subscriber",
+        )
+        subscriber_log_group = logs.LogGroup(
+            self,
+            "MarketDataSubscriberLogGroup",
+            log_group_name="/ecs/trading-strands/marketdata-subscriber",
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        subscriber_task_def.add_container(
+            "SubscriberContainer",
+            image=ecs.ContainerImage.from_ecr_repository(
+                repository, tag="latest",
+            ),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "SECRETS_MANAGER_SECRET_NAME": alpaca_secret.secret_name,
+            },
+            logging=ecs.LogDrivers.aws_logs(
+                stream_prefix="marketdata-subscriber",
+                log_group=subscriber_log_group,
+            ),
+            entry_point=["uv", "run", "python", "-m"],
+            command=["trading_strands.marketdata_subscriber.serve"],
+        )
+        ecs.FargateService(
+            self,
+            "MarketDataSubscriberService",
+            cluster=cluster,
+            task_definition=subscriber_task_def,
+            desired_count=1,
+            min_healthy_percent=0,
+            max_healthy_percent=100,
+            assign_public_ip=True,
+        )
+
         # -- Dashboard service ------------------------------------------------
 
         dashboard_task_role = iam.Role(
