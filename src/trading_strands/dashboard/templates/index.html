@@ -115,6 +115,15 @@
       <button class="btn btn-primary" onclick="saveStrategy()">Save Changes</button>
       <span id="edit-status" style="margin-left:12px;font-size:0.8rem;"></span>
     </div>
+    <div class="panel" id="lessons-panel">
+      <h2>Self-critique lessons</h2>
+      <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
+        Read-only — written by the weekend self-critique agent.
+        Edit the strategy prompt above if you want to change behavior.
+      </div>
+      <pre id="edit-strat-lessons"
+           style="white-space:pre-wrap;max-height:400px;overflow:auto;background:var(--surface);padding:12px;border-radius:4px;font-size:0.8rem;margin:0;">Loading lessons&hellip;</pre>
+    </div>
   </div>
 </div>
 
@@ -534,6 +543,26 @@
     } catch(e) {
       status.textContent = 'Failed to load strategy';
       status.style.color = 'var(--red)';
+    }
+
+    // Lessons load independently — a failure here shouldn't block
+    // editing the strategy. We render the failure inline instead.
+    const lessonsEl = $('edit-strat-lessons');
+    lessonsEl.textContent = 'Loading lessons…';
+    try {
+      const lr = await fetch('/api/strategies/' + sid + '/lessons');
+      if (lr.status === 503) {
+        lessonsEl.textContent = 'Agent memory bucket not configured — self-critique unavailable.';
+      } else if (!lr.ok) {
+        lessonsEl.textContent = 'Failed to load lessons (' + lr.status + ').';
+      } else {
+        const lj = await lr.json();
+        lessonsEl.textContent = lj.lessons && lj.lessons.trim()
+          ? lj.lessons
+          : 'No self-critique lessons yet. The weekend critique agent writes one entry per Saturday.';
+      }
+    } catch(e) {
+      lessonsEl.textContent = 'Failed to load lessons.';
     }
   }
   window.openEditStrategy = openEditStrategy;

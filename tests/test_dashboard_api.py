@@ -1177,3 +1177,181 @@ def test_v1_session_without_user_id_is_rejected() -> None:
         assert resp.status_code == 401
     # Touch the module to keep the import in scope.
     _ = auth_mod
+
+
+# ── Self-critique lessons endpoint ──────────────────────────────────
+
+
+def _put_lesson_in_s3(
+    bucket: str, org_id: str, bot_id: str, content: str,
+) -> None:
+    """Seed a lessons.md under the canonical per-agent prefix.
+
+    Mirrors AgentMemoryStore's path convention so the dashboard reads
+    what the bot would have written in real life.
+    """
+
+    s3 = boto3.client("s3", region_name="us-west-2")
+    s3.create_bucket(
+        Bucket=bucket,
+        CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+    )
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{org_id}/strategy/{bot_id}/lessons.md",
+        Body=content.encode("utf-8"),
+    )
+
+
+def test_critique_lessons_returns_file_for_author() -> None:
+    """Author reads their own strategy's lessons — happy path."""
+
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("org-a")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+            store = StrategyStore(table)
+            strat = store.create(org.org_id, alice.user_id, "S", "# rules")
+            bot_id = f"strategy-{strat.strategy_id}"
+
+            _put_lesson_in_s3(
+                "test-agent-memory", org.org_id, bot_id,
+                "## 2026-04-26 — weekend self-critique\n\nFollowed rules.",
+            )
+
+            from trading_strands.dashboard.api import app
+
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org.org_id,
+            ))
+            resp = client.get(f"/api/strategies/{strat.strategy_id}/lessons")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "Followed rules" in body["lessons"]
+            assert body["strategy_id"] == strat.strategy_id
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_critique_lessons_forbidden_for_other_org() -> None:
+    """Lessons contain strategy reasoning — privacy boundary is the same
+    as the strategy row itself. Cross-org reads must 403."""
+
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            bob = tenancy.create_user(email="bob@x.com")
+            org_a = tenancy.create_org("A")
+            org_b = tenancy.create_org("B")
+            tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+            tenancy.add_membership(bob.user_id, org_b.org_id, Role.OPERATOR)
+
+            store = StrategyStore(table)
+            strat = store.create(org_b.org_id, bob.user_id, "S", "# rules")
+
+            from trading_strands.dashboard.api import app
+
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org_a.org_id,
+            ))
+            resp = client.get(f"/api/strategies/{strat.strategy_id}/lessons")
+            assert resp.status_code == 403
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_critique_lessons_404_when_missing() -> None:
+    """No lessons.md yet — return 200 with empty body rather than 404.
+    A new strategy with zero self-critiques is the default state; the
+    dashboard wants to render an empty panel, not an error."""
+
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.strategies_store.store import StrategyStore
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("A")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+            store = StrategyStore(table)
+            strat = store.create(org.org_id, alice.user_id, "S", "# rules")
+
+            # Make the bucket exist but don't put anything in it.
+            boto3.client("s3", region_name="us-west-2").create_bucket(
+                Bucket="test-agent-memory",
+                CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+            )
+
+            from trading_strands.dashboard.api import app
+
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org.org_id,
+            ))
+            resp = client.get(f"/api/strategies/{strat.strategy_id}/lessons")
+            assert resp.status_code == 200
+            assert resp.json()["lessons"] == ""
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_critique_lessons_requires_auth() -> None:
+    """No session cookie -> 401."""
+
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/api/strategies/abc/lessons")
+        assert resp.status_code == 401
+
+
+def test_critique_lessons_503_when_bucket_unconfigured() -> None:
+    """If AGENT_MEMORY_BUCKET isn't set, the dashboard should tell the
+    operator rather than crash — this is a config issue they can fix."""
+
+    # Explicitly clear the env var in case a prior test leaked it.
+    os.environ.pop("AGENT_MEMORY_BUCKET", None)
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        store = StrategyStore(table)
+        strat = store.create(org.org_id, alice.user_id, "S", "# rules")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get(f"/api/strategies/{strat.strategy_id}/lessons")
+        assert resp.status_code == 503
+        assert "AGENT_MEMORY_BUCKET" in resp.json().get("detail", "")

@@ -725,6 +725,53 @@ async def delete_strategy(request: Request, strategy_id: str) -> None:
     store.delete(strategy_id)
 
 
+@app.get("/api/strategies/{strategy_id}/lessons")
+async def get_strategy_lessons(
+    request: Request, strategy_id: str,
+) -> dict[str, Any]:
+    """Return the self-critique lessons.md for this strategy.
+
+    Lessons contain the critique agent's reasoning — same privacy
+    boundary as the strategy itself: READ on the strategy = READ on
+    the lessons. Missing lessons file returns empty string (a new
+    strategy with no critiques yet).
+    """
+
+    principal = _get_principal(request)
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.READ, resource_for(strat, acl))
+
+    bucket = os.environ.get("AGENT_MEMORY_BUCKET")
+    if not bucket:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Agent memory not configured (AGENT_MEMORY_BUCKET unset). "
+                "Self-critique lessons unavailable."
+            ),
+        )
+
+    from trading_strands.agent_memory.store import AgentMemoryStore
+
+    memory = AgentMemoryStore(
+        s3_client=boto3.client("s3"),
+        bucket=bucket,
+        org_id=strat.org_id,
+        agent_type="strategy",
+        agent_id=f"strategy-{strategy_id}",
+    )
+    return {
+        "strategy_id": strategy_id,
+        "lessons": memory.read_lessons(),
+    }
+
+
 # ── Halt control ───────────────────────────────────────────────────────
 
 

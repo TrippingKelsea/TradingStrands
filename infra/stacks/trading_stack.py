@@ -309,6 +309,10 @@ class TradingStrandsStack(cdk.Stack):
                 resources=["*"],
             )
         )
+        # Dashboard reads self-critique lessons.md out of the agent-memory
+        # bucket. Read-only — operators view, they don't edit. (Writes are
+        # the Self-Critique Lambda's job.)
+        agent_memory_bucket.grant_read(dashboard_task_role)
         # Dashboard writes per-org Alpaca credentials to Secrets Manager.
         # Deliberately scoped to /org/*/alpaca — the dashboard never needs
         # to touch the global trading-strands/alpaca secret, which remains
@@ -350,6 +354,7 @@ class TradingStrandsStack(cdk.Stack):
                 "DYNAMODB_TABLE": table.table_name,
                 "COGNITO_USER_POOL_ID": user_pool.user_pool_id,
                 "COGNITO_CLIENT_ID": user_pool_client.user_pool_client_id,
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
             },
             secrets={
                 "COGNITO_CLIENT_SECRET": ecs.Secret.from_secrets_manager(
