@@ -312,12 +312,14 @@ def test_change_password_completes_login() -> None:
         token = login_resp.headers["location"].split("?t=")[1]
 
         # Now post to change-password with a matching new password.
+        # Password must clear the zxcvbn score + blocklist policy.
+        strong_pw = "correct horse battery staple 9!"
         resp = client.post(
             "/auth/change-password",
             data={
                 "token": token,
-                "new_password": "NewPassword123!@#",
-                "confirm_password": "NewPassword123!@#",
+                "new_password": strong_pw,
+                "confirm_password": strong_pw,
             },
             follow_redirects=False,
         )
@@ -326,6 +328,35 @@ def test_change_password_completes_login() -> None:
         assert "session" in resp.cookies
         # Ensure respond_to_auth_challenge was called.
         cognito.respond_to_auth_challenge.assert_called_once()
+
+
+def test_change_password_rejects_weak_password() -> None:
+    """The server-side policy catches weak passwords even when Cognito
+    would accept them. 'ChangeMeOnFirstLogin1!' meets Cognito's char/len
+    policy but is our starter password and appears in the blocklist."""
+
+    with mock_aws(), patch("trading_strands.dashboard.auth.boto3"):
+        _create_table()
+        from trading_strands.dashboard.api import app
+        from trading_strands.dashboard.auth import create_url_token
+
+        client = TestClient(app)
+        token = create_url_token({
+            "email": "new@example.com",
+            "cognito_session": "opaque",
+        })
+        resp = client.post(
+            "/auth/change-password",
+            data={
+                "token": token,
+                "new_password": "ChangeMeOnFirstLogin1!",
+                "confirm_password": "ChangeMeOnFirstLogin1!",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        # Bounced back to change-password with a reason token.
+        assert resp.headers["location"].startswith("/change-password?t=")
 
 
 def test_change_password_rejects_mismatched_confirmation() -> None:

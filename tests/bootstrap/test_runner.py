@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import boto3
+from moto import mock_aws
+
+from trading_strands.alpaca_secrets.store import (
+    AlpacaSecretsStore,
+    secret_name_for,
+)
 from trading_strands.authz.model import Role
 from trading_strands.bootstrap.runner import (
+    LEGACY_ALPACA_SECRET_NAME,
     SUPERWOMAN_EMAIL,
     SYSTEM_ORG_NAME,
     bootstrap,
     delete_legacy_strategies,
     ensure_superwoman_user,
     ensure_system_org,
+    seed_system_org_alpaca,
 )
 from trading_strands.tenancy.models import OrgType
 from trading_strands.tenancy.store import TenancyStore
@@ -27,12 +37,11 @@ def test_bootstrap_on_empty_table_creates_everything(table: Any) -> None:
     assert report.superwoman_membership_added is True
     assert report.superwoman_sysadmin_granted is True
     assert report.legacy_strategies_deleted == 0
+    assert report.system_org_alpaca_seeded is False  # no SM client passed
 
     tenancy = TenancyStore(table)
     role = tenancy.role_of(report.superwoman.user_id, report.system_org.org_id)
     assert role == Role.ORGADMIN
-    # First-deploy default: superwoman is sysadmin so the operator has
-    # an operable account without hitting DynamoDB by hand.
     assert tenancy.is_sysadmin(report.superwoman.user_id) is True
 
 
@@ -40,7 +49,6 @@ def test_bootstrap_is_idempotent(table: Any) -> None:
     first = bootstrap(table)
     second = bootstrap(table)
 
-    # Second run should find everything and report no creation.
     assert second.system_org.org_id == first.system_org.org_id
     assert second.system_org_created is False
     assert second.superwoman.user_id == first.superwoman.user_id
@@ -164,3 +172,97 @@ def test_ensure_superwoman_user_adds_missing_membership(table: Any) -> None:
     assert sysadmin_granted is False  # pre-existing user: not granted
     assert tenancy.role_of(user.user_id, system_org.org_id) == Role.ORGADMIN
     assert tenancy.is_sysadmin(user.user_id) is False
+
+
+# ── Alpaca secret seeding ─────────────────────────────────────────────
+
+
+def _seed_legacy_secret(
+    sm: Any, api_key: str = "K", secret_key: str = "S", paper: bool = True,
+) -> None:
+    """Create the pre-refactor global trading-strands/alpaca secret."""
+
+    sm.create_secret(
+        Name=LEGACY_ALPACA_SECRET_NAME,
+        SecretString=json.dumps({
+            "ALPACA_API_KEY": api_key,
+            "ALPACA_SECRET_KEY": secret_key,
+            "ALPACA_PAPER": "true" if paper else "false",
+        }),
+    )
+
+
+def test_bootstrap_seeds_system_org_alpaca_from_legacy(table: Any) -> None:
+    with mock_aws():
+        sm = boto3.client("secretsmanager", region_name="us-west-2")
+        _seed_legacy_secret(sm, api_key="PAPER_K", secret_key="PAPER_S", paper=True)
+
+        report = bootstrap(table, secretsmanager_client=sm)
+        assert report.system_org_alpaca_seeded is True
+
+        status = AlpacaSecretsStore(sm).status(report.system_org.org_id)
+        assert status.configured is True
+        assert status.paper is True
+        # Confirm the per-org secret exists at the expected path.
+        name = secret_name_for(report.system_org.org_id)
+        resp = sm.get_secret_value(SecretId=name)
+        payload = json.loads(resp["SecretString"])
+        assert payload["ALPACA_API_KEY"] == "PAPER_K"
+        assert payload["ALPACA_SECRET_KEY"] == "PAPER_S"
+
+
+def test_bootstrap_alpaca_seed_is_noop_if_per_org_already_set(
+    table: Any,
+) -> None:
+    """Never overwrite an orgadmin's manually-set creds on redeploy."""
+
+    with mock_aws():
+        sm = boto3.client("secretsmanager", region_name="us-west-2")
+        _seed_legacy_secret(sm, api_key="OLD_K", secret_key="OLD_S")
+
+        # First run: seeding happens.
+        first = bootstrap(table, secretsmanager_client=sm)
+        assert first.system_org_alpaca_seeded is True
+
+        # Orgadmin changes the creds through the UI (simulated here).
+        store = AlpacaSecretsStore(sm)
+        store.upsert(
+            first.system_org.org_id,
+            api_key="NEW_K", secret_key="NEW_S", paper=False,
+        )
+
+        # Even if legacy secret still exists, second run must not overwrite.
+        second = bootstrap(table, secretsmanager_client=sm)
+        assert second.system_org_alpaca_seeded is False
+        status = store.status(first.system_org.org_id)
+        assert status.paper is False  # operator's choice preserved
+
+
+def test_bootstrap_alpaca_seed_noop_without_legacy_secret(
+    table: Any,
+) -> None:
+    """If the legacy secret is missing entirely, seeding skips silently.
+
+    This matters for genuinely fresh deploys where CI hasn't seeded the
+    global secret yet — bootstrap shouldn't crash."""
+
+    with mock_aws():
+        sm = boto3.client("secretsmanager", region_name="us-west-2")
+
+        report = bootstrap(table, secretsmanager_client=sm)
+        assert report.system_org_alpaca_seeded is False
+
+
+def test_seed_system_org_alpaca_handles_invalid_legacy_json() -> None:
+    with mock_aws():
+        sm = boto3.client("secretsmanager", region_name="us-west-2")
+        sm.create_secret(
+            Name=LEGACY_ALPACA_SECRET_NAME, SecretString="not json",
+        )
+        # Need a system org to pass in.
+        from trading_strands.tenancy.models import Org
+        fake_org = Org(
+            org_id="sys1", name="sys", org_type=OrgType.SYSTEM,
+            created_at=1, updated_at=1,
+        )
+        assert seed_system_org_alpaca(sm, fake_org) is False

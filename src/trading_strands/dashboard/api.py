@@ -39,6 +39,7 @@ from trading_strands.dashboard.auth import (
     create_url_token,
     decode_url_token,
 )
+from trading_strands.dashboard.password_policy import check_password
 from trading_strands.dashboard.principal import (
     SessionInvalidError,
     principal_from_session,
@@ -224,6 +225,25 @@ async def auth_change_password(
             "email": data["email"],
             "cognito_session": data["cognito_session"],
             "error": "Passwords did not match",
+        })
+        return RedirectResponse(
+            url=f"/change-password?t={err_tok}", status_code=303,
+        )
+
+    # Enforce our strength policy BEFORE sending to Cognito. Cognito's own
+    # policy (12 chars, upper+lower+digit+symbol) is necessary but not
+    # sufficient — 'Password123!' clears it. We block by zxcvbn score + a
+    # context blocklist (email local-part, starter tokens).
+    policy = check_password(
+        new_password,
+        email=data["email"],
+        forbidden=("ChangeMeOnFirstLogin1!",),
+    )
+    if not policy.ok:
+        err_tok = create_url_token({
+            "email": data["email"],
+            "cognito_session": data["cognito_session"],
+            "error": policy.reason,
         })
         return RedirectResponse(
             url=f"/change-password?t={err_tok}", status_code=303,
@@ -1037,10 +1057,19 @@ def _resolve_user_email(tenancy: TenancyStore, user_id: str) -> str:
 async def reset_user_password(
     request: Request, user_id: str, body: UserPasswordReset,
 ) -> dict[str, str]:
+    """Admin-driven password reset. Goes through the same strength policy
+    as the self-service change-password flow — admins can't create weak
+    passwords for their users either."""
+
     principal = _get_principal(request)
     _require_user_mgmt(principal, None)
 
     email = _resolve_user_email(TenancyStore(_get_table()), user_id)
+
+    policy = check_password(body.password, email=email)
+    if not policy.ok:
+        raise HTTPException(status_code=400, detail=policy.reason)
+
     cognito = _get_cognito_client()
     try:
         cognito.admin_set_user_password(

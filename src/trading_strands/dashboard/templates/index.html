@@ -178,6 +178,8 @@
           <select id="new-user-role" style="width:100%;padding:6px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:inherit;font-size:0.85rem;">
             <option value="viewer">Viewer</option>
             <option value="operator">Operator</option>
+            <option value="auditor">Auditor</option>
+            <option value="orgadmin">Org Admin</option>
           </select>
         </div>
         <div class="form-group" style="margin-bottom:0;min-width:140px;">
@@ -212,13 +214,46 @@
       <input type="hidden" id="password-modal-username">
       <div class="form-group">
         <label>New Password</label>
-        <input type="password" id="password-modal-input" placeholder="Min 12 chars, upper+lower+digit+symbol">
+        <input type="password" id="password-modal-input" placeholder="Min 12 chars; zxcvbn score >= 3 (avoid common words)">
       </div>
       <div style="display:flex;gap:8px;">
         <button class="btn btn-primary" onclick="submitPasswordReset()">Set Password</button>
         <button class="btn" onclick="closePasswordModal()">Cancel</button>
       </div>
       <span id="password-modal-status" style="font-size:0.8rem;margin-top:8px;display:block;"></span>
+    </div>
+  </div>
+
+  <div id="alpaca-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center;">
+    <div class="panel" style="max-width:460px;width:90%;">
+      <h2 id="alpaca-modal-title">Set Alpaca Keys</h2>
+      <p style="font-size:0.72rem;color:var(--dim);margin-bottom:12px;">
+        These keys are stored in AWS Secrets Manager under
+        <code>trading-strands/org/&lt;org_id&gt;/alpaca</code>.
+        They are never returned to the dashboard after being set —
+        only the trading service can read them.
+      </p>
+      <input type="hidden" id="alpaca-modal-orgid">
+      <div class="form-group">
+        <label>API Key</label>
+        <input type="text" id="alpaca-modal-apikey" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Secret Key</label>
+        <input type="password" id="alpaca-modal-secretkey" autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:8px;">
+          <input type="checkbox" id="alpaca-modal-paper" checked>
+          Paper trading mode (recommended for non-production orgs)
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" onclick="submitAlpacaKeys()">Save Keys</button>
+        <button class="btn danger" onclick="deleteAlpacaKeys()">Remove Keys</button>
+        <button class="btn" onclick="closeAlpacaModal()">Cancel</button>
+      </div>
+      <span id="alpaca-modal-status" style="font-size:0.8rem;margin-top:8px;display:block;"></span>
     </div>
   </div>
 </div>
@@ -748,16 +783,19 @@
         return;
       }
 
-      let html = '<table><thead><tr><th>Name</th><th>Org ID</th><th>Session Timeout</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+      let html = '<table><thead><tr><th>Name</th><th>Type</th><th>Org ID</th><th>Alpaca</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
       orgs.forEach(o => {
-        const timeout = o.session_max_age ? (o.session_max_age / 86400).toFixed(0) + ' days' : 'default';
+        const typeLabel = o.org_type === 'system' ? 'SYSTEM' : 'customer';
+        const typeClass = o.org_type === 'system' ? 'badge-active' : 'badge-paused';
         html += `<tr>
           <td style="font-weight:bold;color:var(--blue);">${o.name}</td>
+          <td><span class="badge ${typeClass}">${typeLabel}</span></td>
           <td style="color:var(--dim);font-size:0.75rem;">${o.org_id}</td>
-          <td>${timeout}</td>
+          <td id="alpaca-status-${o.org_id}" style="font-size:0.75rem;color:var(--dim);">loading…</td>
           <td style="color:var(--dim);font-size:0.75rem;">${o.created_at ? new Date(o.created_at * 1000).toLocaleDateString() : '-'}</td>
           <td>
             <div class="strat-actions">
+              <button onclick="openAlpacaModal('${o.org_id}','${o.name.replace(/'/g, "\\'")}')">Set Alpaca Keys</button>
               <button class="danger" onclick="deleteOrg('${o.org_id}','${o.name}')">Delete</button>
             </div>
           </td>
@@ -765,6 +803,8 @@
       });
       html += '</tbody></table>';
       container.innerHTML = html;
+      // Fetch Alpaca status for each org asynchronously.
+      orgs.forEach(o => { loadAlpacaStatus(o.org_id); });
     } catch(e) {
       container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load orgs.</div>';
     }
@@ -819,7 +859,7 @@
     try {
       const resp = await fetch('/api/admin/users');
       if (resp.status === 403) {
-        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:8px 0;">Admin access requires operator role.</div>';
+        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:8px 0;">You must be an orgadmin or sysadmin to view this page.</div>';
         return;
       }
       const users = await resp.json();
@@ -829,22 +869,34 @@
         return;
       }
 
-      let html = '<table><thead><tr><th>Email</th><th>Org</th><th>Role</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+      let html = '<table><thead><tr><th>Email</th><th>Memberships</th><th>Sysadmin</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
       users.forEach(u => {
-        const roleClass = u.role === 'operator' ? 'badge-active' : 'badge-paused';
         const statusClass = u.enabled ? (u.status === 'CONFIRMED' ? 'badge-active' : 'badge-paused') : 'badge-stopped';
+        const statusLabel = u.enabled ? u.status : 'DISABLED';
+        const memberships = (u.memberships || []);
+        const membershipsHtml = memberships.length === 0
+          ? '<span style="color:var(--dim);font-style:italic">none</span>'
+          : memberships.map(m =>
+              `<div style="font-size:0.72rem;margin-bottom:2px;">
+                <span style="color:var(--dim);">${orgName(m.org_id)}</span>:
+                <span class="badge ${m.role === 'orgadmin' ? 'badge-active' : 'badge-paused'}">${m.role}</span>
+              </div>`).join('');
+        const sysadminBadge = u.sysadmin
+          ? '<span class="badge badge-active">YES</span>'
+          : '<span class="badge badge-paused" style="opacity:0.5;">no</span>';
+        const created = u.created_at ? new Date(u.created_at * 1000).toLocaleDateString() : '-';
         html += `<tr>
           <td>${u.email}</td>
-          <td style="font-size:0.75rem;">${orgName(u.org_id)}</td>
-          <td><span class="badge ${roleClass}">${u.role}</span></td>
-          <td><span class="badge ${statusClass}">${u.enabled ? u.status : 'DISABLED'}</span></td>
-          <td style="color:var(--dim);font-size:0.75rem;">${u.created ? new Date(u.created).toLocaleDateString() : '-'}</td>
+          <td>${membershipsHtml}</td>
+          <td>${sysadminBadge}</td>
+          <td><span class="badge ${statusClass}">${statusLabel}</span></td>
+          <td style="color:var(--dim);font-size:0.75rem;">${created}</td>
           <td>
             <div class="strat-actions">
-              <button onclick="toggleRole('${u.username}','${u.role}')">${u.role === 'operator' ? 'Make Viewer' : 'Make Operator'}</button>
-              <button onclick="openPasswordModal('${u.username}','${u.email}')">Reset Password</button>
-              <button onclick="${u.enabled ? `disableUser('${u.username}')` : `enableUser('${u.username}')`}">${u.enabled ? 'Disable' : 'Enable'}</button>
-              <button class="danger" onclick="deleteUser('${u.username}','${u.email}')">Delete</button>
+              <button onclick="openPasswordModal('${u.user_id}','${u.email}')">Reset Password</button>
+              <button onclick="${u.enabled ? `disableUser('${u.user_id}')` : `enableUser('${u.user_id}')`}">${u.enabled ? 'Disable' : 'Enable'}</button>
+              <button onclick="toggleSysadmin('${u.user_id}','${u.email}',${u.sysadmin})">${u.sysadmin ? 'Revoke Sysadmin' : 'Grant Sysadmin'}</button>
+              <button class="danger" onclick="deleteUser('${u.user_id}','${u.email}')">Delete</button>
             </div>
           </td>
         </tr>`;
@@ -890,44 +942,48 @@
     }
   });
 
-  window.toggleRole = async function(username, currentRole) {
-    const newRole = currentRole === 'operator' ? 'viewer' : 'operator';
-    if (!confirm('Change role to ' + newRole + '?')) return;
+  window.toggleSysadmin = async function(userId, email, isSysadmin) {
+    const verb = isSysadmin ? 'revoke sysadmin from' : 'grant sysadmin to';
+    if (!confirm(`Are you sure you want to ${verb} ${email}?`)) return;
     try {
-      await fetch('/api/admin/users/' + encodeURIComponent(username) + '/role', {
+      const resp = await fetch('/api/admin/users/' + encodeURIComponent(userId) + '/sysadmin', {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({role: newRole}),
+        body: JSON.stringify({sysadmin: !isSysadmin}),
       });
+      if (!resp.ok) {
+        const err = await resp.json();
+        alert('Failed: ' + (err.detail || 'Unknown'));
+      }
       loadUsers();
-    } catch(e) { alert('Failed to update role'); }
+    } catch(e) { alert('Failed to toggle sysadmin'); }
   };
 
-  window.deleteUser = async function(username, email) {
+  window.deleteUser = async function(userId, email) {
     if (!confirm('Delete user ' + email + '? This cannot be undone.')) return;
     try {
-      await fetch('/api/admin/users/' + encodeURIComponent(username), {method: 'DELETE'});
+      await fetch('/api/admin/users/' + encodeURIComponent(userId), {method: 'DELETE'});
       loadUsers();
     } catch(e) { alert('Failed to delete user'); }
   };
 
-  window.enableUser = async function(username) {
+  window.enableUser = async function(userId) {
     try {
-      await fetch('/api/admin/users/' + encodeURIComponent(username) + '/enable', {method: 'POST'});
+      await fetch('/api/admin/users/' + encodeURIComponent(userId) + '/enable', {method: 'POST'});
       loadUsers();
     } catch(e) { alert('Failed to enable user'); }
   };
 
-  window.disableUser = async function(username) {
+  window.disableUser = async function(userId) {
     if (!confirm('Disable this user? They will not be able to log in.')) return;
     try {
-      await fetch('/api/admin/users/' + encodeURIComponent(username) + '/disable', {method: 'POST'});
+      await fetch('/api/admin/users/' + encodeURIComponent(userId) + '/disable', {method: 'POST'});
       loadUsers();
     } catch(e) { alert('Failed to disable user'); }
   };
 
-  window.openPasswordModal = function(username, email) {
-    $('password-modal-username').value = username;
+  window.openPasswordModal = function(userId, email) {
+    $('password-modal-username').value = userId;
     $('password-modal-title').textContent = 'Reset Password: ' + email;
     $('password-modal-input').value = '';
     $('password-modal-status').textContent = '';
@@ -962,6 +1018,103 @@
         status.textContent = 'Password reset successfully!';
         status.style.color = 'var(--green)';
         setTimeout(closePasswordModal, 1500);
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  };
+
+  // ── Alpaca per-org credentials ─────────────────────────────────────
+
+  async function loadAlpacaStatus(orgId) {
+    const cell = document.getElementById('alpaca-status-' + orgId);
+    if (!cell) return;
+    try {
+      const resp = await fetch('/api/admin/orgs/' + encodeURIComponent(orgId) + '/alpaca');
+      if (!resp.ok) {
+        cell.innerHTML = '<span style="color:var(--red);">n/a</span>';
+        return;
+      }
+      const data = await resp.json();
+      if (!data.configured) {
+        cell.innerHTML = '<span style="color:var(--red);">not configured</span>';
+      } else {
+        const mode = data.paper ? 'paper' : '<span style="color:var(--red);">LIVE</span>';
+        cell.innerHTML = '<span class="badge badge-active">' + mode + '</span>';
+      }
+    } catch(e) {
+      cell.innerHTML = '<span style="color:var(--red);">error</span>';
+    }
+  }
+
+  window.openAlpacaModal = function(orgId, orgName) {
+    $('alpaca-modal-orgid').value = orgId;
+    $('alpaca-modal-title').textContent = 'Alpaca Keys: ' + orgName;
+    $('alpaca-modal-apikey').value = '';
+    $('alpaca-modal-secretkey').value = '';
+    $('alpaca-modal-paper').checked = true;
+    $('alpaca-modal-status').textContent = '';
+    $('alpaca-modal').style.display = 'flex';
+  };
+
+  window.closeAlpacaModal = function() {
+    $('alpaca-modal').style.display = 'none';
+  };
+
+  window.submitAlpacaKeys = async function() {
+    const orgId = $('alpaca-modal-orgid').value;
+    const apiKey = $('alpaca-modal-apikey').value.trim();
+    const secretKey = $('alpaca-modal-secretkey').value.trim();
+    const paper = $('alpaca-modal-paper').checked;
+    const status = $('alpaca-modal-status');
+
+    if (!apiKey || !secretKey) {
+      status.textContent = 'API Key and Secret Key are required';
+      status.style.color = 'var(--red)';
+      return;
+    }
+    status.textContent = 'Saving...';
+    status.style.color = 'var(--dim)';
+    try {
+      const resp = await fetch('/api/admin/orgs/' + encodeURIComponent(orgId) + '/alpaca', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({api_key: apiKey, secret_key: secretKey, paper}),
+      });
+      if (resp.ok) {
+        status.textContent = 'Saved.';
+        status.style.color = 'var(--green)';
+        loadAlpacaStatus(orgId);
+        setTimeout(closeAlpacaModal, 1200);
+      } else {
+        const err = await resp.json();
+        status.textContent = 'Error: ' + (err.detail || 'Unknown');
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  };
+
+  window.deleteAlpacaKeys = async function() {
+    const orgId = $('alpaca-modal-orgid').value;
+    const status = $('alpaca-modal-status');
+    if (!confirm('Remove Alpaca keys for this org? The trading service will be disconnected.')) return;
+    status.textContent = 'Removing...';
+    status.style.color = 'var(--dim)';
+    try {
+      const resp = await fetch('/api/admin/orgs/' + encodeURIComponent(orgId) + '/alpaca', {method: 'DELETE'});
+      if (resp.ok) {
+        status.textContent = 'Removed.';
+        status.style.color = 'var(--green)';
+        loadAlpacaStatus(orgId);
+        setTimeout(closeAlpacaModal, 1000);
       } else {
         const err = await resp.json();
         status.textContent = 'Error: ' + (err.detail || 'Unknown');

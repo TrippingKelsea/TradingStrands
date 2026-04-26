@@ -21,10 +21,11 @@ def _main() -> int:
     table_name = os.environ.get("DYNAMODB_TABLE", "trading-strands-state")
     ddb = boto3.resource("dynamodb")
     table = ddb.Table(table_name)
+    sm = boto3.client("secretsmanager")
 
     print(f"bootstrap: table={table_name}")
     try:
-        report = bootstrap(table)
+        report = bootstrap(table, secretsmanager_client=sm)
     except Exception as exc:
         print(f"bootstrap: FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -36,6 +37,7 @@ def _main() -> int:
           f"membership_added={report.superwoman_membership_added} "
           f"sysadmin_granted={report.superwoman_sysadmin_granted}")
     print(f"  legacy_strategies_deleted: {report.legacy_strategies_deleted}")
+    print(f"  system_org_alpaca_seeded: {report.system_org_alpaca_seeded}")
     return 0
 
 

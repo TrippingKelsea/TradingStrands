@@ -8,16 +8,25 @@ summary without the function having to know about logging conventions.
 
 from __future__ import annotations
 
+import json as _json
+import logging
 from typing import Any, NamedTuple
 
 from boto3.dynamodb.conditions import Attr
 
+from trading_strands.alpaca_secrets.store import (
+    AlpacaSecretsStore,
+    secret_name_for,
+)
 from trading_strands.authz.model import Role
 from trading_strands.tenancy.models import Org, OrgType, User
 from trading_strands.tenancy.store import TenancyStore
 
 SUPERWOMAN_EMAIL = "superwoman@tradingstrands.xyz"
 SYSTEM_ORG_NAME = "Women with Super Powers"
+LEGACY_ALPACA_SECRET_NAME = "trading-strands/alpaca"  # noqa: S105 -- secret NAME, not a value
+
+_log = logging.getLogger(__name__)
 
 
 class BootstrapReport(NamedTuple):
@@ -30,6 +39,7 @@ class BootstrapReport(NamedTuple):
     superwoman_membership_added: bool
     superwoman_sysadmin_granted: bool
     legacy_strategies_deleted: int
+    system_org_alpaca_seeded: bool
 
 
 def ensure_system_org(tenancy: TenancyStore) -> tuple[Org, bool]:
@@ -118,8 +128,78 @@ def delete_legacy_strategies(table: Any) -> int:
     return deleted
 
 
-def bootstrap(table: Any) -> BootstrapReport:
-    """Run all bootstrap steps against the given DynamoDB table."""
+def seed_system_org_alpaca(
+    secretsmanager_client: Any, system_org: Org,
+) -> bool:
+    """Copy the legacy global trading-strands/alpaca secret into the
+    system org's per-org secret path, ONLY if the per-org secret doesn't
+    already exist.
+
+    This is for first-deploy UX: the CI step seeds the paper keys into
+    the global secret (for backward-compat with the trading service),
+    and we fan out to the system org so the market-data subscriber can
+    read them once it exists. On re-runs (per-org secret already exists),
+    this is a no-op — operators who have already set up per-org keys
+    must never be silently overwritten.
+
+    Returns True if seeding happened, False if skipped (already set or
+    legacy secret absent).
+    """
+
+    store = AlpacaSecretsStore(secretsmanager_client)
+    if store.status(system_org.org_id).configured:
+        return False
+
+    # Read the legacy global secret. Missing is OK (fresh pre-CI state).
+    try:
+        resp = secretsmanager_client.get_secret_value(
+            SecretId=LEGACY_ALPACA_SECRET_NAME,
+        )
+    except secretsmanager_client.exceptions.ResourceNotFoundException:
+        _log.info("bootstrap.alpaca.skip: no legacy secret to copy")
+        return False
+    except Exception:
+        _log.exception("bootstrap.alpaca.read_failed")
+        return False
+
+    raw = resp.get("SecretString", "")
+    if not raw:
+        return False
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        _log.warning("bootstrap.alpaca.legacy_not_json")
+        return False
+
+    api_key = data.get("ALPACA_API_KEY", "")
+    secret_key = data.get("ALPACA_SECRET_KEY", "")
+    paper_str = str(data.get("ALPACA_PAPER", "true")).lower()
+    if not (api_key and secret_key):
+        return False
+
+    store.upsert(
+        org_id=system_org.org_id,
+        api_key=api_key,
+        secret_key=secret_key,
+        paper=paper_str in ("true", "1", "yes"),
+    )
+    _log.info(
+        "bootstrap.alpaca.seeded org_id=%s target=%s",
+        system_org.org_id,
+        secret_name_for(system_org.org_id),
+    )
+    return True
+
+
+def bootstrap(
+    table: Any, secretsmanager_client: Any | None = None,
+) -> BootstrapReport:
+    """Run all bootstrap steps against the given DynamoDB table.
+
+    `secretsmanager_client` is optional: when provided, the system org's
+    Alpaca secret is seeded from the legacy global secret (first deploy
+    UX). Tests that don't care can omit it.
+    """
 
     tenancy = TenancyStore(table)
     system_org, system_org_created = ensure_system_org(tenancy)
@@ -127,6 +207,11 @@ def bootstrap(table: Any) -> BootstrapReport:
         superwoman, sw_created, membership_added, sysadmin_granted,
     ) = ensure_superwoman_user(tenancy, system_org)
     legacy_count = delete_legacy_strategies(table)
+
+    alpaca_seeded = False
+    if secretsmanager_client is not None:
+        alpaca_seeded = seed_system_org_alpaca(secretsmanager_client, system_org)
+
     return BootstrapReport(
         system_org=system_org,
         system_org_created=system_org_created,
@@ -135,4 +220,5 @@ def bootstrap(table: Any) -> BootstrapReport:
         superwoman_membership_added=membership_added,
         superwoman_sysadmin_granted=sysadmin_granted,
         legacy_strategies_deleted=legacy_count,
+        system_org_alpaca_seeded=alpaca_seeded,
     )

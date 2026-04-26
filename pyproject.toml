@@ -45,6 +45,8 @@ dependencies = [
     "jinja2>=3.1",
     "itsdangerous>=2.1",
     "python-multipart>=0.0.9",
+    # Password strength scoring (used on change-password / reset-password flows)
+    "zxcvbn>=4.4.28",
 ]
 
 [project.optional-dependencies]
@@ -107,6 +109,7 @@ module = [
     "botocore.*",
     "mypy_boto3_dynamodb.*",
     "itsdangerous.*",
+    "zxcvbn.*",
 ]
 ignore_missing_imports = true
 
