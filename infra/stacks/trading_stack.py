@@ -33,6 +33,9 @@ from aws_cdk import (
     aws_iam as iam,
 )
 from aws_cdk import (
+    aws_lambda as lambda_,
+)
+from aws_cdk import (
     aws_logs as logs,
 )
 from aws_cdk import (
@@ -497,6 +500,64 @@ class TradingStrandsStack(cdk.Stack):
                 resources=[trading_service.service_arn],
             ),
         ))
+
+        # -- Self-Critique Agent (weekend Lambda) ----------------------------
+        #
+        # Runs Saturday early morning UTC. One invocation per active Strategy
+        # Agent; an operator Lambda (added in Gate B with BotProvisioner) will
+        # enumerate strategies and invoke this function per bot. For v0 the
+        # function exists and is manually invokable; the enumeration loop
+        # is the next iteration's work.
+        self_critique_fn = lambda_.DockerImageFunction(
+            self,
+            "SelfCritiqueFunction",
+            function_name="trading-strands-self-critique",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=["trading_strands.self_critique.lambda_handler.handler"],
+            ),
+            memory_size=1024,
+            timeout=cdk.Duration.minutes(5),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                # Model ID can be overridden per deploy. Defaults to Sonnet
+                # because this is a reflective workload where quality matters
+                # more than latency, but cheaper than Opus.
+                "SELF_CRITIQUE_MODEL_ID": "us.anthropic.claude-sonnet-4-6",
+            },
+        )
+        cdk.Tags.of(self_critique_fn).add("Component", "self-critique-agent")
+        table.grant_read_write_data(self_critique_fn)
+        agent_memory_bucket.grant_read_write(self_critique_fn)
+        self_critique_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+            ],
+            resources=["*"],
+        ))
+
+        # EventBridge schedule: Saturday 10:00 UTC = 6am ET. Markets are
+        # closed on Saturday; strategies have finished their week; the
+        # current week's memory is available for review.
+        events.Rule(
+            self,
+            "SelfCritiqueWeekendSchedule",
+            description=(
+                "Saturday 10:00 UTC trigger — caller passes "
+                "{org_id, bot_id} per invocation"
+            ),
+            schedule=events.Schedule.cron(
+                minute="0", hour="10",
+                week_day="SAT",
+            ),
+            # No default target — v1 operator Lambda will invoke per-bot. This
+            # rule is here as a placeholder so CDK creates it on first deploy;
+            # attaching targets later (in Gate B) is a surgical change.
+            enabled=False,
+        )
 
         # -- Outputs ----------------------------------------------------------
 

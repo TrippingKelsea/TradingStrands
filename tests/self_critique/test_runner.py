@@ -253,6 +253,34 @@ def test_recent_days_count_is_respected() -> None:
     assert "2026-04-23" not in last_prompt
 
 
+def test_lambda_load_strategy_prompt_from_ddb() -> None:
+    """The Lambda handler's helper that reads a strategy prompt from DDB."""
+
+    import boto3
+    from moto import mock_aws
+
+    from trading_strands.self_critique.lambda_handler import _load_strategy_prompt
+
+    with mock_aws():
+        ddb = boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        table.put_item(Item={
+            "pk": "STRATEGY#abc",
+            "strategy_id": "abc",
+            "markdown": "## Rules\n- buy on dips",
+        })
+        # bot_id is 'strategy-abc' per app.py convention.
+        assert "buy on dips" in _load_strategy_prompt(table, "strategy-abc")
+        # Missing strategy returns empty string, not error.
+        assert _load_strategy_prompt(table, "strategy-missing") == ""
+
+
 def test_critique_system_prompt_forbids_phantom_trades() -> None:
     """Hard invariant: the system prompt must tell the LLM not to invent
     market behavior or propose simulated trades — that's backtesting,
