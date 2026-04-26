@@ -24,6 +24,12 @@ from aws_cdk import (
     aws_elasticloadbalancingv2 as elbv2,
 )
 from aws_cdk import (
+    aws_events as events,
+)
+from aws_cdk import (
+    aws_events_targets as events_targets,
+)
+from aws_cdk import (
     aws_iam as iam,
 )
 from aws_cdk import (
@@ -199,7 +205,7 @@ class TradingStrandsStack(cdk.Stack):
 
         # max_healthy_percent=100 / min_healthy_percent=0 ensures at most one
         # task is running at any time, preventing duplicate order submission.
-        ecs.FargateService(
+        trading_service = ecs.FargateService(
             self,
             "TradingService",
             cluster=cluster,
@@ -355,6 +361,71 @@ class TradingStrandsStack(cdk.Stack):
                     targets.LoadBalancerTarget(dashboard_service.load_balancer),
                 ),
             )
+
+        # -- Cost control scheduler ------------------------------------------
+        #
+        # Trading service runs only during market hours (weekdays 6am-9pm ET).
+        # Dashboard stays up 24/7 so sysadmins can log in anytime.
+        #
+        # EventBridge cron expressions are UTC-anchored. We use EST offsets
+        # (UTC-5) rather than DST-aware because EventBridge can't track DST —
+        # during summer, wake is effectively 7am local / sleep 10pm local,
+        # which still covers US market hours (9:30am-4pm ET). Premarket
+        # activity before the wake window is captured by the market data
+        # subscriber (commit 10) which runs 24/7 on a separate service.
+        #
+        # Cron format: "minute hour day-of-month month day-of-week year"
+        # 6am ET (EST) = 11:00 UTC
+        # 9pm ET (EST) = 02:00 UTC next day — so the sleep rule runs
+        # Tue-Sat at 02:00 UTC to cover "Mon-Fri 9pm ET".
+        wake_rule = events.Rule(
+            self,
+            "TradingServiceWakeRule",
+            description="Wake trading service at 6am ET on weekdays",
+            schedule=events.Schedule.cron(
+                minute="0", hour="11",
+                week_day="MON-FRI",
+            ),
+        )
+        sleep_rule = events.Rule(
+            self,
+            "TradingServiceSleepRule",
+            description="Sleep trading service at 9pm ET on weekdays",
+            schedule=events.Schedule.cron(
+                minute="0", hour="2",
+                week_day="TUE-SAT",
+            ),
+        )
+
+        # Use the AwsApi target so we can call UpdateService directly.
+        # EventBridge's built-in EcsTask target launches new tasks on a
+        # schedule; UpdateService is what we need to change desired_count.
+        wake_rule.add_target(events_targets.AwsApi(
+            service="ECS",
+            action="updateService",
+            parameters={
+                "cluster": cluster.cluster_name,
+                "service": trading_service.service_name,
+                "desiredCount": 1,
+            },
+            policy_statement=iam.PolicyStatement(
+                actions=["ecs:UpdateService"],
+                resources=[trading_service.service_arn],
+            ),
+        ))
+        sleep_rule.add_target(events_targets.AwsApi(
+            service="ECS",
+            action="updateService",
+            parameters={
+                "cluster": cluster.cluster_name,
+                "service": trading_service.service_name,
+                "desiredCount": 0,
+            },
+            policy_statement=iam.PolicyStatement(
+                actions=["ecs:UpdateService"],
+                resources=[trading_service.service_arn],
+            ),
+        ))
 
         # -- Outputs ----------------------------------------------------------
 
