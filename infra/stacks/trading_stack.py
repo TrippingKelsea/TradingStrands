@@ -331,11 +331,11 @@ class TradingStrandsStack(cdk.Stack):
             redirect_http=tls_enabled,
             target_protocol=elbv2.ApplicationProtocol.HTTP,
             assign_public_ip=True,
-            # open=False prevents the pattern from adding 0.0.0.0/0 on the
-            # auto-created LB SG. We attach our restrictive alb_sg below so
-            # inbound is limited to the operator CIDR only. This avoids
-            # tripping Epoxy's ELBListenerDelete mitigation.
-            open=False,
+            # open_listener=False prevents the pattern from adding 0.0.0.0/0
+            # on the auto-created LB SG. Our restrictive alb_sg is attached
+            # below so inbound is limited to the operator CIDR only. This
+            # avoids tripping Epoxy's ELBListenerDelete mitigation.
+            open_listener=False,
         )
         dashboard_service.load_balancer.add_security_group(alb_sg)
 
