@@ -124,6 +124,13 @@ jobs:
             --secret-id trading-strands/alpaca \
             --secret-string "{\"ALPACA_API_KEY\":\"${ALPACA_PAPER_KEY}\",\"ALPACA_SECRET_KEY\":\"${ALPACA_PAPER_SECRET}\",\"ALPACA_PAPER\":\"true\"}"
 
+      - name: Bootstrap (idempotent) — system org, superwoman user, delete legacy strategies
+        env:
+          DYNAMODB_TABLE: trading-strands-state
+        run: |
+          uv sync --extra dev
+          uv run python -m trading_strands.bootstrap
+
       - name: Force ECS services to pull latest images
         continue-on-error: true
         run: |
