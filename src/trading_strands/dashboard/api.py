@@ -867,71 +867,120 @@ async def telemetry(request: Request) -> dict[str, Any]:
 async def cost_summary(request: Request) -> dict[str, Any]:
     """Infrastructure cost — sysadmin only (cost data is sensitive + cross-org).
 
-    Uses authz policy: sysadmin reading COST_DATA is always allowed; other
-    principals hit the deny-by-default path and get a 403.
+    Querying Cost Explorer requires the tags `Project` and `Component` to
+    be activated as cost-allocation tags in the Billing console. That is
+    a one-time manual step per account (not scriptable). Until activated,
+    Cost Explorer returns empty groups even though our resources ARE
+    tagged correctly.
+
+    Endpoint behavior:
+      1. Try the tag-filtered query (our preferred shape — gives per-
+         component breakdown).
+      2. If that returns zero data, fall back to a GroupBy=SERVICE query
+         against the raw account bill. Worse granularity but non-empty.
+      3. Surface `tags_activated` in the response so the UI can warn
+         the sysadmin that per-component attribution is unavailable.
     """
 
     principal = _get_principal(request)
     _require(principal, Action.READ, Resource(ResourceType.COST_DATA, org_id=None))
 
-    try:
-        import datetime
+    import datetime
 
-        ce = boto3.client("ce")
-        end = datetime.date.today()
-        start = end - datetime.timedelta(days=30)
+    ce = boto3.client("ce")
+    end = datetime.date.today()
+    start = end - datetime.timedelta(days=30)
 
-        resp = ce.get_cost_and_usage(
-            TimePeriod={
-                "Start": start.isoformat(),
-                "End": end.isoformat(),
-            },
-            Granularity="DAILY",
-            Metrics=["UnblendedCost"],
-            Filter={
-                "Tags": {
-                    "Key": "Project",
-                    "Values": ["TradingStrands"],
-                },
-            },
-            GroupBy=[
-                {"Type": "TAG", "Key": "Component"},
-            ],
-        )
+    period = {"start": start.isoformat(), "end": end.isoformat()}
 
-        daily: list[dict[str, Any]] = []
-        total = 0.0
+    def _sum_from_grouped(resp: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
+        daily_out: list[dict[str, Any]] = []
+        tot = 0.0
         for result in resp.get("ResultsByTime", []):
-            period = result["TimePeriod"]
+            period_r = result["TimePeriod"]
             day_total = 0.0
             components: dict[str, float] = {}
             for group in result.get("Groups", []):
                 key = group["Keys"][0] if group["Keys"] else "untagged"
-                key = key.replace("Component$", "")
+                for prefix in ("Component$", "SERVICE$"):
+                    key = key.replace(prefix, "")
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
                 components[key] = amount
                 day_total += amount
-            daily.append({
-                "date": period["Start"],
+            daily_out.append({
+                "date": period_r["Start"],
                 "total": round(day_total, 4),
                 "components": components,
             })
-            total += day_total
+            tot += day_total
+        return daily_out, tot
 
-        return {
-            "period": {"start": start.isoformat(), "end": end.isoformat()},
-            "total_cost": round(total, 2),
-            "currency": "USD",
-            "daily": daily,
-        }
+    # Attempt 1: tag-filtered, grouped by Component.
+    try:
+        tagged_resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="DAILY",
+            Metrics=["UnblendedCost"],
+            Filter={"Tags": {"Key": "Project", "Values": ["TradingStrands"]}},
+            GroupBy=[{"Type": "TAG", "Key": "Component"}],
+        )
+        daily, total = _sum_from_grouped(tagged_resp)
+        tags_activated = total > 0
+        if tags_activated:
+            return {
+                "period": period,
+                "total_cost": round(total, 2),
+                "currency": "USD",
+                "daily": daily,
+                "grouping": "Component",
+                "tags_activated": True,
+            }
     except Exception as exc:
         return {
-            "error": str(exc),
-            "period": {},
+            "period": period,
             "total_cost": 0,
             "currency": "USD",
             "daily": [],
+            "error": str(exc),
+            "tags_activated": False,
         }
+
+    # Attempt 2: fall back to account-wide, grouped by service. This is
+    # coarser but non-empty — lets the sysadmin see *something* while the
+    # tag-activation step is pending.
+    try:
+        svc_resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="DAILY",
+            Metrics=["UnblendedCost"],
+            GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
+        )
+        daily, total = _sum_from_grouped(svc_resp)
+    except Exception as exc:
+        return {
+            "period": period,
+            "total_cost": 0,
+            "currency": "USD",
+            "daily": [],
+            "error": str(exc),
+            "tags_activated": False,
+        }
+
+    return {
+        "period": period,
+        "total_cost": round(total, 2),
+        "currency": "USD",
+        "daily": daily,
+        "grouping": "Service",
+        "tags_activated": False,
+        "note": (
+            "Cost-allocation tags (Project, Component) are not activated in "
+            "the Billing console yet — showing account-wide cost grouped by "
+            "AWS service. Activate the tags at "
+            "https://console.aws.amazon.com/billing/home#/tags for per-"
+            "component breakdown."
+        ),
+    }
 
 
 # ── Admin: User & Org Management ───────────────────────────────────────
