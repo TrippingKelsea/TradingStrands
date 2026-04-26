@@ -867,19 +867,25 @@ async def telemetry(request: Request) -> dict[str, Any]:
 async def cost_summary(request: Request) -> dict[str, Any]:
     """Infrastructure cost — sysadmin only (cost data is sensitive + cross-org).
 
-    Querying Cost Explorer requires the tags `Project` and `Component` to
-    be activated as cost-allocation tags in the Billing console. That is
-    a one-time manual step per account (not scriptable). Until activated,
-    Cost Explorer returns empty groups even though our resources ARE
-    tagged correctly.
+    Uses authoritative AWS billing data via Cost Explorer. Three grouped
+    views are produced, all from the same billed numbers (not estimates):
 
-    Endpoint behavior:
-      1. Try the tag-filtered query (our preferred shape — gives per-
-         component breakdown).
-      2. If that returns zero data, fall back to a GroupBy=SERVICE query
-         against the raw account bill. Worse granularity but non-empty.
-      3. Surface `tags_activated` in the response so the UI can warn
-         the sysadmin that per-component attribution is unavailable.
+      - by_service: Cost grouped by AWS service (DDB, Fargate, ALB, ...)
+                    Authoritative; renders the daily trend chart.
+      - ecs_breakdown: Within ECS, split by USAGE_TYPE so Fargate
+                       vCPU-hours, memory-GB-hours, and data transfer
+                       are separately visible.
+      - task_allocation: A computed split of ECS compute between the
+                         trading-service and dashboard-service, based
+                         on each task def's declared CPU + memory
+                         weight. LABELED ESTIMATE — the underlying
+                         vCPU-hour cost is real, but the ratio between
+                         the two services is derived from CDK-declared
+                         resources because cost-allocation tag filtering
+                         isn't available (linked account can't activate).
+
+    A small "estimate" flag distinguishes computed splits from billed
+    numbers so the UI never claims invented data as authoritative.
     """
 
     principal = _get_principal(request)
@@ -890,97 +896,132 @@ async def cost_summary(request: Request) -> dict[str, Any]:
     ce = boto3.client("ce")
     end = datetime.date.today()
     start = end - datetime.timedelta(days=30)
-
     period = {"start": start.isoformat(), "end": end.isoformat()}
 
-    def _sum_from_grouped(resp: dict[str, Any]) -> tuple[list[dict[str, Any]], float]:
-        daily_out: list[dict[str, Any]] = []
-        tot = 0.0
+    def _groups_to_map(resp: dict[str, Any]) -> dict[str, float]:
+        """Collapse a GroupBy response's last-day groups into {key: cost}."""
+
+        out: dict[str, float] = {}
+        results = resp.get("ResultsByTime", [])
+        if not results:
+            return out
+        for group in results[-1].get("Groups", []):
+            key = group["Keys"][0] if group["Keys"] else "untagged"
+            out[key] = float(group["Metrics"]["UnblendedCost"]["Amount"])
+        return out
+
+    def _daily_from_service_groups(
+        resp: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], float]:
+        """Build the daily trend + 30-day total from a service-grouped resp."""
+
+        out: list[dict[str, Any]] = []
+        total = 0.0
         for result in resp.get("ResultsByTime", []):
-            period_r = result["TimePeriod"]
-            day_total = 0.0
+            day = result["TimePeriod"]["Start"]
             components: dict[str, float] = {}
+            day_total = 0.0
             for group in result.get("Groups", []):
-                key = group["Keys"][0] if group["Keys"] else "untagged"
-                for prefix in ("Component$", "SERVICE$"):
-                    key = key.replace(prefix, "")
+                key = group["Keys"][0] if group["Keys"] else "other"
                 amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
+                if amount <= 0:
+                    continue  # drop zero-cost noise from the UI
                 components[key] = amount
                 day_total += amount
-            daily_out.append({
-                "date": period_r["Start"],
+            out.append({
+                "date": day,
                 "total": round(day_total, 4),
                 "components": components,
             })
-            tot += day_total
-        return daily_out, tot
+            total += day_total
+        return out, total
 
-    # Attempt 1: tag-filtered, grouped by Component.
     try:
-        tagged_resp = ce.get_cost_and_usage(
-            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
-            Granularity="DAILY",
-            Metrics=["UnblendedCost"],
-            Filter={"Tags": {"Key": "Project", "Values": ["TradingStrands"]}},
-            GroupBy=[{"Type": "TAG", "Key": "Component"}],
-        )
-        daily, total = _sum_from_grouped(tagged_resp)
-        tags_activated = total > 0
-        if tags_activated:
-            return {
-                "period": period,
-                "total_cost": round(total, 2),
-                "currency": "USD",
-                "daily": daily,
-                "grouping": "Component",
-                "tags_activated": True,
-            }
-    except Exception as exc:
-        return {
-            "period": period,
-            "total_cost": 0,
-            "currency": "USD",
-            "daily": [],
-            "error": str(exc),
-            "tags_activated": False,
-        }
-
-    # Attempt 2: fall back to account-wide, grouped by service. This is
-    # coarser but non-empty — lets the sysadmin see *something* while the
-    # tag-activation step is pending.
-    try:
+        # Call 1: service-grouped daily trend (main chart + by_service totals)
         svc_resp = ce.get_cost_and_usage(
             TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
             Granularity="DAILY",
             Metrics=["UnblendedCost"],
             GroupBy=[{"Type": "DIMENSION", "Key": "SERVICE"}],
         )
-        daily, total = _sum_from_grouped(svc_resp)
+        daily, total = _daily_from_service_groups(svc_resp)
+
+        # Aggregate by_service across the full 30d window.
+        by_service: dict[str, float] = {}
+        for day in daily:
+            for svc, amt in day["components"].items():
+                by_service[svc] = by_service.get(svc, 0.0) + amt
+        by_service_list: list[dict[str, Any]] = [
+            {"service": k, "cost": round(v, 4)} for k, v in by_service.items()
+        ]
+        by_service_list.sort(key=lambda x: float(x["cost"]), reverse=True)
+
+        # Call 2: ECS breakdown by usage type over the 30d window.
+        ecs_resp = ce.get_cost_and_usage(
+            TimePeriod={"Start": start.isoformat(), "End": end.isoformat()},
+            Granularity="MONTHLY",
+            Metrics=["UnblendedCost"],
+            Filter={"Dimensions": {"Key": "SERVICE", "Values": [
+                "Amazon Elastic Container Service",
+            ]}},
+            GroupBy=[{"Type": "DIMENSION", "Key": "USAGE_TYPE"}],
+        )
+        ecs_usage = _groups_to_map(ecs_resp)
+        ecs_breakdown = [
+            {"usage_type": k, "cost": round(v, 4)}
+            for k, v in sorted(ecs_usage.items(), key=lambda kv: -kv[1])
+            if v > 0
+        ]
+
+        # Compute the task_allocation split. Hard-coded ratios from the
+        # CDK stack's task defs — update these if the stack changes.
+        TASK_SPECS = {
+            "trading-service":   {"cpu": 512, "memory_mib": 1024},
+            "dashboard-service": {"cpu": 256, "memory_mib": 512},
+        }
+        total_cpu = sum(s["cpu"] for s in TASK_SPECS.values())
+        total_mem = sum(s["memory_mib"] for s in TASK_SPECS.values())
+        # Fargate bills CPU and memory separately. Pull each line and split.
+        fargate_cpu_cost = sum(
+            v for k, v in ecs_usage.items() if "vCPU-Hours" in k
+        )
+        fargate_mem_cost = sum(
+            v for k, v in ecs_usage.items() if "GB-Hours" in k
+        )
+        task_allocation: list[dict[str, Any]] = []
+        for name, spec in TASK_SPECS.items():
+            cpu_share = fargate_cpu_cost * (spec["cpu"] / total_cpu)
+            mem_share = fargate_mem_cost * (spec["memory_mib"] / total_mem)
+            task_allocation.append({
+                "component": name,
+                "cpu_cost": round(cpu_share, 4),
+                "memory_cost": round(mem_share, 4),
+                "total": round(cpu_share + mem_share, 4),
+                "estimate": True,  # derived from CDK-declared resource specs
+            })
+        task_allocation.sort(key=lambda x: float(x["total"]), reverse=True)
+
+        return {
+            "period": period,
+            "total_cost": round(total, 2),
+            "currency": "USD",
+            "daily": daily,
+            "by_service": by_service_list,
+            "ecs_breakdown": ecs_breakdown,
+            "task_allocation": task_allocation,
+            "source": "aws_cost_explorer",
+        }
     except Exception as exc:
         return {
             "period": period,
             "total_cost": 0,
             "currency": "USD",
             "daily": [],
+            "by_service": [],
+            "ecs_breakdown": [],
+            "task_allocation": [],
             "error": str(exc),
-            "tags_activated": False,
         }
-
-    return {
-        "period": period,
-        "total_cost": round(total, 2),
-        "currency": "USD",
-        "daily": daily,
-        "grouping": "Service",
-        "tags_activated": False,
-        "note": (
-            "Cost-allocation tags (Project, Component) are not activated in "
-            "the Billing console yet — showing account-wide cost grouped by "
-            "AWS service. Activate the tags at "
-            "https://console.aws.amazon.com/billing/home#/tags for per-"
-            "component breakdown."
-        ),
-    }
 
 
 # ── Admin: User & Org Management ───────────────────────────────────────

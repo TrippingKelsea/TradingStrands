@@ -785,12 +785,11 @@
       }
       const daily = data.daily || [];
       const total = data.total_cost || 0;
-      const grouping = data.grouping || 'Component';
-      const activated = data.tags_activated;
-      const note = data.note || '';
+      const byService = data.by_service || [];
+      const ecsBreakdown = data.ecs_breakdown || [];
+      const taskAlloc = data.task_allocation || [];
 
-      // Build a horizontal bar of daily totals so the trend is visible
-      // without pulling in a chart lib.
+      // Daily trend bars.
       const maxDay = Math.max(...daily.map(d => d.total || 0), 0.001);
       const bars = daily.map(d => {
         const pct = Math.max(2, (d.total / maxDay) * 100);
@@ -803,13 +802,57 @@
         </div>`;
       }).join('');
 
+      // By-service table. Limit to top 8 to keep the panel compact.
+      const svcRows = byService.slice(0, 8).map(row => {
+        const pct = total > 0 ? (row.cost / total * 100) : 0;
+        return `<div class="telem-row" style="gap:8px;">
+          <span class="telem-key" style="flex:1;">${escapeHtml(row.service)}</span>
+          <span class="telem-val" style="min-width:70px; text-align:right;">$${row.cost.toFixed(2)}</span>
+          <span style="color:var(--dim); min-width:40px; text-align:right; font-size:0.72rem;">${pct.toFixed(1)}%</span>
+        </div>`;
+      }).join('');
+
+      // ECS usage-type breakdown.
+      const ecsRows = ecsBreakdown.map(row => `
+        <div class="telem-row">
+          <span class="telem-key" style="font-size:0.72rem;">${escapeHtml(row.usage_type)}</span>
+          <span class="telem-val" style="font-size:0.75rem;">$${row.cost.toFixed(2)}</span>
+        </div>
+      `).join('');
+
+      // Task allocation — clearly flagged as estimate.
+      const allocRows = taskAlloc.map(row => `
+        <div class="telem-row">
+          <span class="telem-key">${escapeHtml(row.component)} <span style="color:var(--yellow);font-size:0.65rem;">est</span></span>
+          <span class="telem-val">$${row.total.toFixed(2)}</span>
+        </div>
+      `).join('');
+
       panel.innerHTML = `<div class="telem-service telem-full">
-        <h3>Infrastructure Cost (30d) <span class="badge ${activated ? 'badge-active' : 'badge-paused'}">${activated ? 'tagged' : 'service-grouped'}</span></h3>
-        ${note ? `<div style="font-size:0.7rem;color:var(--yellow);margin-bottom:8px;">${escapeHtml(note)}</div>` : ''}
+        <h3>Infrastructure Cost (30d) <span class="badge badge-active">AWS billed</span></h3>
         <div class="telem-row"><span class="telem-key">Total (30d)</span><span class="telem-val">$${total.toFixed(2)}</span></div>
-        <div class="telem-row"><span class="telem-key">Grouping</span><span class="telem-val">${grouping}</span></div>
-        <div style="margin-top:8px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">Daily</div>
+        <div class="telem-row"><span class="telem-key">Source</span><span class="telem-val" style="font-size:0.7rem;">Cost Explorer (authoritative)</span></div>
+
+        <div style="margin-top:12px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">Daily trend</div>
         <div style="margin-top:4px;">${bars || '<div style="color:var(--dim);font-size:0.72rem;">No data yet.</div>'}</div>
+
+        <div style="margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">By AWS service</div>
+        <div style="margin-top:4px;">${svcRows || '<div style="color:var(--dim);font-size:0.72rem;">No services billed yet.</div>'}</div>
+
+        ${ecsBreakdown.length ? `
+          <div style="margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">ECS detail</div>
+          <div style="margin-top:4px;">${ecsRows}</div>
+        ` : ''}
+
+        ${taskAlloc.length ? `
+          <div style="margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">
+            Task-def allocation
+            <span style="color:var(--yellow);text-transform:none;letter-spacing:0;">
+              · est (derived from CDK CPU/memory specs — not from tags)
+            </span>
+          </div>
+          <div style="margin-top:4px;">${allocRows}</div>
+        ` : ''}
       </div>`;
     } catch(e) {
       panel.innerHTML = '<div style="color:var(--red);font-size:0.75rem;">Failed to load cost: ' + escapeHtml(e.message) + '</div>';
