@@ -10,7 +10,7 @@ Each strategy bot:
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
 import structlog
 from pydantic import BaseModel
@@ -19,6 +19,7 @@ from strands import Agent
 from trading_strands.coordinator.types import IntentAction, TradeIntent
 from trading_strands.ir.tta import Predicate
 from trading_strands.ledger.models import Ledger
+from trading_strands.token_telemetry.record import record_from_result
 
 logger = structlog.get_logger()
 
@@ -111,12 +112,15 @@ class StrategyBot:
         symbols: list[str],
         tta: Predicate | None = None,
         model: str | None = None,
+        token_store: Any | None = None,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
         self.strategy_prompt = strategy_prompt
         self.symbols = symbols
         self.tta = tta
+        self.model = model or ""
+        self._token_store = token_store
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
@@ -155,6 +159,17 @@ class StrategyBot:
         except Exception:
             await logger.aexception("bot.llm.error", bot_id=self.bot_id)
             return None
+
+        # Record token usage for the cost dashboard. No-op when
+        # token_store is None (tests / local dev).
+        record_from_result(
+            self._token_store,
+            result,
+            org_id=self.org_id,
+            agent_id=self.bot_id,
+            agent_type="strategy",
+            model=self.model,
+        )
 
         raw_decision = result.structured_output
         if raw_decision is None:

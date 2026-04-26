@@ -70,6 +70,15 @@
         <div style="color:var(--dim);font-size:0.8rem;">No events</div>
       </div>
     </div>
+
+    <div class="panel">
+      <h2>Token Usage (today)</h2>
+      <div id="tokens-summary" style="font-size:0.8rem;color:var(--dim);">Loading…</div>
+      <div id="tokens-per-agent" style="margin-top:8px;"></div>
+      <div style="text-align:right;margin-top:4px;">
+        <button class="btn" style="padding:2px 8px;font-size:0.7rem;" onclick="loadTokens()">Refresh</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1128,6 +1137,54 @@
     }
   };
 
+  // ── Token usage widget ───────────────────────────────────────────────
+
+  async function loadTokens() {
+    const sumEl = $('tokens-summary');
+    const perEl = $('tokens-per-agent');
+    if (!sumEl) return;
+    sumEl.textContent = 'Loading…';
+    try {
+      const resp = await fetch('/api/tokens/today');
+      if (!resp.ok) {
+        sumEl.textContent = resp.status === 400
+          ? 'Select an organization to see token usage.'
+          : 'Unavailable';
+        if (perEl) perEl.innerHTML = '';
+        return;
+      }
+      const data = await resp.json();
+      const t = data.total || {};
+      const cost = parseFloat(t.cost_usd_est || 0);
+      sumEl.innerHTML = `
+        <div class="metric"><span class="label">Cost today (est)</span><span class="value">$${cost.toFixed(4)}</span></div>
+        <div class="metric"><span class="label">Invocations</span><span class="value">${t.invocations || 0}</span></div>
+        <div class="metric"><span class="label">Input tokens</span><span class="value">${(t.input_tokens || 0).toLocaleString()}</span></div>
+        <div class="metric"><span class="label">Output tokens</span><span class="value">${(t.output_tokens || 0).toLocaleString()}</span></div>
+      `;
+      const per = data.per_agent || [];
+      if (per.length === 0) {
+        if (perEl) perEl.innerHTML = '<div style="color:var(--dim);font-size:0.72rem;">No per-agent data yet.</div>';
+      } else {
+        const rows = per.slice(0, 5).map(a => {
+          const c = parseFloat(a.cost_usd_est || 0);
+          return `
+            <div class="metric">
+              <span class="label" style="font-size:0.72rem;">${escapeHtml(a.agent_id)} <span style="color:var(--dim);">${escapeHtml(a.agent_type)}</span></span>
+              <span class="value" style="font-size:0.75rem;">$${c.toFixed(4)}</span>
+            </div>`;
+        }).join('');
+        if (perEl) {
+          perEl.innerHTML =
+            '<div style="font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Top agents</div>' + rows;
+        }
+      }
+    } catch(e) {
+      sumEl.textContent = 'Error loading tokens';
+    }
+  }
+  window.loadTokens = loadTokens;
+
   // ── Market data sparklines ───────────────────────────────────────────
 
   const _chartState = {
@@ -1303,4 +1360,9 @@
 {% block init %}
   pollEvents();
   setInterval(pollEvents, 5000);
+  // Token widget — refresh once at load, then every minute. The
+  // backing data changes on a minute scale at most (aggregated per day
+  // with updates as Bedrock calls complete).
+  loadTokens();
+  setInterval(loadTokens, 60000);
 {% endblock %}

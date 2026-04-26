@@ -38,6 +38,7 @@ from trading_strands.marketdata_store.store import MarketDataStore
 from trading_strands.orchestrator.engine import Orchestrator
 from trading_strands.risk.manager import RiskConfig, RiskManager
 from trading_strands.strategies.bot import StrategyBot
+from trading_strands.token_telemetry.store import TokenUsageStore
 from trading_strands.whatif.tracker import WhatIfTracker
 
 logger = structlog.get_logger()
@@ -157,12 +158,14 @@ def _register_strategy(
     strategy_prompt: str,
     symbols: list[str],
     capital: Decimal,
+    token_store: TokenUsageStore | None = None,
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
     `org_id` is threaded through to the bot and into every TradeIntent
     it emits, so the coordinator can route trades to the right per-org
-    broker.
+    broker. `token_store` is optional — when provided, the bot records
+    token usage to the telemetry store after every LLM invocation.
     """
 
     ledger = Ledger(starting_capital=capital)
@@ -173,6 +176,7 @@ def _register_strategy(
         org_id=org_id,
         strategy_prompt=strategy_prompt,
         symbols=symbols,
+        token_store=token_store,
     )
 
     orchestrator.register_bot(
@@ -233,6 +237,7 @@ async def run(
     # Optional DynamoDB publisher for dashboard + market data island
     publisher: StatePublisher | None = None
     marketdata_store: MarketDataStore | None = None
+    token_store: TokenUsageStore | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
     if table_name:
         publisher = StatePublisher(table_name)
@@ -240,8 +245,10 @@ async def run(
 
         ddb = _boto3.resource("dynamodb")
         marketdata_store = MarketDataStore(ddb.Table(table_name))
+        token_store = TokenUsageStore(ddb.Table(table_name))
         await logger.ainfo("publisher.enabled", table=table_name)
         await logger.ainfo("marketdata_store.enabled", table=table_name)
+        await logger.ainfo("token_store.enabled", table=table_name)
 
     # Auditor reconciler — checks ledger-broker consistency
     reconciler = Reconciler(AuditConfig())
@@ -271,6 +278,7 @@ async def run(
             strategy_prompt=strategy_prompt,
             symbols=symbols,
             capital=capital,
+            token_store=token_store,
         )
         await logger.ainfo(
             "system.start.local",
@@ -304,6 +312,7 @@ async def run(
                 strategy_prompt=strat["markdown"],
                 symbols=strat_symbols,
                 capital=strat_capital,
+                token_store=token_store,
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -372,6 +381,7 @@ async def run(
                                     strategy_prompt=strat["markdown"],
                                     symbols=strat_symbols,
                                     capital=strat_capital,
+                                    token_store=token_store,
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

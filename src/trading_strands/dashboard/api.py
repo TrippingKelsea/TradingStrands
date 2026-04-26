@@ -384,6 +384,69 @@ async def set_active_org(
 # ── Live state ─────────────────────────────────────────────────────────
 
 
+# ── Token usage telemetry reads ───────────────────────────────────────
+
+
+@app.get("/api/tokens/today")
+async def tokens_today(request: Request) -> dict[str, Any]:
+    """Return today's token + cost totals for the principal's active org
+    plus per-agent breakdown. Used by the dashboard token-usage widget.
+
+    Authz: any org member can read their own org's totals (tokens are
+    cost the user should see). Sysadmin with SYSADMIN_CAN_READ_ORG_DATA
+    can query any org via ?org= param.
+    """
+
+    import time as _time
+
+    principal = _get_principal(request)
+    org_id = _get_active_org(request, principal)
+
+    from trading_strands.token_telemetry.store import TokenUsageStore, _date_key
+
+    store = TokenUsageStore(_get_table())
+    date = _date_key(int(_time.time()))
+
+    org_total = store.daily_org_total(org_id, date)
+    # Scan for the per-agent rows (pk begins with TOKEN#{org_id}#...#{date},
+    # where the middle segment is the agent_id).
+    table = _get_table()
+    resp = table.scan(
+        FilterExpression="begins_with(pk, :p) AND #d = :d",
+        ExpressionAttributeNames={"#d": "date"},
+        ExpressionAttributeValues={
+            ":p": f"TOKEN#{org_id}#",
+            ":d": date,
+        },
+    )
+    per_agent: list[dict[str, Any]] = []
+    for item in resp.get("Items", []):
+        # Skip the org-summary row (which has no agent_id).
+        if not item.get("agent_id"):
+            continue
+        per_agent.append({
+            "agent_id": item.get("agent_id"),
+            "agent_type": item.get("agent_type", "unknown"),
+            "input_tokens": int(item.get("input_tokens", 0)),
+            "output_tokens": int(item.get("output_tokens", 0)),
+            "invocations": int(item.get("invocations", 0)),
+            "cost_usd_est": str(item.get("cost_usd_est", "0")),
+        })
+    per_agent.sort(key=lambda x: float(x["cost_usd_est"]), reverse=True)
+
+    return {
+        "org_id": org_id,
+        "date": date,
+        "total": {
+            "input_tokens": int(org_total.get("input_tokens", 0)),
+            "output_tokens": int(org_total.get("output_tokens", 0)),
+            "invocations": int(org_total.get("invocations", 0)),
+            "cost_usd_est": str(org_total.get("cost_usd_est", "0")),
+        },
+        "per_agent": per_agent,
+    }
+
+
 # ── Market data island reads ─────────────────────────────────────────
 
 
