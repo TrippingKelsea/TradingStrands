@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,87 @@ logger = structlog.get_logger()
 # The coordinator treats it like any other org_id, but the broker factory
 # fans it to the legacy global credentials. Not meaningful in AWS mode.
 LOCAL_DEV_ORG_ID = "local-dev"
+
+
+# ── Single-bot mode ──────────────────────────────────────────────────
+#
+# Per-bot Fargate: the StrategySupervisor Lambda creates one ECS service
+# per active strategy, passing STRATEGY_ID + ORG_ID as task env. This
+# process then registers exactly one bot and never polls for others.
+# The StrategySupervisor handles status changes by changing desiredCount
+# or deleting the service — the process exits cleanly on SIGTERM.
+
+
+@dataclass(frozen=True)
+class SingleBotConfig:
+    """Frozen view of the one strategy this process should run."""
+
+    strategy_id: str
+    org_id: str
+    bot_id: str
+    strategy_prompt: str
+    symbols: list[str]
+    capital: Decimal
+    name: str
+
+
+def single_bot_mode_enabled(env: dict[str, str]) -> bool:
+    """STRATEGY_ID in env → single-bot mode."""
+
+    return bool(env.get("STRATEGY_ID"))
+
+
+def load_single_bot_config(table: Any, env: dict[str, str]) -> SingleBotConfig:
+    """Read the single strategy this task should run from DDB.
+
+    Fail-closed checks (all raise RuntimeError):
+      - ORG_ID must be set alongside STRATEGY_ID
+      - Strategy row must exist (StrategySupervisor only starts tasks for
+        existing rows; missing = race with a delete)
+      - The row's org_id MUST match ORG_ID (defense against a stale task
+        starting up after the strategy was re-authored under a different
+        org — never trade on a strategy you don't own)
+      - Status must be 'active' (a pause/stop between start and boot
+        means we shouldn't begin trading)
+    """
+
+    strategy_id = env.get("STRATEGY_ID", "")
+    org_id = env.get("ORG_ID", "")
+    if not strategy_id:
+        msg = "STRATEGY_ID required for single-bot mode"
+        raise RuntimeError(msg)
+    if not org_id:
+        msg = "ORG_ID required alongside STRATEGY_ID"
+        raise RuntimeError(msg)
+
+    resp = table.get_item(Key={"pk": f"STRATEGY#{strategy_id}"})
+    item = resp.get("Item")
+    if item is None:
+        msg = f"strategy {strategy_id} not found"
+        raise RuntimeError(msg)
+
+    actual_org = str(item.get("org_id", ""))
+    if actual_org != org_id:
+        msg = (
+            f"strategy {strategy_id} org_id mismatch: "
+            f"task has ORG_ID={org_id!r}, strategy has {actual_org!r}"
+        )
+        raise RuntimeError(msg)
+
+    status = str(item.get("status", ""))
+    if status != "active":
+        msg = f"strategy {strategy_id} not active (status={status!r})"
+        raise RuntimeError(msg)
+
+    return SingleBotConfig(
+        strategy_id=strategy_id,
+        org_id=org_id,
+        bot_id=f"strategy-{strategy_id}",
+        strategy_prompt=str(item.get("markdown", "")),
+        symbols=list(item.get("symbols", []) or ["AAPL"]),
+        capital=Decimal(str(item.get("capital", "1000"))),
+        name=str(item.get("name", "")),
+    )
 
 
 def _load_strategy(path: str) -> str:
@@ -319,7 +401,41 @@ async def run(
         marketdata_store=marketdata_store,
     )
 
-    if strategy_path:
+    single_bot = single_bot_mode_enabled(dict(os.environ))
+    if single_bot:
+        # Per-bot Fargate: one ECS task = one strategy. The multi-strategy
+        # poll loop below is skipped; the StrategySupervisor handles
+        # lifecycle (PAUSE/STOP → it sets desiredCount=0 and we get
+        # SIGTERM).
+        if table_name is None:
+            msg = "single-bot mode requires DYNAMODB_TABLE"
+            raise RuntimeError(msg)
+        import boto3 as _boto3_single
+
+        _table = _boto3_single.resource("dynamodb").Table(table_name)
+        cfg = load_single_bot_config(_table, dict(os.environ))
+        _register_strategy(
+            orchestrator, coordinator,
+            bot_id=cfg.bot_id,
+            org_id=cfg.org_id,
+            strategy_prompt=cfg.strategy_prompt,
+            symbols=cfg.symbols,
+            capital=cfg.capital,
+            token_store=token_store,
+            ledger_store=ledger_store,
+            s3_client=s3_client,
+            memory_bucket=memory_bucket,
+        )
+        await logger.ainfo(
+            "system.start.single_bot",
+            strategy_id=cfg.strategy_id,
+            org_id=cfg.org_id,
+            bot_id=cfg.bot_id,
+            name=cfg.name,
+            symbols=cfg.symbols,
+            capital=str(cfg.capital),
+        )
+    elif strategy_path:
         # Local mode: single strategy from file
         strategy_prompt = _load_strategy(strategy_path)
         if symbols is None:
@@ -408,9 +524,13 @@ async def run(
                 scheduled yet. The task group cancels us on shutdown; the
                 body's try/except keeps transient DDB failures from killing
                 the loop.
+
+                Skipped entirely in single-bot mode — the StrategySupervisor
+                owns lifecycle there, and polling for "other" strategies
+                would be a policy violation in a per-bot task.
                 """
 
-                if publisher is None:
+                if publisher is None or single_bot:
                     return
                 await anyio.sleep(1)  # small delay so orchestrator can log first
                 while True:
