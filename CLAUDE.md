@@ -4,7 +4,11 @@
 
 TradingStrands is a strategy-as-prompt trading agent framework. Natural language strategies are compiled into structured predicates (TTA) and observation schemas (IR), then executed as live agents against real markets under deterministic risk management.
 
-**Authoritative design document:** `docs/SPEC.md` — if the code and spec disagree, the spec wins (or needs updating).
+**Authoritative design documents:**
+- `docs/SPEC.md` — top-level vision, capital model, philosophy; includes an index of feature-level specs
+- `docs/SPEC/<feature>.md` — leaf specs (agents, agent_memory, agent_communication, deployment, observability, …)
+
+If the code and spec disagree, the spec wins (or needs updating).
 
 ## Core philosophy
 
@@ -56,6 +60,30 @@ The risk manager is **deterministic code in the hot path** — never regress thi
 
 ## Architecture quick reference
 
+### v1 (target, partially implemented)
+
+```
+Platform Supervisor (health monitor + scheduler driver; does NOT run trades)
+    │
+    ▼ heartbeats
+Strategy Agents ─── A2A: trade-intent ──► Broker Agent (per org)
+(per-strategy,                                 │
+ self-driven                                   ▼
+ loop)                                  Deterministic Risk + Compliance
+                                               │
+                                               ▼
+                                         Broker API (Alpaca v0)
+
+Risk Agent / Compliance Agent / Auditor Agent — periodic LLM review;
+produce recommendations, do NOT gate individual trades.
+
+Self-Critique Agent — weekend Lambda, reads a week of memory, writes lessons.
+```
+
+Detailed spec: `docs/SPEC/agents.md`.
+
+### v0 (what's in the codebase today, for reference)
+
 ```
 Orchestrator (tick loop, TTA eval)
     → Strategy Bots (Strands agents, one per strategy)
@@ -63,8 +91,19 @@ Orchestrator (tick loop, TTA eval)
             → Risk Manager (deterministic approval/rejection)
                 → Broker Adapter (abstract interface, Alpaca v0)
 
-Auditor (periodic LLM agent, independent fee validation, kill-switch authority)
+Reconciler (periodic, checks ledger-vs-broker, can halt desk)
+WhatIf Tracker (counterfactual what-passed-me-by tracking)
 ```
+
+## The core invariants
+
+These are non-negotiable across both v0 and v1:
+
+1. **The deterministic code in the hot path is never replaced by an LLM call.** In v0 that's the Risk Manager + Coordinator path. In v1 it's the deterministic checks embedded in the Broker Agent's intake.
+2. **Every trade passes through a single chokepoint.** v0: Coordinator. v1: Broker Agent per org. No agent has broker credentials except the chokepoint.
+3. **Halt-the-desk works at the chokepoint.** One flag, honored immediately, survives restarts.
+4. **Memory is per-Agent and IAM-isolated.** No Agent reads another Agent's memory directly. (v0: not yet; v1: enforced by per-bot S3 buckets + IAM.)
+5. **No backtesting, paper-trading, or simulation modes.** Weekend self-critique on real recorded market data is NOT backtesting — see `docs/SPEC/agents.md#self-critique-agent`.
 
 ## Key design decisions
 
@@ -72,3 +111,4 @@ Auditor (periodic LLM agent, independent fee validation, kill-switch authority)
 - **Fees tracked at full granularity** — commission, regulatory (SEC/TAF/FINRA), options, crypto. Trades use fully-burdened cost basis for PnL; fees also available as separate line items.
 - **Auditor maintains independent fee schedules** from the broker adapter — deliberate redundancy so neither trusts the other's math.
 - **Multiple kill-switch layers** — strategy bot → risk manager → risk manager (portfolio) → auditor → human operator. Each layer can halt independently.
+- **Deny-by-default authz everywhere** — see `src/trading_strands/authz/`. Org-scoped roles (viewer/operator/auditor/orgadmin) + a separate sysadmin flag.

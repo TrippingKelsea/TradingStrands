@@ -1,9 +1,24 @@
 # TradingStrands — Design Specification
 
-**Status:** Draft v0.2
-**Last updated:** 2026-04-13
+**Status:** Draft v0.3
+**Last updated:** 2026-04-26
 
 This is the authoritative design document for TradingStrands. If the code and the spec disagree, the spec is either wrong or out of date — in which case update it.
+
+The spec is organized as an **index + leaf documents**. Foundational philosophy, capital model, and cross-cutting invariants live inline below. Individual features and subsystems are specified in `docs/SPEC/<feature>.md` and linked from the index.
+
+---
+
+## Index
+
+| Doc | What it covers | Status |
+|---|---|---|
+| [agents.md](./SPEC/agents.md) | What an Agent is, the agent types (Strategy, Compliance, Risk, Broker, Auditor, Self-Critique, Platform Supervisor), self-driven loop model, health checks, trade-gating invariant | Draft |
+| [agent_memory.md](./SPEC/agent_memory.md) | Daily markdown memory files, S3 layout, lessons.md, compaction (live + batch), retrieval skill, DynamoDB pointer references | Draft |
+| [agent_communication.md](./SPEC/agent_communication.md) | AgentCore-native A2A for inter-agent calls, identity + provenance, trade-intent message flow | Draft |
+| [deployment.md](./SPEC/deployment.md) | Fargate-for-streaming / Lambda-for-event matrix, per-bot IAM, BotProvisioner + Deprovisioner, blue-green, scale dispatcher, per-org mode switches, break-glass | Draft |
+| [observability.md](./SPEC/observability.md) | CloudWatch EMF metrics, dashboard graph widgets, health check contract, token telemetry, heartbeats | Draft |
+| [multi_tenancy.md](./SPEC/multi_tenancy.md) | Org model, per-org roles (viewer / operator / auditor / orgadmin), sysadmin flag, deny-by-default authz, the `SYSADMIN_CAN_READ_ORG_DATA` switch | Planned |
 
 ---
 
