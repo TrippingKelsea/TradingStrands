@@ -33,6 +33,7 @@ from trading_strands.broker.alpaca import AlpacaAdapter
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.dashboard.publisher import StatePublisher
 from trading_strands.ledger.models import Ledger
+from trading_strands.ledger_store.store import LedgerStore
 from trading_strands.marketdata.provider import MarketDataProvider
 from trading_strands.marketdata_store.store import MarketDataStore
 from trading_strands.orchestrator.engine import Orchestrator
@@ -159,16 +160,31 @@ def _register_strategy(
     symbols: list[str],
     capital: Decimal,
     token_store: TokenUsageStore | None = None,
+    ledger_store: LedgerStore | None = None,
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
     `org_id` is threaded through to the bot and into every TradeIntent
     it emits, so the coordinator can route trades to the right per-org
-    broker. `token_store` is optional — when provided, the bot records
-    token usage to the telemetry store after every LLM invocation.
+    broker. `token_store` records token usage per decision.
+
+    If `ledger_store` is provided and a prior snapshot exists for this
+    bot_id, the ledger resumes from that state — this is how the
+    scale-down scheduler's nightly cycle preserves PnL and open
+    positions across restarts. If no snapshot exists, a fresh ledger
+    is created from `capital` (first-ever run for this strategy).
     """
 
-    ledger = Ledger(starting_capital=capital)
+    ledger: Ledger | None = None
+    if ledger_store is not None:
+        ledger = ledger_store.load_snapshot(bot_id)
+        if ledger is not None:
+            logger.info(
+                "ledger.restored bot_id=%s realized_pnl=%s positions=%d",
+                bot_id, ledger.realized_pnl, len(ledger.open_positions),
+            )
+    if ledger is None:
+        ledger = Ledger(starting_capital=capital)
     coordinator.ledgers[bot_id] = ledger
 
     bot = StrategyBot(
@@ -224,31 +240,39 @@ async def run(
         paper=global_env["ALPACA_PAPER"].lower() == "true",
     )
 
-    risk_manager = RiskManager(RiskConfig())
-    coordinator = TradeCoordinator(
-        broker_factory=broker_factory,
-        risk_manager=risk_manager,
-        ledgers={},
-        default_broker=market_broker,
-    )
-
-    market_data = MarketDataProvider(market_broker)
-
-    # Optional DynamoDB publisher for dashboard + market data island
+    # Build DDB-backed stores BEFORE the coordinator so the coordinator
+    # can take the ledger_store as a constructor arg (fills are persisted
+    # inside execute()). Order matters — changing it reintroduces the
+    # "Tuesday's bot starts with empty ledger" bug.
     publisher: StatePublisher | None = None
     marketdata_store: MarketDataStore | None = None
     token_store: TokenUsageStore | None = None
+    ledger_store: LedgerStore | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
     if table_name:
         publisher = StatePublisher(table_name)
         import boto3 as _boto3
 
         ddb = _boto3.resource("dynamodb")
-        marketdata_store = MarketDataStore(ddb.Table(table_name))
-        token_store = TokenUsageStore(ddb.Table(table_name))
+        tbl = ddb.Table(table_name)
+        marketdata_store = MarketDataStore(tbl)
+        token_store = TokenUsageStore(tbl)
+        ledger_store = LedgerStore(tbl)
         await logger.ainfo("publisher.enabled", table=table_name)
         await logger.ainfo("marketdata_store.enabled", table=table_name)
         await logger.ainfo("token_store.enabled", table=table_name)
+        await logger.ainfo("ledger_store.enabled", table=table_name)
+
+    risk_manager = RiskManager(RiskConfig())
+    coordinator = TradeCoordinator(
+        broker_factory=broker_factory,
+        risk_manager=risk_manager,
+        ledgers={},
+        default_broker=market_broker,
+        ledger_store=ledger_store,
+    )
+
+    market_data = MarketDataProvider(market_broker)
 
     # Auditor reconciler — checks ledger-broker consistency
     reconciler = Reconciler(AuditConfig())
@@ -279,6 +303,7 @@ async def run(
             symbols=symbols,
             capital=capital,
             token_store=token_store,
+            ledger_store=ledger_store,
         )
         await logger.ainfo(
             "system.start.local",
@@ -313,6 +338,7 @@ async def run(
                 symbols=strat_symbols,
                 capital=strat_capital,
                 token_store=token_store,
+                ledger_store=ledger_store,
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -382,6 +408,7 @@ async def run(
                                     symbols=strat_symbols,
                                     capital=strat_capital,
                                     token_store=token_store,
+                                    ledger_store=ledger_store,
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

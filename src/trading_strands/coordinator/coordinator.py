@@ -72,12 +72,17 @@ class TradeCoordinator:
         risk_manager: RiskManager,
         ledgers: dict[str, Ledger],
         default_broker: Any | None = None,
+        ledger_store: Any | None = None,
     ) -> None:
         self._broker_factory = broker_factory
         self._broker_cache: dict[str, Any] = {}
         self.risk_manager = risk_manager
         self.ledgers = ledgers
         self._default_broker = default_broker
+        # Optional — in AWS mode this is a LedgerStore that persists every
+        # fill to DynamoDB. Tests and local-dev pass None; the coordinator
+        # still functions (just without durability).
+        self._ledger_store = ledger_store
 
     def broker_for(self, org_id: str) -> Any:
         """Return the broker adapter for this org, creating it on first use.
@@ -199,7 +204,15 @@ class TradeCoordinator:
     def _record_fill(
         self, intent: TradeIntent, result: OrderResult, ledger: Ledger,
     ) -> None:
-        """Record a broker fill into the bot's ledger."""
+        """Record a broker fill into the bot's ledger AND persist.
+
+        When a ledger_store is configured (production), this uses the
+        store's record_and_persist helper: apply fill in-memory → append
+        event → save snapshot. See LedgerStore for crash-recovery
+        semantics. Without a store (tests / local-dev), just updates
+        in-memory state — the prior v0 behavior.
+        """
+
         if result.filled_quantity <= 0:
             return
         fill = Fill(
@@ -209,4 +222,7 @@ class TradeCoordinator:
             price=result.filled_price,
             fees=result.fees,
         )
-        ledger.record_fill(fill)
+        if self._ledger_store is None:
+            ledger.record_fill(fill)
+        else:
+            self._ledger_store.record_and_persist(intent.bot_id, ledger, fill)
