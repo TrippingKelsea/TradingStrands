@@ -14,6 +14,7 @@ from trading_strands.auditor.reconciler import Reconciler
 from trading_strands.coordinator.coordinator import TradeCoordinator
 from trading_strands.coordinator.types import IntentAction, TradeIntent
 from trading_strands.dashboard.publisher import StatePublisher
+from trading_strands.emf.emitter import emit_metric
 from trading_strands.ir.tta import Context, Predicate, evaluate
 from trading_strands.ledger.models import Ledger
 from trading_strands.marketdata.provider import MarketDataProvider
@@ -150,8 +151,20 @@ class Orchestrator:
             self._broker_status = "error"
             self._broker_last_error = str(exc)
             await logger.aexception("orchestrator.market_data.error")
+            emit_metric(
+                "orchestrator.marketdata.error.count", 1, unit="Count",
+                dimensions={"component": "orchestrator"},
+            )
             self._publish_snapshot(tick_number, {})
             return
+
+        # Platform-level tick counter. Low-cost, one emit per tick.
+        emit_metric(
+            "orchestrator.tick.count", 1, unit="Count",
+            dimensions={"component": "orchestrator"},
+            extra={"active_bots": len(self._bots),
+                   "watched_symbols": len(self._symbols)},
+        )
 
         # Record to the market-data island. Failures here are swallowed —
         # durability is valuable but not worth crashing the tick loop over.

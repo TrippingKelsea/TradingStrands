@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from strands import Agent
 
 from trading_strands.coordinator.types import IntentAction, TradeIntent
+from trading_strands.emf.emitter import emit_metric, timed_metric
 from trading_strands.ir.tta import Predicate
 from trading_strands.ledger.models import Ledger
 from trading_strands.token_telemetry.record import record_from_result
@@ -153,12 +154,22 @@ class StrategyBot:
             recent_decisions=self._format_recent() or "No recent decisions.",
         )
 
+        dims = {
+            "agent_id": self.bot_id,
+            "org_id": self.org_id,
+            "agent_type": "strategy",
+        }
         try:
-            result = await self._agent.invoke_async(
-                prompt,
-                structured_output_model=BotDecision,
-            )
+            with timed_metric("agent.decision.latency_ms", dims):
+                result = await self._agent.invoke_async(
+                    prompt,
+                    structured_output_model=BotDecision,
+                )
         except Exception:
+            emit_metric(
+                "agent.error.count", 1, unit="Count",
+                dimensions={**dims, "error_type": "llm_invoke"},
+            )
             await logger.aexception("bot.llm.error", bot_id=self.bot_id)
             return None
 
@@ -179,6 +190,13 @@ class StrategyBot:
             return None
 
         decision = cast(BotDecision, raw_decision)
+
+        # EMF decision counter, dimensioned by decision_type so dashboard
+        # can split 'buys vs sells vs holds per bot over time'.
+        emit_metric(
+            "agent.decision.count", 1, unit="Count",
+            dimensions={**dims, "decision_type": decision.action.lower()},
+        )
 
         # Record decision for short-term in-process history (context seed
         # on next invocation's prompt).
