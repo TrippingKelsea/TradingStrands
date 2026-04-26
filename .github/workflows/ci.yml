@@ -88,12 +88,15 @@ jobs:
 
       - name: Deploy CDK stack
         working-directory: infra
+        env:
+          ALLOWED_CIDR: ${{ secrets.ALLOWED_CIDR }}
         run: |
           pip install -r requirements.txt
           cdk deploy --require-approval never \
             -c domain=app.tradingstrands.xyz \
             -c zone_name=tradingstrands.xyz \
-            -c zone_id=Z04993921Q8ZI5T322JJX
+            -c zone_id=Z04993921Q8ZI5T322JJX \
+            --parameters AllowedCidr="${ALLOWED_CIDR}"
 
       - name: Seed Cognito client secret
         run: |

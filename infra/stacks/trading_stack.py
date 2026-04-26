@@ -62,12 +62,17 @@ class TradingStrandsStack(cdk.Stack):
         # zone_name defaults to domain_name for apex domains
         zone_name = zone_name or domain_name
 
+        # AllowedCidr is REQUIRED — no default. Publicly-open ALB listeners
+        # (0.0.0.0/0) on AWS-internal accounts trigger the Epoxy
+        # ELBListenerDelete mitigation which deletes listeners after ~18 min.
         allowed_cidr_param = cdk.CfnParameter(
             self,
             "AllowedCidr",
             type="String",
-            default="0.0.0.0/0",
-            description="CIDR range allowed to reach the dashboard ALB",
+            description=(
+                "CIDR range allowed to reach the dashboard ALB "
+                "(must not be 0.0.0.0/0 on internal accounts)"
+            ),
         )
 
         # ECR repository (created by CI workflow, referenced here)
@@ -326,6 +331,11 @@ class TradingStrandsStack(cdk.Stack):
             redirect_http=tls_enabled,
             target_protocol=elbv2.ApplicationProtocol.HTTP,
             assign_public_ip=True,
+            # open=False prevents the pattern from adding 0.0.0.0/0 on the
+            # auto-created LB SG. We attach our restrictive alb_sg below so
+            # inbound is limited to the operator CIDR only. This avoids
+            # tripping Epoxy's ELBListenerDelete mitigation.
+            open=False,
         )
         dashboard_service.load_balancer.add_security_group(alb_sg)
 
