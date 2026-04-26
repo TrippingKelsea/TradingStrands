@@ -124,6 +124,36 @@ jobs:
             --secret-id trading-strands/alpaca \
             --secret-string "{\"ALPACA_API_KEY\":\"${ALPACA_PAPER_KEY}\",\"ALPACA_SECRET_KEY\":\"${ALPACA_PAPER_SECRET}\",\"ALPACA_PAPER\":\"true\"}"
 
+      - name: Provision superwoman Cognito user (idempotent)
+        run: |
+          # Creates superwoman@tradingstrands.xyz in Cognito if absent,
+          # with a known starter password. The user lands in
+          # FORCE_CHANGE_PASSWORD state so the first login goes through
+          # the new-password challenge flow from commit bec8b06.
+          #
+          # The starter password is intentionally well-known — it's only
+          # valid until first login, at which point the user sets their
+          # own. Don't extend this to real customer accounts; use
+          # per-account emailed invites instead.
+          POOL_ID=$(aws cloudformation describe-stacks --stack-name TradingStrandsStack \
+            --query "Stacks[0].Outputs[?OutputKey=='CognitoUserPoolId'].OutputValue" --output text)
+
+          if aws cognito-idp admin-get-user \
+              --user-pool-id "$POOL_ID" \
+              --username superwoman@tradingstrands.xyz >/dev/null 2>&1; then
+            echo "superwoman already exists in Cognito — leaving untouched"
+          else
+            aws cognito-idp admin-create-user \
+              --user-pool-id "$POOL_ID" \
+              --username superwoman@tradingstrands.xyz \
+              --user-attributes Name=email,Value=superwoman@tradingstrands.xyz \
+                                Name=email_verified,Value=true \
+              --temporary-password 'ChangeMeOnFirstLogin1!' \
+              --message-action SUPPRESS
+            echo "Created superwoman@tradingstrands.xyz — starter password: ChangeMeOnFirstLogin1!"
+            echo "This password is only valid until first login."
+          fi
+
       - uses: astral-sh/setup-uv@v6
 
       - name: Bootstrap (idempotent) — system org, superwoman user, delete legacy strategies
