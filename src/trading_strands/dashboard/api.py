@@ -836,6 +836,41 @@ _ALLOWED_RECOMMENDATION_AGENT_TYPES = frozenset({
 })
 
 
+@app.get("/api/orgs/{org_id}/heartbeats/review")
+async def get_org_review_heartbeats(
+    request: Request, org_id: str,
+) -> dict[str, Any]:
+    """Return the last-beat timestamp for each review agent (risk,
+    compliance, auditor) scoped to an org. null when an agent has
+    never run for this org (i.e. heartbeat row doesn't exist).
+
+    Authz: READ on the Org resource — same gate as recommendations,
+    since heartbeat existence leaks no more than the recommendation
+    body does.
+    """
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(type=ResourceType.ORG, org_id=org_id),
+    )
+
+    table = _get_table()
+    result: dict[str, int | None] = {
+        "risk": None, "compliance": None, "auditor": None,
+    }
+    for agent_type in result:
+        resp = table.get_item(
+            Key={"pk": f"HEARTBEAT#{agent_type}#{org_id}"},
+        )
+        item = resp.get("Item")
+        if item is not None:
+            ts = item.get("last_beat_ts")
+            if ts is not None:
+                result[agent_type] = int(ts)
+    return result
+
+
 @app.get("/api/orgs/{org_id}/recommendations/{agent_type}")
 async def get_org_recommendations(
     request: Request, org_id: str, agent_type: str,

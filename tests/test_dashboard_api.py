@@ -1922,3 +1922,133 @@ def test_get_halt_sysadmin_can_halt_system() -> None:
         assert resp.status_code == 200
         body = resp.json()
         assert body["can_halt_system"] is True
+
+
+# ── Review-agent heartbeat timestamps ───────────────────────────────
+
+
+def test_review_heartbeats_returns_all_three_timestamps() -> None:
+    """When all three review agents have beat, the endpoint returns
+    each timestamp keyed by agent type."""
+
+    import time as _time
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.heartbeat.store import HeartbeatStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        hs = HeartbeatStore(table)
+        hs.beat("risk", org.org_id)
+        hs.beat("compliance", org.org_id)
+        hs.beat("auditor", org.org_id)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get(
+            f"/api/orgs/{org.org_id}/heartbeats/review",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        now = int(_time.time())
+        # Each timestamp should be near-now (agent just beat).
+        for agent_type in ("risk", "compliance", "auditor"):
+            assert body[agent_type] is not None
+            assert abs(body[agent_type] - now) < 5
+
+
+def test_review_heartbeats_returns_null_when_never_run() -> None:
+    """A fresh org with no review runs yet — each agent is null."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get(
+            f"/api/orgs/{org.org_id}/heartbeats/review",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body == {"risk": None, "compliance": None, "auditor": None}
+
+
+def test_review_heartbeats_forbidden_for_non_member() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        bob = tenancy.create_user(email="bob@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+        tenancy.add_membership(bob.user_id, org_b.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org_a.org_id,
+        ))
+        resp = client.get(
+            f"/api/orgs/{org_b.org_id}/heartbeats/review",
+        )
+        assert resp.status_code == 403
+
+
+def test_review_heartbeats_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/orgs/abc/heartbeats/review")
+        assert resp.status_code == 401
+
+
+def test_review_heartbeats_partial_coverage() -> None:
+    """Realistic case — Risk ran but Compliance + Auditor are new
+    and haven't run yet. Endpoint returns mixed populated/null."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.heartbeat.store import HeartbeatStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        HeartbeatStore(table).beat("risk", org.org_id)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get(
+            f"/api/orgs/{org.org_id}/heartbeats/review",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["risk"] is not None
+        assert body["compliance"] is None
+        assert body["auditor"] is None
