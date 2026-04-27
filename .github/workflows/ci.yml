@@ -17,7 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - uses: astral-sh/ruff-action@v3
+      # ruff-action calls the GitHub releases API to fetch its binary
+      # and has flaked repeatedly on transient API outages / rate
+      # limits. Resolving ruff through uv (pinned in pyproject.toml)
+      # avoids the API call entirely and mirrors how typecheck/test
+      # jobs below already invoke their tools.
+      - run: uv sync --extra dev
+      - run: uv run ruff check .
 
   typecheck:
     name: Type check
