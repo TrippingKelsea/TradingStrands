@@ -161,6 +161,46 @@
 (function() {
   const $ = id => document.getElementById(id);
 
+  // ── Session-expiry interceptor ────────────────────────────────────────
+  //
+  // Wraps global fetch so any 401 from an /api/* endpoint redirects the
+  // user to /login?expired=1 instead of silently failing. Opt-out per
+  // call via {_skipAuthRedirect: true} on the init options — needed for
+  // the rare flow that legitimately expects a 401 (none today, but a
+  // safety valve).
+  //
+  // Only intercepts /api/* because /auth/login and friends have their
+  // own redirect semantics handled by the form layer. Only fires once
+  // per page-load so rapid-fire failing requests don't cause a redirect
+  // loop on top of itself.
+  const _origFetch = window.fetch.bind(window);
+  let _redirectingToLogin = false;
+  window.fetch = async function patchedFetch(input, init) {
+    const opts = init || {};
+    const skip = opts._skipAuthRedirect === true;
+    const response = await _origFetch(input, opts);
+    if (
+      !skip
+      && response.status === 401
+      && !_redirectingToLogin
+    ) {
+      // Narrow the URL check so /login itself redirecting 401 doesn't
+      // loop. The middleware only returns 401 for /api/* anyway, but
+      // belt + braces.
+      let pathname = '';
+      try {
+        pathname = typeof input === 'string'
+          ? new URL(input, window.location.origin).pathname
+          : (input.url ? new URL(input.url, window.location.origin).pathname : '');
+      } catch(e) { /* keep pathname empty */ }
+      if (pathname.startsWith('/api/')) {
+        _redirectingToLogin = true;
+        window.location.href = '/login?expired=1';
+      }
+    }
+    return response;
+  };
+
   // ── Tabs ──────────────────────────────────────────────────────────────
 
   document.querySelectorAll('.tab').forEach(tab => {

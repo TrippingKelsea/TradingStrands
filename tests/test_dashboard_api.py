@@ -2149,3 +2149,36 @@ def test_supervisor_agents_uses_env_thresholds() -> None:
     finally:
         del os.environ["SUPERVISOR_STALE_AFTER_SECONDS"]
         del os.environ["SUPERVISOR_MISSING_AFTER_SECONDS"]
+
+
+# ── Login page expired-session hint ─────────────────────────────────
+
+
+def test_login_page_shows_expired_notice() -> None:
+    """The dashboard's fetch interceptor redirects to /login?expired=1
+    when an API call returns 401. The login page must render a visible
+    notice for that query param so users understand why they landed
+    here."""
+
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/login?expired=1")
+        assert resp.status_code == 200
+        assert "Your session expired" in resp.text
+
+
+def test_login_page_no_notice_when_fresh() -> None:
+    """No expired param → no notice. Rules out an always-present hint
+    that would be confusing on a normal login."""
+
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app)
+        resp = client.get("/login")
+        assert resp.status_code == 200
+        assert "Your session expired" not in resp.text

@@ -62,6 +62,11 @@
     color: var(--red); padding: 8px 12px; border-radius: 4px;
     font-size: 0.8rem; margin-bottom: 16px; text-align: center;
   }
+  .info {
+    background: #1a2a3a; border: 1px solid #58a6ff;
+    color: var(--blue); padding: 8px 12px; border-radius: 4px;
+    font-size: 0.8rem; margin-bottom: 16px; text-align: center;
+  }
   .footer {
     text-align: center; margin-top: 16px;
     font-size: 0.7rem; color: var(--dim);
@@ -76,6 +81,9 @@
 
     {% if error %}
     <div class="error">{{ error }}</div>
+    {% endif %}
+    {% if info %}
+    <div class="info">{{ info }}</div>
     {% endif %}
 
     <form method="POST" action="/auth/login" id="login-form">

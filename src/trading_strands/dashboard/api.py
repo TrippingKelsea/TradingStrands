@@ -145,12 +145,19 @@ async def health() -> dict[str, bool]:
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request) -> HTMLResponse:
     error = ""
+    info = ""
     token = request.query_params.get("t", "")
     if token:
         data = decode_url_token(token)
         if data:
             error = data.get("error", "")
-    return _templates.TemplateResponse(request, "login.html", {"error": error})
+    # Set by the dashboard's fetch interceptor when an API call returned
+    # 401 — the session expired while the user was logged in.
+    if request.query_params.get("expired"):
+        info = "Your session expired. Please sign in again."
+    return _templates.TemplateResponse(
+        request, "login.html", {"error": error, "info": info},
+    )
 
 
 @app.post("/auth/login")
