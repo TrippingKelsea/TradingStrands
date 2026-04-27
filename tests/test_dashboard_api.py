@@ -2637,3 +2637,257 @@ def test_halt_sysadmin_can_halt_any_org_by_id() -> None:
         assert resp.status_code == 200
         assert resp.json()["org_id"] == target_org.org_id
         assert HaltStore(table).is_org_halted(target_org.org_id) is True
+
+
+# ── Per-org tools endpoints ─────────────────────────────────────────
+
+
+def test_list_org_tools_requires_membership() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        bob = tenancy.create_user(email="bob@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+        tenancy.add_membership(bob.user_id, org_b.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org_a.org_id,
+        ))
+        # Alice listing org_b → 403.
+        resp = client.get(f"/api/orgs/{org_b.org_id}/tools")
+        assert resp.status_code == 403
+
+
+def test_set_org_tool_requires_orgadmin() -> None:
+    """Operators can't flip tool availability — only orgadmins."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.put(
+            f"/api/orgs/{org.org_id}/tools/news",
+            json={"enabled": True},
+        )
+        assert resp.status_code == 403
+
+
+def test_orgadmin_can_enable_tool_and_list_it() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        admin = tenancy.create_user(email="admin@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(admin.user_id, org.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            admin.user_id, org.org_id,
+        ))
+        resp = client.put(
+            f"/api/orgs/{org.org_id}/tools/news",
+            json={"enabled": True},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tool_name"] == "news"
+        assert body["enabled"] is True
+
+        # Now list returns it.
+        resp = client.get(f"/api/orgs/{org.org_id}/tools")
+        assert resp.status_code == 200
+        tools = resp.json()
+        assert len(tools) == 1
+        assert tools[0]["tool_name"] == "news"
+
+
+# ── Per-org skills endpoints ────────────────────────────────────────
+
+
+def test_put_skill_requires_orgadmin() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.put(
+            f"/api/orgs/{org.org_id}/skills/morning_prep",
+            json={"markdown": "## Morning prep\n\nCheck calendar."},
+        )
+        assert resp.status_code == 403
+
+
+def test_orgadmin_skill_crud_full_cycle() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        admin = tenancy.create_user(email="admin@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(admin.user_id, org.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            admin.user_id, org.org_id,
+        ))
+        # Create
+        resp = client.put(
+            f"/api/orgs/{org.org_id}/skills/morning",
+            json={"markdown": "body v1"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["markdown"] == "body v1"
+
+        # List
+        resp = client.get(f"/api/orgs/{org.org_id}/skills")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+
+        # Get
+        resp = client.get(f"/api/orgs/{org.org_id}/skills/morning")
+        assert resp.status_code == 200
+        assert resp.json()["skill_name"] == "morning"
+
+        # Update
+        resp = client.put(
+            f"/api/orgs/{org.org_id}/skills/morning",
+            json={"markdown": "body v2"},
+        )
+        assert resp.json()["markdown"] == "body v2"
+
+        # Delete
+        resp = client.delete(f"/api/orgs/{org.org_id}/skills/morning")
+        assert resp.status_code == 204
+
+        # Now 404.
+        resp = client.get(f"/api/orgs/{org.org_id}/skills/morning")
+        assert resp.status_code == 404
+
+
+def test_skill_cross_org_list_forbidden() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        bob = tenancy.create_user(email="bob@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+        tenancy.add_membership(bob.user_id, org_b.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org_a.org_id,
+        ))
+        resp = client.get(f"/api/orgs/{org_b.org_id}/skills")
+        assert resp.status_code == 403
+
+
+def test_skill_too_large_returns_400() -> None:
+    """32 KB cap at the store layer → API surfaces as 400 with detail."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        admin = tenancy.create_user(email="admin@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(admin.user_id, org.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            admin.user_id, org.org_id,
+        ))
+        resp = client.put(
+            f"/api/orgs/{org.org_id}/skills/big",
+            json={"markdown": "x" * (32 * 1024 + 1)},
+        )
+        assert resp.status_code == 400
+
+
+# ── Strategy edit accepts tools + skills ────────────────────────────
+
+
+def test_create_strategy_with_tools_and_skills() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/strategies", json={
+            "name": "test",
+            "markdown": "# strat\nbuy",
+            "symbols": ["AAPL"],
+            "capital": "1000",
+            "tools": {
+                "news": {"enabled": True, "daily_quota": 20},
+            },
+            "skills": ["morning_prep"],
+        })
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["tools"]["news"]["enabled"] is True
+        assert body["tools"]["news"]["daily_quota"] == 20
+        assert body["skills"] == ["morning_prep"]
+
+
+def test_update_strategy_can_modify_tools_and_skills() -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        store = StrategyStore(table)
+        strat = store.create(
+            org_id=oid, author_user_id=uid,
+            name="n", markdown="# m",
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.put(f"/api/strategies/{strat.strategy_id}", json={
+            "tools": {"news": {"enabled": True, "daily_quota": 10}},
+            "skills": ["greeks", "morning_prep"],
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tools"]["news"]["enabled"] is True
+        assert body["skills"] == ["greeks", "morning_prep"]

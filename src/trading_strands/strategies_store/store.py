@@ -91,6 +91,8 @@ class StrategyStore:
         markdown: str,
         symbols: list[str] | None = None,
         capital: str = "1000",
+        tools: dict[str, StrategyToolConfig] | None = None,
+        skills: list[str] | None = None,
     ) -> Strategy:
         strat = Strategy(
             strategy_id=_new_id(),
@@ -103,6 +105,8 @@ class StrategyStore:
             status=StrategyStatus.ACTIVE,
             created_at=_now(),
             updated_at=_now(),
+            tools=tools or {},
+            skills=skills or [],
         )
         self._table.put_item(
             Item={

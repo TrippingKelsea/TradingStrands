@@ -599,6 +599,10 @@ class StrategyCreate(BaseModel):
     markdown: str
     symbols: list[str] = []
     capital: str = "1000"
+    # Optional from day one — strategies without tools/skills are
+    # the v0 default.
+    tools: dict[str, dict[str, Any]] = {}
+    skills: list[str] = []
 
 
 class StrategyUpdate(BaseModel):
@@ -607,6 +611,8 @@ class StrategyUpdate(BaseModel):
     symbols: list[str] | None = None
     capital: str | None = None
     status: str | None = None
+    tools: dict[str, dict[str, Any]] | None = None
+    skills: list[str] | None = None
 
 
 @app.get("/api/strategies")
@@ -642,6 +648,8 @@ async def create_strategy(
         Resource(ResourceType.STRATEGY, org_id=org_id, author_user_id=principal.user_id),
     )
 
+    from trading_strands.tools.base import StrategyToolConfig
+
     store = StrategyStore(_get_table())
     strat = store.create(
         org_id=org_id,
@@ -650,6 +658,10 @@ async def create_strategy(
         markdown=body.markdown,
         symbols=body.symbols,
         capital=body.capital,
+        tools={
+            name: StrategyToolConfig(**cfg) for name, cfg in body.tools.items()
+        },
+        skills=body.skills,
     )
     return strat.model_dump(mode="json")
 
@@ -697,6 +709,12 @@ async def update_strategy(
         if body.status not in ("active", "paused", "stopped"):
             raise HTTPException(status_code=400, detail="Invalid status")
         update_fields["status"] = body.status
+    if body.tools is not None:
+        # Stored as plain dict inside the Strategy row so the existing
+        # JSON-dump path handles it.
+        update_fields["tools"] = body.tools
+    if body.skills is not None:
+        update_fields["skills"] = body.skills
 
     updated = store.update(strategy_id, update_fields)
     return updated.model_dump(mode="json")
@@ -876,6 +894,147 @@ async def get_org_review_heartbeats(
             if ts is not None:
                 result[agent_type] = int(ts)
     return result
+
+
+class OrgToolToggle(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/orgs/{org_id}/tools")
+async def list_org_tools(
+    request: Request, org_id: str,
+) -> list[dict[str, Any]]:
+    """List per-org tool availability rows. Any org member can read
+    (same gate as /recommendations)."""
+
+    from trading_strands.org_tools.store import OrgToolsStore
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(type=ResourceType.ORG, org_id=org_id),
+    )
+    store = OrgToolsStore(_get_table())
+    configs = store.list_for_org(org_id)
+    return [c.model_dump(mode="json") for c in configs]
+
+
+@app.put("/api/orgs/{org_id}/tools/{tool_name}")
+async def set_org_tool(
+    request: Request, org_id: str, tool_name: str, body: OrgToolToggle,
+) -> dict[str, Any]:
+    """Orgadmin toggles the org-level availability of a tool. Per
+    SPEC §5.4: disabling takes the tool away from strategies on
+    next bot restart; enabling makes it available to strategies
+    that opt in."""
+
+    from trading_strands.org_tools.store import OrgToolsStore
+
+    principal = _get_principal(request)
+    # Orgadmin-only — same bar as the per-org Alpaca cred editor.
+    role = principal.memberships.get(org_id)
+    if not principal.sysadmin and (role is None or role.value != "orgadmin"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"org tool config requires orgadmin of {org_id}",
+        )
+    store = OrgToolsStore(_get_table())
+    cfg = store.set_enabled(
+        org_id=org_id,
+        tool_name=tool_name,
+        enabled=body.enabled,
+        updated_by=principal.user_id,
+    )
+    return cfg.model_dump(mode="json")
+
+
+class SkillBody(BaseModel):
+    markdown: str
+
+
+@app.get("/api/orgs/{org_id}/skills")
+async def list_org_skills(
+    request: Request, org_id: str,
+) -> list[dict[str, Any]]:
+    from trading_strands.skills_store.store import SkillsStore
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(type=ResourceType.ORG, org_id=org_id),
+    )
+    store = SkillsStore(_get_table())
+    return [s.model_dump(mode="json") for s in store.list_for_org(org_id)]
+
+
+@app.get("/api/orgs/{org_id}/skills/{skill_name}")
+async def get_org_skill(
+    request: Request, org_id: str, skill_name: str,
+) -> dict[str, Any]:
+    from trading_strands.skills_store.store import (
+        SkillNotFoundError,
+        SkillsStore,
+    )
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(type=ResourceType.ORG, org_id=org_id),
+    )
+    try:
+        skill = SkillsStore(_get_table()).get(org_id, skill_name)
+    except SkillNotFoundError:
+        raise HTTPException(status_code=404, detail="Skill not found") from None
+    return skill.model_dump(mode="json")
+
+
+@app.put("/api/orgs/{org_id}/skills/{skill_name}")
+async def put_org_skill(
+    request: Request, org_id: str, skill_name: str, body: SkillBody,
+) -> dict[str, Any]:
+    """Create or update a skill. Orgadmin-only."""
+
+    from trading_strands.skills_store.store import (
+        SkillsStore,
+        SkillTooLargeError,
+    )
+
+    principal = _get_principal(request)
+    role = principal.memberships.get(org_id)
+    if not principal.sysadmin and (role is None or role.value != "orgadmin"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"editing skills requires orgadmin of {org_id}",
+        )
+    try:
+        skill = SkillsStore(_get_table()).put(
+            org_id=org_id,
+            skill_name=skill_name,
+            markdown=body.markdown,
+            author_user_id=principal.user_id,
+        )
+    except SkillTooLargeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return skill.model_dump(mode="json")
+
+
+@app.delete("/api/orgs/{org_id}/skills/{skill_name}", status_code=204)
+async def delete_org_skill(
+    request: Request, org_id: str, skill_name: str,
+) -> None:
+    """Orgadmin delete. Idempotent — deleting a missing skill is
+    a no-op, matching the store semantics."""
+
+    from trading_strands.skills_store.store import SkillsStore
+
+    principal = _get_principal(request)
+    role = principal.memberships.get(org_id)
+    if not principal.sysadmin and (role is None or role.value != "orgadmin"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"deleting skills requires orgadmin of {org_id}",
+        )
+    SkillsStore(_get_table()).delete(org_id, skill_name)
 
 
 @app.get("/api/orgs/{org_id}/recommendations/{agent_type}")
