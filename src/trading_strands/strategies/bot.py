@@ -117,6 +117,7 @@ class StrategyBot:
         token_store: Any | None = None,
         memory_store: Any | None = None,
         heartbeat_store: Any | None = None,
+        tools: list[Any] | None = None,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -130,14 +131,21 @@ class StrategyBot:
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
-        self._agent = Agent(
-            model=model,
-            system_prompt=(
+        # Tools are bound by the caller (app.py) via
+        # tools.base.bind_tools_for_strategy. We pass them straight
+        # through to the Strands Agent — None/empty means the agent
+        # has no tools, which is the default v0 behavior.
+        agent_kwargs: dict[str, Any] = {
+            "model": model,
+            "system_prompt": (
                 "You are a disciplined trading bot. Follow your strategy rules "
                 "precisely. Never deviate from the strategy. Be conservative "
                 "when uncertain — prefer to hold rather than make a bad trade."
             ),
-        )
+        }
+        if tools:
+            agent_kwargs["tools"] = tools
+        self._agent = Agent(**agent_kwargs)
 
     async def decide(
         self,

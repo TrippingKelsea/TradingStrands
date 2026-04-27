@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading_strands.authz.model import Action, Resource, ResourceType
 from trading_strands.authz.policy import can
+from trading_strands.tools.base import StrategyToolConfig
 
 
 class StrategyStatus(StrEnum):
@@ -25,6 +26,8 @@ class Strategy(BaseModel):
 
     extra='ignore' so legacy pre-refactor strategies can be read by
     bootstrap's delete_legacy_strategies path before being pruned.
+    New optional fields (tools, skills) default to empty so legacy
+    rows without them load without a migration pass.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -39,6 +42,14 @@ class Strategy(BaseModel):
     status: StrategyStatus = StrategyStatus.ACTIVE
     created_at: int
     updated_at: int
+    # See docs/SPEC/tools.md §4. Per-strategy tool opt-in + quota.
+    # Default empty → strategy has no tools beyond the base LLM
+    # reasoning. Legacy rows persist as-is until updated.
+    tools: dict[str, StrategyToolConfig] = Field(default_factory=dict)
+    # See docs/SPEC/tools.md §8. Skill names the strategy pulls into
+    # its system prompt. Missing-skill lookup warns + skips, doesn't
+    # block.
+    skills: list[str] = Field(default_factory=list)
 
 
 class StrategyACL(BaseModel):
