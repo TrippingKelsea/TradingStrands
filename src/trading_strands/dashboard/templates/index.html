@@ -115,6 +115,26 @@
       <button class="btn btn-primary" onclick="saveStrategy()">Save Changes</button>
       <span id="edit-status" style="margin-left:12px;font-size:0.8rem;"></span>
     </div>
+
+    <div class="panel" id="tools-panel">
+      <h2>Tools</h2>
+      <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
+        Unselectable rows are disabled at the org level or missing a
+        required credential — flip them on in Admin &rarr; Tools.
+      </div>
+      <div id="edit-strat-tools">Loading tools…</div>
+    </div>
+
+    <div class="panel" id="skills-panel">
+      <h2>Skills</h2>
+      <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
+        Selected skills are composed into the strategy's system
+        prompt in the order shown. Edit skill content in Admin
+        &rarr; Skills.
+      </div>
+      <div id="edit-strat-skills">Loading skills…</div>
+    </div>
+
     <div class="panel" id="lessons-panel">
       <h2>Self-critique lessons</h2>
       <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
@@ -328,6 +348,35 @@
       </div>
       <span id="alpaca-modal-status" style="font-size:0.8rem;margin-top:8px;display:block;"></span>
     </div>
+  </div>
+
+  <div class="panel" id="admin-tools-panel" style="margin-top:12px;">
+    <h2>Tools (per-org availability)</h2>
+    <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
+      Enable or disable tools at the org level. Enabled tools become
+      selectable on strategy edit forms; disabled tools get removed
+      from running bots on next restart. Orgadmin only.
+    </div>
+    <div id="admin-tools-content">Loading…</div>
+  </div>
+
+  <div class="panel" id="admin-skills-panel" style="margin-top:12px;">
+    <h2>Skills (per-org prompt fragments)</h2>
+    <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
+      Authored here, attached to strategies in the strategy edit
+      form. Composed into the strategy's system prompt at bot
+      start. Edits take effect on the next bot restart. Orgadmin
+      only.
+    </div>
+    <div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;">
+      <div class="form-group" style="margin-bottom:0;">
+        <label>Skill name (slug)</label>
+        <input type="text" id="new-skill-name" placeholder="morning_prep">
+      </div>
+      <button class="btn btn-primary" onclick="createSkill()">New skill</button>
+      <span id="new-skill-status" style="font-size:0.75rem;"></span>
+    </div>
+    <div id="admin-skills-content">Loading…</div>
   </div>
 </div>
 {% endblock %}
@@ -619,6 +668,20 @@
     loadStrategies();
   };
 
+  // Known tools for the UI. The source of truth for tool semantics
+  // lives server-side; the UI just needs display metadata plus the
+  // key it serializes into the strategy's tools dict.
+  const _TOOL_INVENTORY = [
+    {
+      name: 'news',
+      label: 'News fetch',
+      kind: 'tool_call',
+      description: 'Alpaca news endpoint. Opt-in per strategy with a daily quota.',
+    },
+  ];
+
+  let _editedStrategy = null;
+
   async function openEditStrategy(sid) {
     const list = $('strategies-list');
     const edit = $('strategy-edit');
@@ -633,6 +696,7 @@
       const resp = await fetch('/api/strategies/' + sid);
       if (!resp.ok) { status.textContent = 'Strategy not found'; status.style.color = 'var(--red)'; return; }
       const s = await resp.json();
+      _editedStrategy = s;
       $('edit-strat-id').value = s.strategy_id;
       $('edit-strat-name').value = s.name || '';
       $('edit-strat-symbols').value = (s.symbols || []).join(', ');
@@ -643,6 +707,11 @@
       status.textContent = 'Failed to load strategy';
       status.style.color = 'var(--red)';
     }
+
+    // Render tools + skills panels independently — failures in either
+    // don't block the main strategy form.
+    renderToolsPanel(sid);
+    renderSkillsPanel(sid);
 
     // Lessons load independently — a failure here shouldn't block
     // editing the strategy. We render the failure inline instead.
@@ -666,6 +735,85 @@
   }
   window.openEditStrategy = openEditStrategy;
 
+  async function renderToolsPanel(sid) {
+    const el = $('edit-strat-tools');
+    if (!el || !_editedStrategy) return;
+
+    // Load org-level tool availability. Absence of a row = not
+    // explicitly enabled by org.
+    let orgTools = [];
+    try {
+      const r = await fetch('/api/orgs/' + _editedStrategy.org_id + '/tools');
+      if (r.ok) orgTools = await r.json();
+    } catch(e) { /* ignore */ }
+    const orgToolMap = {};
+    orgTools.forEach(t => { orgToolMap[t.tool_name] = t; });
+
+    const stratTools = _editedStrategy.tools || {};
+
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
+    html += '<tr style="text-align:left;color:var(--dim);font-size:0.7rem;text-transform:uppercase;">';
+    html += '<th style="padding:4px;">Tool</th><th style="padding:4px;">Enabled</th><th style="padding:4px;">Daily quota</th><th style="padding:4px;">Notes</th></tr>';
+    _TOOL_INVENTORY.forEach(tool => {
+      const orgCfg = orgToolMap[tool.name];
+      const orgEnabled = !!(orgCfg && orgCfg.enabled);
+      const stratCfg = stratTools[tool.name] || {};
+      const selectable = orgEnabled;
+      const reason = orgCfg
+        ? (orgEnabled ? '' : 'Org disabled this tool')
+        : 'Org hasn\'t enabled this tool';
+      html += '<tr style="border-top:1px solid var(--border);">';
+      html += '<td style="padding:6px;"><strong>' + tool.label + '</strong><div style="font-size:0.7rem;color:var(--dim);">' + tool.description + '</div></td>';
+      html += '<td style="padding:6px;">';
+      html += '<input type="checkbox" data-tool-enabled="' + tool.name + '"' +
+        (stratCfg.enabled ? ' checked' : '') +
+        (selectable ? '' : ' disabled') + '>';
+      if (!selectable) {
+        html += '<div style="font-size:0.7rem;color:var(--amber,#d4a017);">' + reason + '</div>';
+      }
+      html += '</td>';
+      html += '<td style="padding:6px;">';
+      html += '<input type="number" min="0" max="10000" data-tool-quota="' + tool.name + '" value="' + (stratCfg.daily_quota || 0) + '" style="width:80px;"' + (selectable ? '' : ' disabled') + '>';
+      html += '</td>';
+      html += '<td style="padding:6px;font-size:0.75rem;color:var(--dim);">' + (tool.kind === 'context' ? 'Auto-injected' : '') + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+    el.innerHTML = html;
+  }
+  window.renderToolsPanel = renderToolsPanel;
+
+  async function renderSkillsPanel(sid) {
+    const el = $('edit-strat-skills');
+    if (!el || !_editedStrategy) return;
+
+    let orgSkills = [];
+    try {
+      const r = await fetch('/api/orgs/' + _editedStrategy.org_id + '/skills');
+      if (r.ok) orgSkills = await r.json();
+    } catch(e) { /* ignore */ }
+
+    const selected = _editedStrategy.skills || [];
+
+    if (orgSkills.length === 0) {
+      el.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No skills authored yet for this org. Orgadmins can add them via Admin &rarr; Skills.</div>';
+      return;
+    }
+
+    let html = '<div style="display:flex;flex-direction:column;gap:4px;">';
+    orgSkills.forEach(s => {
+      const isSelected = selected.includes(s.skill_name);
+      const preview = (s.markdown || '').split('\n').slice(0, 2).join(' | ').slice(0, 120);
+      html += '<label style="display:flex;align-items:flex-start;gap:8px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;cursor:pointer;">';
+      html += '<input type="checkbox" data-skill="' + s.skill_name + '"' + (isSelected ? ' checked' : '') + ' style="margin-top:3px;">';
+      html += '<div><div style="font-weight:bold;">' + s.skill_name + '</div><div style="font-size:0.72rem;color:var(--dim);">' + preview + '</div></div>';
+      html += '</label>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+  }
+  window.renderSkillsPanel = renderSkillsPanel;
+
   function closeEditStrategy() {
     $('strategy-edit').style.display = 'none';
     $('strategies-list').style.display = 'block';
@@ -680,11 +828,35 @@
     status.style.color = 'var(--dim)';
 
     const symbolsRaw = $('edit-strat-symbols').value.trim();
+
+    // Serialize the Tools panel state back into a {name: {enabled,
+    // daily_quota}} dict. Unchecked rows still emit an entry so the
+    // server sees the full intended state (including recently-
+    // disabled items) rather than a sparse update.
+    const tools = {};
+    document.querySelectorAll('[data-tool-enabled]').forEach(cb => {
+      const name = cb.dataset.toolEnabled;
+      const qIn = document.querySelector('[data-tool-quota="' + name + '"]');
+      tools[name] = {
+        enabled: cb.checked,
+        daily_quota: qIn ? parseInt(qIn.value || '0', 10) : 0,
+      };
+    });
+    // Skills panel: collect the order of checkboxes as they appear
+    // in the DOM — for now that's alphabetical. A later commit can
+    // add drag-to-reorder.
+    const skills = [];
+    document.querySelectorAll('[data-skill]').forEach(cb => {
+      if (cb.checked) skills.push(cb.dataset.skill);
+    });
+
     const body = {
       name: $('edit-strat-name').value.trim(),
       markdown: $('edit-strat-markdown').value,
       symbols: symbolsRaw ? symbolsRaw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean) : [],
       capital: $('edit-strat-capital').value.trim(),
+      tools: tools,
+      skills: skills,
     };
 
     try {
@@ -1359,6 +1531,199 @@
     }
   }
   window.loadUsers = loadUsers;
+
+  // ── Admin → Tools (per-org availability) ───────────────────────────
+
+  async function loadAdminTools() {
+    const container = $('admin-tools-content');
+    if (!container) return;
+    try {
+      const sresp = await fetch('/api/session');
+      if (!sresp.ok) return;
+      const session = await sresp.json();
+      const oid = session.active_org_id;
+      if (!oid) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No active org — pick one from the header.</div>';
+        return;
+      }
+      const r = await fetch('/api/orgs/' + oid + '/tools');
+      if (!r.ok) {
+        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load org tools (' + r.status + ').</div>';
+        return;
+      }
+      const configs = await r.json();
+      const cfgMap = {};
+      configs.forEach(c => { cfgMap[c.tool_name] = c; });
+
+      let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
+      html += '<tr style="text-align:left;color:var(--dim);font-size:0.7rem;text-transform:uppercase;">';
+      html += '<th style="padding:4px;">Tool</th><th style="padding:4px;">Enabled</th><th style="padding:4px;">Last change</th></tr>';
+      _TOOL_INVENTORY.forEach(tool => {
+        const c = cfgMap[tool.name];
+        const enabled = !!(c && c.enabled);
+        const when = c && c.updated_at
+          ? new Date(c.updated_at * 1000).toLocaleString()
+          : 'never configured';
+        html += '<tr style="border-top:1px solid var(--border);">';
+        html += '<td style="padding:6px;"><strong>' + tool.label + '</strong><div style="font-size:0.7rem;color:var(--dim);">' + tool.description + '</div></td>';
+        html += '<td style="padding:6px;">';
+        html += '<label style="display:flex;align-items:center;gap:6px;">';
+        html += '<input type="checkbox"' + (enabled ? ' checked' : '') + ' onchange="toggleOrgTool(\'' + tool.name + '\', this.checked)">';
+        html += (enabled ? 'Enabled' : 'Disabled');
+        html += '</label>';
+        html += '</td>';
+        html += '<td style="padding:6px;font-size:0.7rem;color:var(--dim);">' + when + '</td>';
+        html += '</tr>';
+      });
+      html += '</table>';
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Network error.</div>';
+    }
+  }
+  window.loadAdminTools = loadAdminTools;
+
+  window.toggleOrgTool = async function(toolName, enabled) {
+    try {
+      const sresp = await fetch('/api/session');
+      const session = await sresp.json();
+      const oid = session.active_org_id;
+      if (!oid) { alert('Pick an active org first.'); return; }
+
+      const resp = await fetch('/api/orgs/' + oid + '/tools/' + toolName, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: enabled}),
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        alert('Failed: ' + err);
+      }
+      loadAdminTools();
+    } catch(e) {
+      alert('Network error');
+    }
+  };
+
+  // ── Admin → Skills ──────────────────────────────────────────────────
+
+  async function loadAdminSkills() {
+    const container = $('admin-skills-content');
+    if (!container) return;
+    try {
+      const sresp = await fetch('/api/session');
+      if (!sresp.ok) return;
+      const session = await sresp.json();
+      const oid = session.active_org_id;
+      if (!oid) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No active org.</div>';
+        return;
+      }
+      const r = await fetch('/api/orgs/' + oid + '/skills');
+      if (!r.ok) {
+        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load skills.</div>';
+        return;
+      }
+      const skills = await r.json();
+      if (skills.length === 0) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No skills authored yet.</div>';
+        return;
+      }
+
+      let html = '<div style="display:flex;flex-direction:column;gap:6px;">';
+      skills.forEach(s => {
+        const updated = new Date(s.updated_at * 1000).toLocaleString();
+        html += '<div style="border:1px solid var(--border);border-radius:4px;padding:8px;">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
+        html += '<strong>' + s.skill_name + '</strong>';
+        html += '<div style="font-size:0.7rem;color:var(--dim);">Updated ' + updated + '</div>';
+        html += '</div>';
+        html += '<textarea data-skill-body="' + s.skill_name + '" style="width:100%;min-height:120px;font-family:monospace;font-size:0.8rem;">' + (s.markdown || '').replace(/</g, '&lt;') + '</textarea>';
+        html += '<div style="display:flex;gap:8px;margin-top:6px;">';
+        html += '<button class="btn" onclick="saveSkill(\'' + s.skill_name + '\')">Save</button>';
+        html += '<button class="btn danger" onclick="deleteSkill(\'' + s.skill_name + '\')">Delete</button>';
+        html += '<span id="skill-status-' + s.skill_name + '" style="font-size:0.75rem;"></span>';
+        html += '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Network error.</div>';
+    }
+  }
+  window.loadAdminSkills = loadAdminSkills;
+
+  window.createSkill = async function() {
+    const name = ($('new-skill-name').value || '').trim();
+    const status = $('new-skill-status');
+    if (!name.match(/^[a-z][a-z0-9_]*$/)) {
+      status.textContent = 'Use snake_case (a-z, 0-9, _; start with letter)';
+      status.style.color = 'var(--red)';
+      return;
+    }
+    try {
+      const sresp = await fetch('/api/session');
+      const session = await sresp.json();
+      const oid = session.active_org_id;
+      const resp = await fetch('/api/orgs/' + oid + '/skills/' + name, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({markdown: '# ' + name + '\n\nWrite your skill here.'}),
+      });
+      if (!resp.ok) {
+        status.textContent = 'Failed';
+        status.style.color = 'var(--red)';
+        return;
+      }
+      $('new-skill-name').value = '';
+      status.textContent = 'Created';
+      status.style.color = 'var(--green)';
+      loadAdminSkills();
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  };
+
+  window.saveSkill = async function(name) {
+    const body = document.querySelector('[data-skill-body="' + name + '"]').value;
+    const status = $('skill-status-' + name);
+    try {
+      const sresp = await fetch('/api/session');
+      const session = await sresp.json();
+      const oid = session.active_org_id;
+      const resp = await fetch('/api/orgs/' + oid + '/skills/' + name, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({markdown: body}),
+      });
+      if (resp.ok) {
+        status.textContent = 'Saved';
+        status.style.color = 'var(--green)';
+      } else {
+        const err = await resp.json();
+        status.textContent = err.detail || 'Error';
+        status.style.color = 'var(--red)';
+      }
+    } catch(e) {
+      status.textContent = 'Network error';
+      status.style.color = 'var(--red)';
+    }
+  };
+
+  window.deleteSkill = async function(name) {
+    if (!confirm('Delete skill ' + name + '? Strategies that reference it will log a warning on next restart.')) return;
+    try {
+      const sresp = await fetch('/api/session');
+      const session = await sresp.json();
+      const oid = session.active_org_id;
+      await fetch('/api/orgs/' + oid + '/skills/' + name, {method: 'DELETE'});
+      loadAdminSkills();
+    } catch(e) {
+      alert('Network error');
+    }
+  };
 
   $('create-user-form').addEventListener('submit', async function(e) {
     e.preventDefault();
