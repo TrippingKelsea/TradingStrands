@@ -76,6 +76,18 @@ class SingleBotConfig:
     symbols: list[str]
     capital: Decimal
     name: str
+    # Optional with empty defaults so existing tests that construct
+    # SingleBotConfig without these fields don't break.
+    tools: dict[str, Any] = None  # type: ignore[assignment]
+    skills: list[str] = None      # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass can't assign normally; object.__setattr__
+        # is the standard workaround for defaulting mutables.
+        if self.tools is None:
+            object.__setattr__(self, "tools", {})
+        if self.skills is None:
+            object.__setattr__(self, "skills", [])
 
 
 def single_bot_mode_enabled(env: dict[str, str]) -> bool:
@@ -134,6 +146,8 @@ def load_single_bot_config(table: Any, env: dict[str, str]) -> SingleBotConfig:
         symbols=list(item.get("symbols", []) or ["AAPL"]),
         capital=Decimal(str(item.get("capital", "1000"))),
         name=str(item.get("name", "")),
+        tools=dict(item.get("tools", {}) or {}),
+        skills=list(item.get("skills", []) or []),
     )
 
 
@@ -251,6 +265,13 @@ def _register_strategy(
     s3_client: Any | None = None,
     memory_bucket: str | None = None,
     heartbeat_store: Any | None = None,
+    calendar_store: Any | None = None,
+    ta_store: Any | None = None,
+    tools_config: dict[str, Any] | None = None,
+    skills_config: list[str] | None = None,
+    strategy_name: str = "",
+    tools_table: Any | None = None,
+    tools_secrets_client: Any | None = None,
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
@@ -284,6 +305,83 @@ def _register_strategy(
             org_id=org_id, agent_type="strategy", agent_id=bot_id,
         )
 
+    # Unified tool config surface: per-spec, all tools (injected or
+    # call-based) are opt-in via the Strategy.tools dict. Derive the
+    # per-kind booleans from that dict here so the bot's constructor
+    # stays dumb. Absence → disabled.
+    from trading_strands.tools.base import (
+        StrategyToolConfig,
+        ToolContext,
+        bind_tools_for_strategy,
+    )
+    from trading_strands.tools.registry import build_default_registry
+
+    tools_cfg_raw = tools_config or {}
+    # Config entries might be dicts (from DDB) or StrategyToolConfig
+    # (from tests). Normalize to the model.
+    tool_config_models: dict[str, StrategyToolConfig] = {}
+    for tname, raw in tools_cfg_raw.items():
+        if isinstance(raw, StrategyToolConfig):
+            tool_config_models[tname] = raw
+        elif isinstance(raw, dict):
+            tool_config_models[tname] = StrategyToolConfig(**raw)
+    calendar_enabled = tool_config_models.get(
+        "calendar", StrategyToolConfig(),
+    ).enabled
+    ta_enabled = tool_config_models.get(
+        "ta", StrategyToolConfig(),
+    ).enabled
+
+    # Tool-call tools (news, filings, social) bound via registry.
+    # Absence of tools_table or secrets means local-dev mode — skip
+    # tool binding; bot gets no external-API tools.
+    bound_tools: list[Any] = []
+    if tools_table is not None and tools_secrets_client is not None:
+        from trading_strands.tool_quota.store import ToolQuotaStore
+        ctx = ToolContext(
+            strategy_id=bot_id,
+            org_id=org_id,
+            quota_store=ToolQuotaStore(tools_table),
+            secrets_client=tools_secrets_client,
+            table=tools_table,
+        )
+        # Filter to tool-call kinds; the registry doesn't know about
+        # calendar/ta (those are context-injected, not @tool).
+        tool_call_cfg = {
+            k: v for k, v in tool_config_models.items()
+            if k in {"news", "filings", "social"}
+        }
+        registry = build_default_registry()
+        raw_bindings = bind_tools_for_strategy(
+            registry, tool_call_cfg, ctx,
+        )
+        # Some factories return a list of tools; flatten.
+        for b in raw_bindings:
+            if isinstance(b, list):
+                bound_tools.extend(b)
+            else:
+                bound_tools.append(b)
+
+    # Skills: resolve names to Skill objects. Missing ones skipped
+    # with a warning per SPEC §4 — strategies aren't blocked from
+    # running just because a skill was deleted.
+    from trading_strands.skills_store.store import (
+        SkillNotFoundError,
+        SkillsStore,
+    )
+
+    loaded_skills: list[Any] = []
+    if skills_config and tools_table is not None:
+        skills_store = SkillsStore(tools_table)
+        for name in skills_config:
+            try:
+                loaded_skills.append(skills_store.get(org_id, name))
+            except SkillNotFoundError:
+                logger.warning(
+                    "strategy.skill_missing bot_id=%s skill=%s",
+                    bot_id, name,
+                )
+
     bot = StrategyBot(
         bot_id=bot_id,
         org_id=org_id,
@@ -292,6 +390,13 @@ def _register_strategy(
         token_store=token_store,
         memory_store=memory_store,
         heartbeat_store=heartbeat_store,
+        tools=bound_tools or None,
+        calendar_store=calendar_store,
+        calendar_enabled=calendar_enabled,
+        ta_store=ta_store,
+        ta_enabled=ta_enabled,
+        skills=loaded_skills or None,
+        strategy_name=strategy_name,
     )
 
     orchestrator.register_bot(
@@ -348,6 +453,10 @@ async def run(
     token_store: TokenUsageStore | None = None
     ledger_store: LedgerStore | None = None
     heartbeat_store: Any | None = None
+    calendar_store: Any | None = None
+    ta_store: Any | None = None
+    tools_table: Any | None = None
+    tools_secrets_client: Any | None = None
     s3_client: Any | None = None
     memory_bucket: str | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
@@ -357,16 +466,24 @@ async def run(
 
         ddb = _boto3.resource("dynamodb")
         tbl = ddb.Table(table_name)
+        tools_table = tbl
         marketdata_store = MarketDataStore(tbl)
         token_store = TokenUsageStore(tbl)
         ledger_store = LedgerStore(tbl)
+        from trading_strands.calendar_store.store import CalendarStore as _CS
         from trading_strands.heartbeat.store import HeartbeatStore as _HB
+        from trading_strands.ta_snapshot.store import TASnapshotStore as _TS
         heartbeat_store = _HB(tbl)
+        calendar_store = _CS(tbl)
+        ta_store = _TS(tbl)
+        tools_secrets_client = _boto3.client("secretsmanager")
         await logger.ainfo("publisher.enabled", table=table_name)
         await logger.ainfo("marketdata_store.enabled", table=table_name)
         await logger.ainfo("token_store.enabled", table=table_name)
         await logger.ainfo("ledger_store.enabled", table=table_name)
         await logger.ainfo("heartbeat_store.enabled", table=table_name)
+        await logger.ainfo("calendar_store.enabled", table=table_name)
+        await logger.ainfo("ta_store.enabled", table=table_name)
 
         memory_bucket = os.environ.get(AGENT_MEMORY_BUCKET_ENV)
         if memory_bucket:
@@ -478,6 +595,13 @@ async def run(
             s3_client=s3_client,
             memory_bucket=memory_bucket,
             heartbeat_store=heartbeat_store,
+            calendar_store=calendar_store,
+            ta_store=ta_store,
+            tools_table=tools_table,
+            tools_secrets_client=tools_secrets_client,
+            tools_config=cfg.tools,
+            skills_config=cfg.skills,
+            strategy_name=cfg.name,
         )
         await logger.ainfo(
             "system.start.single_bot",
@@ -505,6 +629,13 @@ async def run(
             s3_client=s3_client,
             memory_bucket=memory_bucket,
             heartbeat_store=heartbeat_store,
+            calendar_store=calendar_store,
+            ta_store=ta_store,
+            tools_table=tools_table,
+            tools_secrets_client=tools_secrets_client,
+            tools_config={},
+            skills_config=[],
+            strategy_name=Path(strategy_path).stem,
         )
         await logger.ainfo(
             "system.start.local",
@@ -542,7 +673,14 @@ async def run(
                 ledger_store=ledger_store,
                 s3_client=s3_client,
                 memory_bucket=memory_bucket,
-            heartbeat_store=heartbeat_store,
+                heartbeat_store=heartbeat_store,
+                calendar_store=calendar_store,
+                ta_store=ta_store,
+                tools_table=tools_table,
+                tools_secrets_client=tools_secrets_client,
+                tools_config=strat.get("tools", {}),
+                skills_config=strat.get("skills", []),
+                strategy_name=str(strat.get("name", "")),
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -619,7 +757,14 @@ async def run(
                                     ledger_store=ledger_store,
                                     s3_client=s3_client,
                                     memory_bucket=memory_bucket,
-            heartbeat_store=heartbeat_store,
+                                    heartbeat_store=heartbeat_store,
+                                    calendar_store=calendar_store,
+                                    ta_store=ta_store,
+                                    tools_table=tools_table,
+                                    tools_secrets_client=tools_secrets_client,
+                                    tools_config=strat.get("tools", {}),
+                                    skills_config=strat.get("skills", []),
+                                    strategy_name=str(strat.get("name", "")),
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

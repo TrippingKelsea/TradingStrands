@@ -673,6 +673,18 @@
   // key it serializes into the strategy's tools dict.
   const _TOOL_INVENTORY = [
     {
+      name: 'calendar',
+      label: 'Economic / earnings calendar',
+      kind: 'context',
+      description: 'Today + tomorrow macro + earnings events auto-injected into the decision prompt. Cheap (shared across strategies).',
+    },
+    {
+      name: 'ta',
+      label: 'TA snapshot',
+      kind: 'context',
+      description: 'Per-symbol RSI / MACD / SMAs / Bollinger auto-injected. Computed every 5 min from minute bars.',
+    },
+    {
       name: 'news',
       label: 'News fetch',
       kind: 'tool_call',
