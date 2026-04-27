@@ -140,6 +140,8 @@
     <span class="acct-value" id="active-strat-count">0</span>
   </div>
   <div class="spacer"></div>
+  <div id="halt-reason-inline"
+       style="font-size:0.75rem;color:var(--red,#c93c3c);margin-right:8px;max-width:360px;text-align:right;display:none;"></div>
   <button class="btn btn-danger" id="halt-btn" onclick="haltTrading()">HALT TRADING</button>
 </div>
 
@@ -285,14 +287,26 @@
     const btn = $('halt-btn');
     if (!btn) return;
     const halted = _haltState ? _haltState.effective_halted : _deskHalted;
+    const inline = $('halt-reason-inline');
     if (halted) {
       btn.textContent = 'RESUME TRADING';
       btn.className = 'btn btn-success';
-      btn.title = _haltReasonText() || 'Desk halted';
+      const reason = _haltReasonText() || 'Desk halted';
+      btn.title = reason;
+      // Inline reason beside the button so the halt state is
+      // impossible to miss while scanning the header.
+      if (inline) {
+        inline.textContent = reason;
+        inline.style.display = 'block';
+      }
     } else {
       btn.textContent = 'HALT TRADING';
       btn.className = 'btn btn-danger';
       btn.title = '';
+      if (inline) {
+        inline.textContent = '';
+        inline.style.display = 'none';
+      }
     }
   }
 
