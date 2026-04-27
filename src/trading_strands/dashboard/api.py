@@ -805,6 +805,151 @@ async def delete_strategy(request: Request, strategy_id: str) -> None:
     store.delete(strategy_id)
 
 
+# ── Strategy proposals (self-critique suggested edits) ────────────────
+#
+# Self-critique proposes prompt edits; the author applies or rejects.
+# Authorship rules from multi_tenancy.md apply: only UPDATE-permitted
+# principals can apply a proposal, same gate used for direct edits.
+
+
+@app.get("/api/strategies/{strategy_id}/proposals")
+async def list_strategy_proposals(
+    request: Request, strategy_id: str,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    """List self-critique's prompt-edit proposals for a strategy.
+
+    Visible to any org member who can READ the strategy — the proposal
+    body is informational, same leakage rules as the strategy prompt
+    itself. Applying one requires UPDATE (gated on
+    /proposals/{id}/apply).
+    """
+
+    principal = _get_principal(request)
+
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.READ, resource_for(strat, acl))
+
+    from trading_strands.strategy_proposals.store import (
+        ProposalStatus,
+        StrategyProposalsStore,
+    )
+    proposals = StrategyProposalsStore(_get_table())
+    status_filter = None
+    if status:
+        try:
+            status_filter = ProposalStatus(status)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid status: {status}",
+            ) from exc
+    entries = proposals.list_for_strategy(strategy_id, status=status_filter)
+    return [e.model_dump(mode="json") for e in entries]
+
+
+@app.post("/api/strategies/{strategy_id}/proposals/{proposal_id}/apply")
+async def apply_strategy_proposal(
+    request: Request, strategy_id: str, proposal_id: str,
+) -> dict[str, Any]:
+    """Apply a pending proposal: copy proposed_markdown into the
+    strategy and mark the proposal APPLIED.
+
+    Two writes, not transactional — if the strategy.update succeeds
+    but the decide() write fails, the proposal stays PENDING and will
+    show in the dashboard. The apply is idempotent by content: a
+    re-apply still replaces the markdown. The inverse failure order
+    (decide succeeds, update fails) leaves the proposal APPLIED but
+    the strategy unchanged; the author sees the mismatch and can
+    re-run. We accept the split-write risk for now because DDB
+    transactions are less important than surfacing the diff for the
+    author to eyeball before apply.
+    """
+
+    principal = _get_principal(request)
+
+    from trading_strands.strategy_proposals.store import (
+        ProposalNotFoundError,
+        ProposalStatus,
+        StrategyProposalsStore,
+    )
+
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    # Apply == edit; same authz as PUT /api/strategies/{id}.
+    _require(principal, Action.UPDATE, resource_for(strat, acl))
+
+    proposals = StrategyProposalsStore(_get_table())
+    try:
+        proposal = proposals.get(strategy_id, proposal_id)
+    except ProposalNotFoundError:
+        raise HTTPException(status_code=404, detail="Proposal not found") from None
+    if proposal.status is not ProposalStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"proposal already {proposal.status.value}",
+        )
+
+    store.update(strategy_id, {"markdown": proposal.proposed_markdown})
+    updated_proposal = proposals.decide(
+        strategy_id=strategy_id, proposal_id=proposal_id,
+        status=ProposalStatus.APPLIED, decided_by=principal.user_id,
+    )
+    return updated_proposal.model_dump(mode="json")
+
+
+@app.post("/api/strategies/{strategy_id}/proposals/{proposal_id}/reject")
+async def reject_strategy_proposal(
+    request: Request, strategy_id: str, proposal_id: str,
+) -> dict[str, Any]:
+    """Reject a pending proposal. Same authz as apply — only someone
+    who could apply it is allowed to decide against it, matching the
+    edit-authority model."""
+
+    principal = _get_principal(request)
+
+    from trading_strands.strategy_proposals.store import (
+        ProposalNotFoundError,
+        ProposalStatus,
+        StrategyProposalsStore,
+    )
+
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.UPDATE, resource_for(strat, acl))
+
+    proposals = StrategyProposalsStore(_get_table())
+    try:
+        proposal = proposals.get(strategy_id, proposal_id)
+    except ProposalNotFoundError:
+        raise HTTPException(status_code=404, detail="Proposal not found") from None
+    if proposal.status is not ProposalStatus.PENDING:
+        raise HTTPException(
+            status_code=409,
+            detail=f"proposal already {proposal.status.value}",
+        )
+
+    updated = proposals.decide(
+        strategy_id=strategy_id, proposal_id=proposal_id,
+        status=ProposalStatus.REJECTED, decided_by=principal.user_id,
+    )
+    return updated.model_dump(mode="json")
+
+
 _ecs_client_cache: Any = None
 
 

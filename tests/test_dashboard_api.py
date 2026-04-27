@@ -2953,6 +2953,186 @@ def test_create_strategy_with_tools_and_skills() -> None:
         assert body["skills"] == ["morning_prep"]
 
 
+# ── Strategy proposals (self-critique prompt edits) ───────────────────
+
+
+def test_list_strategy_proposals_returns_store_entries() -> None:
+    """Any org member with READ on the strategy can list its proposals."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.strategy_proposals.store import (
+            StrategyProposalsStore,
+        )
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="viewer")
+
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id="author-1",
+            name="S", markdown="# old",
+        )
+        proposals = StrategyProposalsStore(table)
+        proposals.create(
+            strategy_id=strat.strategy_id, org_id=oid,
+            proposer_agent="self_critique",
+            proposer_agent_id="sc-1",
+            rationale="tighten exit", proposed_markdown="# new",
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(
+            f"/api/strategies/{strat.strategy_id}/proposals",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["status"] == "pending"
+        assert body[0]["proposed_markdown"] == "# new"
+
+
+def test_apply_strategy_proposal_rewrites_prompt_and_marks_applied() -> None:
+    """Author applies a pending proposal — strategy.markdown gets the
+    proposed text, proposal transitions to APPLIED."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.strategy_proposals.store import (
+            StrategyProposalsStore,
+        )
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        store = StrategyStore(table)
+        strat = store.create(
+            org_id=oid, author_user_id=uid, name="S",
+            markdown="# original rules",
+        )
+        proposals = StrategyProposalsStore(table)
+        p = proposals.create(
+            strategy_id=strat.strategy_id, org_id=oid,
+            proposer_agent="self_critique",
+            proposer_agent_id="sc-1",
+            rationale="add exit", proposed_markdown="# refined rules",
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post(
+            f"/api/strategies/{strat.strategy_id}"
+            f"/proposals/{p.proposal_id}/apply",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "applied"
+        assert resp.json()["decided_by"] == uid
+
+        # Strategy's markdown was actually rewritten.
+        after = store.get(strat.strategy_id)
+        assert after.markdown == "# refined rules"
+
+
+def test_reject_proposal_marks_rejected_and_leaves_strategy_unchanged() -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.strategy_proposals.store import (
+            StrategyProposalsStore,
+        )
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        store = StrategyStore(table)
+        strat = store.create(
+            org_id=oid, author_user_id=uid, name="S",
+            markdown="# original",
+        )
+        proposals = StrategyProposalsStore(table)
+        p = proposals.create(
+            strategy_id=strat.strategy_id, org_id=oid,
+            proposer_agent="self_critique",
+            proposer_agent_id="sc-1",
+            rationale="ignore this", proposed_markdown="# replacement",
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post(
+            f"/api/strategies/{strat.strategy_id}"
+            f"/proposals/{p.proposal_id}/reject",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "rejected"
+        assert store.get(strat.strategy_id).markdown == "# original"
+
+
+def test_apply_already_decided_proposal_409s() -> None:
+    """Single-transition invariant: once applied, you can't re-apply
+    or switch to rejected via the endpoint."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.strategy_proposals.store import (
+            ProposalStatus,
+            StrategyProposalsStore,
+        )
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        store = StrategyStore(table)
+        strat = store.create(
+            org_id=oid, author_user_id=uid, name="S", markdown="# m",
+        )
+        proposals = StrategyProposalsStore(table)
+        p = proposals.create(
+            strategy_id=strat.strategy_id, org_id=oid,
+            proposer_agent="self_critique", proposer_agent_id="sc",
+            rationale="r", proposed_markdown="# m2",
+        )
+        proposals.decide(
+            strategy_id=strat.strategy_id, proposal_id=p.proposal_id,
+            status=ProposalStatus.APPLIED, decided_by=uid,
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post(
+            f"/api/strategies/{strat.strategy_id}"
+            f"/proposals/{p.proposal_id}/apply",
+        )
+        assert resp.status_code == 409
+
+
+def test_viewer_cannot_apply_proposal() -> None:
+    """A viewer can READ proposals but cannot UPDATE — apply is gated
+    at the authz layer same as direct strategy edits."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.strategy_proposals.store import (
+            StrategyProposalsStore,
+        )
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="viewer")
+
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id="someone-else",
+            name="S", markdown="# m",
+        )
+        proposals = StrategyProposalsStore(table)
+        p = proposals.create(
+            strategy_id=strat.strategy_id, org_id=oid,
+            proposer_agent="self_critique", proposer_agent_id="sc",
+            rationale="r", proposed_markdown="# m2",
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post(
+            f"/api/strategies/{strat.strategy_id}"
+            f"/proposals/{p.proposal_id}/apply",
+        )
+        assert resp.status_code == 403
+
+
 # ── /api/orgs/{org_id}/advisories ─────────────────────────────────────
 
 

@@ -41,16 +41,22 @@ strategy over the past week. Your job:
 4. Propose specific, narrow lessons the strategy should remember next week.
    Each lesson must be actionable and specific (not "trade better").
 
+You MAY additionally propose a specific edit to the strategy prompt
+itself when a structural problem can't be fixed by a lesson alone
+(e.g. a missing rule, an ambiguous entry condition). Prompt edits are
+delivered as proposals for the author to review — never auto-applied.
+
 CRITICAL CONSTRAINTS:
 - Do NOT invent what the market did. Only reason from the data provided.
   If a claim about market behavior isn't in the context, flag it as
   speculative or omit it.
 - Do NOT propose trades the strategy should have made unless you can
   cite the specific observations that would have triggered them.
-- Do NOT suggest editing the strategy prompt itself. Propose lessons to
-  append to lessons.md; the human orgadmin decides whether to edit the
-  strategy based on those lessons.
 - Keep the reflection under 500 words. Brevity reflects discipline.
+- When proposing a prompt edit, supply the FULL replacement markdown
+  (not a diff) — the dashboard renders a diff against the current
+  prompt at review time. Explain the rationale separately from the
+  replacement text.
 """
 
 
@@ -190,3 +196,35 @@ def run_self_critique(
         bot_id, tokens_in, tokens_out, report.context_bytes,
     )
     return report
+
+
+def propose_strategy_edit(
+    *,
+    proposals_store: Any,
+    strategy_id: str,
+    org_id: str,
+    proposer_agent_id: str,
+    rationale: str,
+    proposed_markdown: str,
+) -> Any:
+    """File a strategy-prompt edit proposal from self-critique.
+
+    Callers (the weekend Lambda, or an ad-hoc critique run) use this
+    when the reflection surfaces a structural change — a new entry
+    rule, a disambiguation of an exit condition, a tightened risk
+    clause. The author/orgadmin reviews via the dashboard; proposals
+    are never auto-applied.
+
+    Separated from run_self_critique so the decision to file a
+    proposal lives with the caller (who has the structured output
+    from their LLM), not with this module's prompt-parsing heuristics.
+    """
+
+    return proposals_store.create(
+        strategy_id=strategy_id,
+        org_id=org_id,
+        proposer_agent="self_critique",
+        proposer_agent_id=proposer_agent_id,
+        rationale=rationale,
+        proposed_markdown=proposed_markdown,
+    )

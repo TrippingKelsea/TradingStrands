@@ -288,4 +288,36 @@ def test_critique_system_prompt_forbids_phantom_trades() -> None:
 
     assert "Do NOT invent" in CRITIQUE_SYSTEM_PROMPT
     assert "cite" in CRITIQUE_SYSTEM_PROMPT or "citing" in CRITIQUE_SYSTEM_PROMPT.lower()
-    assert "strategy prompt itself" in CRITIQUE_SYSTEM_PROMPT
+    # Prompt edits are now permitted, but ONLY as proposals — never
+    # auto-applied. Runtime enforcement lives in StrategyProposalsStore;
+    # this is the reasoning-layer enforcement.
+    assert "proposals" in CRITIQUE_SYSTEM_PROMPT
+    assert "never auto-applied" in CRITIQUE_SYSTEM_PROMPT
+
+
+def test_propose_strategy_edit_creates_pending_proposal() -> None:
+    """The helper is the clean seam between self-critique's output and
+    the proposals store — callers use it when their LLM gave them a
+    structured proposal instead of just a lesson."""
+
+    from unittest.mock import MagicMock
+
+    from trading_strands.self_critique.runner import (
+        propose_strategy_edit,
+    )
+
+    proposals = MagicMock()
+
+    propose_strategy_edit(
+        proposals_store=proposals,
+        strategy_id="s1", org_id="o1",
+        proposer_agent_id="sc-s1",
+        rationale="add explicit exit rule",
+        proposed_markdown="## Exit\n- close on 5% loss\n",
+    )
+
+    proposals.create.assert_called_once()
+    kwargs = proposals.create.call_args.kwargs
+    assert kwargs["proposer_agent"] == "self_critique"
+    assert kwargs["strategy_id"] == "s1"
+    assert kwargs["proposed_markdown"].startswith("## Exit")
