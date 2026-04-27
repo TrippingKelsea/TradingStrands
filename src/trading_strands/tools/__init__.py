@@ -20,10 +20,12 @@ from trading_strands.tools.base import (
     ToolRegistry,
     bind_tools_for_strategy,
 )
+from trading_strands.tools.registry import build_default_registry
 
 __all__ = [
     "StrategyToolConfig",
     "ToolContext",
     "ToolRegistry",
     "bind_tools_for_strategy",
+    "build_default_registry",
 ]
