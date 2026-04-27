@@ -622,64 +622,102 @@ class TradingStrandsStack(cdk.Stack):
             resources=["*"],
         ))
 
-        # -- Risk Agent (per-org periodic LLM reviewer) ----------------------
+        # -- Periodic review agents (Risk / Compliance / Auditor) ------------
         #
-        # Invoked per-org on a weekly schedule. Reads the fleet of ledgers,
-        # writes recommendations.md into the risk agent's memory prefix.
-        # Does NOT gate trades; recommendations are orgadmin-consumable.
-        risk_agent_fn = lambda_.DockerImageFunction(
-            self,
-            "RiskAgentFunction",
-            function_name="trading-strands-risk-agent",
-            code=lambda_.DockerImageCode.from_ecr(
-                repository=repository,
-                tag_or_digest="latest",
-                cmd=["trading_strands.risk_agent.lambda_handler.handler"],
-            ),
-            memory_size=1024,
-            timeout=cdk.Duration.minutes(5),
-            environment={
-                "DYNAMODB_TABLE": table.table_name,
-                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
-                "RISK_AGENT_MODEL_ID": "us.anthropic.claude-sonnet-4-6",
-            },
-        )
-        cdk.Tags.of(risk_agent_fn).add("Component", "risk-agent")
-        table.grant_read_data(risk_agent_fn)
-        agent_memory_bucket.grant_read_write(risk_agent_fn)
-        risk_agent_fn.add_to_role_policy(iam.PolicyStatement(
-            actions=[
-                "bedrock:InvokeModel",
-                "bedrock:InvokeModelWithResponseStream",
-            ],
-            resources=["*"],
-        ))
+        # All three share the same Lambda shape: per-org invocation, reads
+        # DDB, reads+writes the agent-memory bucket, calls Bedrock, appends
+        # a recommendation. Factored into a helper so the three stay in
+        # lockstep — if the Lambda env or IAM drifts across them, the
+        # skeleton is the wrong place.
+        #
+        # Schedules are created disabled; a fan-out Lambda that enumerates
+        # orgs is the final piece (same pattern as BotProvisioner for
+        # Self-Critique). For v0 with a single org, operators invoke
+        # manually:
+        #   aws lambda invoke --function-name trading-strands-risk-agent \
+        #       --payload '{"org_id":"<org>"}' /tmp/out.json
+        def _build_review_agent(
+            construct_id: str,
+            function_name: str,
+            handler_path: str,
+            model_env_var: str,
+            component_tag: str,
+            schedule_id: str,
+            schedule_description: str,
+            schedule_cron: events.Schedule,
+        ) -> lambda_.DockerImageFunction:
+            fn = lambda_.DockerImageFunction(
+                self,
+                construct_id,
+                function_name=function_name,
+                code=lambda_.DockerImageCode.from_ecr(
+                    repository=repository,
+                    tag_or_digest="latest",
+                    cmd=[handler_path],
+                ),
+                memory_size=1024,
+                timeout=cdk.Duration.minutes(5),
+                environment={
+                    "DYNAMODB_TABLE": table.table_name,
+                    "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                    model_env_var: "us.anthropic.claude-sonnet-4-6",
+                },
+            )
+            cdk.Tags.of(fn).add("Component", component_tag)
+            table.grant_read_data(fn)
+            agent_memory_bucket.grant_read_write(fn)
+            fn.add_to_role_policy(iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
+                resources=["*"],
+            ))
+            # Rule created disabled; target attached when the org-fan-out
+            # Lambda lands.
+            events.Rule(
+                self,
+                schedule_id,
+                description=schedule_description,
+                schedule=schedule_cron,
+                enabled=False,
+            )
+            return fn
 
-        # Weekly schedule: Sunday 10:00 UTC. A day after Self-Critique so
-        # the critique's lessons are visible when the Risk Agent runs (it
-        # doesn't read them directly today, but the temporal ordering
-        # matches how operators naturally think about the review cadence).
-        #
-        # Disabled on first deploy; flip to enabled=True once we've seen
-        # one clean manual invocation and verified recommendations.md lands.
-        risk_rule = events.Rule(
-            self,
-            "RiskAgentWeeklySchedule",
-            description=(
+        _build_review_agent(
+            construct_id="RiskAgentFunction",
+            function_name="trading-strands-risk-agent",
+            handler_path="trading_strands.risk_agent.lambda_handler.handler",
+            model_env_var="RISK_AGENT_MODEL_ID",
+            component_tag="risk-agent",
+            schedule_id="RiskAgentWeeklySchedule",
+            schedule_description=(
                 "Sunday 10:00 UTC — per-org Risk Agent reviewer. "
-                "A companion fan-out Lambda enumerates orgs (TODO)."
+                "Target attached when org-fan-out Lambda lands."
             ),
-            schedule=events.Schedule.cron(
-                minute="0", hour="10",
-                week_day="SUN",
+            schedule_cron=events.Schedule.cron(
+                minute="0", hour="10", week_day="SUN",
             ),
-            enabled=False,
         )
-        # No target yet — the org-enumeration fan-out lands when the
-        # first customer org exists and we actually need the cadence.
-        # Today the single system org is invoked manually via
-        # `aws lambda invoke --payload '{"org_id":"<sys-org>"}'`.
-        _ = risk_rule  # rule persisted for later target attachment
+
+        _build_review_agent(
+            construct_id="ComplianceAgentFunction",
+            function_name="trading-strands-compliance-agent",
+            handler_path=(
+                "trading_strands.compliance_agent.lambda_handler.handler"
+            ),
+            model_env_var="COMPLIANCE_AGENT_MODEL_ID",
+            component_tag="compliance-agent",
+            schedule_id="ComplianceAgentWeeklySchedule",
+            schedule_description=(
+                "Sunday 11:00 UTC — per-org Compliance Agent reviewer. "
+                "Runs an hour after Risk so recommendations accumulate "
+                "in a predictable order for the operator."
+            ),
+            schedule_cron=events.Schedule.cron(
+                minute="0", hour="11", week_day="SUN",
+            ),
+        )
 
         # -- BotProvisioner (weekend fan-out) --------------------------------
         #
