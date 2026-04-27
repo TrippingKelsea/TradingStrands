@@ -1129,6 +1129,41 @@ class TradingStrandsStack(cdk.Stack):
         )
         cdk.Tags.of(org_halt_alarm).add("Component", "halt-alarms")
 
+        # Missing-agent alarm. Complements the halt alarms — halt alarms
+        # fire on deliberate stops; this fires when a fast-cadence agent
+        # (strategy bot or subscriber) has stopped beating. The supervisor
+        # emits this metric every minute; two consecutive breaches avoids
+        # false positives from a single transient DDB read miss.
+        #
+        # treat_missing_data=MISSING here (not notBreaching): if the
+        # metric stops arriving entirely, the supervisor Lambda is itself
+        # broken, which is a different alarm story to address once we
+        # have an ops target. Neutral on missing for now.
+        missing_agents_alarm = cloudwatch.Alarm(
+            self,
+            "MissingAgentsAlarm",
+            alarm_name="trading-strands-missing-agents",
+            alarm_description=(
+                "One or more fast-cadence agents (strategy/subscriber) "
+                "have not beat recently. Check supervisor logs for which."
+            ),
+            metric=cloudwatch.Metric(
+                namespace="TradingStrands",
+                metric_name="supervisor.agents.count",
+                dimensions_map={"status": "missing"},
+                period=cdk.Duration.minutes(1),
+                statistic="Maximum",
+            ),
+            threshold=1,
+            evaluation_periods=2,
+            datapoints_to_alarm=2,
+            comparison_operator=cloudwatch.ComparisonOperator
+                .GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.MISSING,
+            actions_enabled=False,
+        )
+        cdk.Tags.of(missing_agents_alarm).add("Component", "halt-alarms")
+
         # -- Outputs ----------------------------------------------------------
 
         dashboard_url = (
