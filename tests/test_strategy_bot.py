@@ -157,3 +157,58 @@ class TestCalendarContext:
         # With both days None, summarize_for_symbols returns the
         # "Calendar data unavailable." marker (§ formatter test).
         assert "unavailable" in out.lower()
+
+
+class TestTAContext:
+    """_build_ta_context: same four-case semantics as calendar."""
+
+    def test_no_store_returns_not_wired(self) -> None:
+        from trading_strands.strategies.bot import _build_ta_context
+
+        out = _build_ta_context(
+            ta_store=None, ta_enabled=True,
+            symbols={"AAPL"}, bot_id="bot-1",
+        )
+        assert "(no TA wired)" in out
+
+    def test_wired_but_disabled(self) -> None:
+        from trading_strands.strategies.bot import _build_ta_context
+
+        class _Store:
+            def get_latest(self, _sym: str) -> None: ...
+
+        out = _build_ta_context(
+            ta_store=_Store(), ta_enabled=False,
+            symbols={"AAPL"}, bot_id="bot-1",
+        )
+        assert "disabled" in out.lower()
+
+    def test_read_failure_falls_back(self) -> None:
+        from trading_strands.strategies.bot import _build_ta_context
+
+        class _BrokenStore:
+            def get_latest(self, _sym: str) -> None:
+                raise RuntimeError("ddb throttled")
+
+        out = _build_ta_context(
+            ta_store=_BrokenStore(), ta_enabled=True,
+            symbols={"AAPL"}, bot_id="bot-1",
+        )
+        assert "failed" in out.lower()
+
+    def test_enabled_renders_symbol_block(self) -> None:
+        """Happy path: the formatter produces one line per symbol,
+        starting with the symbol name."""
+
+        from trading_strands.strategies.bot import _build_ta_context
+
+        class _EmptyStore:
+            def get_latest(self, _sym: str) -> None:
+                return None   # no data yet → "(no recent TA snapshot)"
+
+        out = _build_ta_context(
+            ta_store=_EmptyStore(), ta_enabled=True,
+            symbols={"AAPL"}, bot_id="bot-1",
+        )
+        assert "AAPL" in out
+        assert "no recent" in out.lower()

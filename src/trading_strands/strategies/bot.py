@@ -47,6 +47,9 @@ conditions and your portfolio state, then decide what action to take.
 ## Calendar (today + tomorrow)
 {calendar_context}
 
+## Technical Indicators
+{ta_context}
+
 ## Your Portfolio
 {portfolio_state}
 
@@ -99,6 +102,32 @@ def _map_action(action_str: str) -> IntentAction:
         "hold": IntentAction.HOLD,
     }
     return mapping.get(action_str.lower(), IntentAction.HOLD)
+
+
+def _build_ta_context(
+    ta_store: Any | None,
+    ta_enabled: bool,
+    symbols: set[str],
+    bot_id: str,
+) -> str:
+    """Render the TA indicator section for the decision prompt.
+
+    Mirrors _build_calendar_context four-case logic: not wired /
+    disabled / read-failed / enabled-and-producing. Same rationale:
+    graceful degradation, module-level for testability without
+    pulling in Strands.
+    """
+
+    if ta_store is None:
+        return "(no TA wired)"
+    if not ta_enabled:
+        return "(TA disabled for this strategy)"
+    try:
+        from trading_strands.ta_snapshot.store import summarize_for_symbols
+        return summarize_for_symbols(symbols=symbols, store=ta_store)
+    except Exception:
+        logger.exception("ta.read_failed", bot_id=bot_id)
+        return "TA read failed."
 
 
 def _build_calendar_context(
@@ -173,6 +202,8 @@ class StrategyBot:
         tools: list[Any] | None = None,
         calendar_store: Any | None = None,
         calendar_enabled: bool = False,
+        ta_store: Any | None = None,
+        ta_enabled: bool = False,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -191,6 +222,9 @@ class StrategyBot:
         # blow up on missing keys.
         self._calendar_store = calendar_store
         self._calendar_enabled = calendar_enabled
+        # TA snapshots follow the same wiring pattern as calendar.
+        self._ta_store = ta_store
+        self._ta_enabled = ta_enabled
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
@@ -237,6 +271,7 @@ class StrategyBot:
             strategy_prompt=self.strategy_prompt,
             market_data=_format_market_data(prices),
             calendar_context=self._calendar_context(),
+            ta_context=self._ta_context(),
             portfolio_state=_format_portfolio(ledger),
             recent_decisions=self._format_recent() or "No recent decisions.",
         )
@@ -355,6 +390,14 @@ class StrategyBot:
         return _build_calendar_context(
             calendar_store=self._calendar_store,
             calendar_enabled=self._calendar_enabled,
+            symbols=set(self.symbols),
+            bot_id=self.bot_id,
+        )
+
+    def _ta_context(self) -> str:
+        return _build_ta_context(
+            ta_store=self._ta_store,
+            ta_enabled=self._ta_enabled,
             symbols=set(self.symbols),
             bot_id=self.bot_id,
         )
