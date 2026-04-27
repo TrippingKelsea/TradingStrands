@@ -622,6 +622,65 @@ class TradingStrandsStack(cdk.Stack):
             resources=["*"],
         ))
 
+        # -- Risk Agent (per-org periodic LLM reviewer) ----------------------
+        #
+        # Invoked per-org on a weekly schedule. Reads the fleet of ledgers,
+        # writes recommendations.md into the risk agent's memory prefix.
+        # Does NOT gate trades; recommendations are orgadmin-consumable.
+        risk_agent_fn = lambda_.DockerImageFunction(
+            self,
+            "RiskAgentFunction",
+            function_name="trading-strands-risk-agent",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=["trading_strands.risk_agent.lambda_handler.handler"],
+            ),
+            memory_size=1024,
+            timeout=cdk.Duration.minutes(5),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                "RISK_AGENT_MODEL_ID": "us.anthropic.claude-sonnet-4-6",
+            },
+        )
+        cdk.Tags.of(risk_agent_fn).add("Component", "risk-agent")
+        table.grant_read_data(risk_agent_fn)
+        agent_memory_bucket.grant_read_write(risk_agent_fn)
+        risk_agent_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+            ],
+            resources=["*"],
+        ))
+
+        # Weekly schedule: Sunday 10:00 UTC. A day after Self-Critique so
+        # the critique's lessons are visible when the Risk Agent runs (it
+        # doesn't read them directly today, but the temporal ordering
+        # matches how operators naturally think about the review cadence).
+        #
+        # Disabled on first deploy; flip to enabled=True once we've seen
+        # one clean manual invocation and verified recommendations.md lands.
+        risk_rule = events.Rule(
+            self,
+            "RiskAgentWeeklySchedule",
+            description=(
+                "Sunday 10:00 UTC — per-org Risk Agent reviewer. "
+                "A companion fan-out Lambda enumerates orgs (TODO)."
+            ),
+            schedule=events.Schedule.cron(
+                minute="0", hour="10",
+                week_day="SUN",
+            ),
+            enabled=False,
+        )
+        # No target yet — the org-enumeration fan-out lands when the
+        # first customer org exists and we actually need the cadence.
+        # Today the single system org is invoked manually via
+        # `aws lambda invoke --payload '{"org_id":"<sys-org>"}'`.
+        _ = risk_rule  # rule persisted for later target attachment
+
         # -- BotProvisioner (weekend fan-out) --------------------------------
         #
         # Enumerates active strategies and invokes the Self-Critique function
