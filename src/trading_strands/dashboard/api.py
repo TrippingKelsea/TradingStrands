@@ -1416,6 +1416,46 @@ def _get_cloudwatch_client() -> Any:
     return _cloudwatch_client_cache
 
 
+# ── Deploy markers ────────────────────────────────────────────────────
+#
+# The dashboard overlays vertical dashed lines at deploy times so a
+# latency regression can be correlated with the commit that caused
+# it. The source of truth for deploys is the GitHub Actions run log,
+# which the dashboard pod doesn't have direct access to; instead we
+# stash the build's commit SHA + deploy time in an env var at image
+# build time (`DEPLOY_COMMIT`, `DEPLOY_TIMESTAMP`) and surface that.
+# Multiple deploy markers will come online once the CI pipeline
+# writes a DEPLOY#<ts> DDB row — handled in a follow-up commit.
+
+
+@app.get("/api/deploys/recent")
+async def deploys_recent(request: Request) -> dict[str, Any]:
+    """Return recent deploy markers for chart overlays.
+
+    v0: one synthetic marker per image build from DEPLOY_COMMIT +
+    DEPLOY_TIMESTAMP env vars. v1 reads DEPLOY#<ts> rows from DDB.
+    Empty list is a valid response — the client renders charts
+    without markers rather than erroring out.
+    """
+
+    _ = _get_principal(request)
+
+    import time as _time
+
+    deploys: list[dict[str, Any]] = []
+    ts_env = os.environ.get("DEPLOY_TIMESTAMP", "")
+    sha = os.environ.get("DEPLOY_COMMIT", "")
+    if ts_env:
+        try:
+            ts = int(ts_env)
+            if ts <= 0 or ts > int(_time.time()) + 3600:
+                raise ValueError("unreasonable deploy timestamp")
+            deploys.append({"ts": ts, "commit": sha[:7] if sha else ""})
+        except ValueError:
+            pass
+    return {"deploys": deploys}
+
+
 # ── Generic metric query ──────────────────────────────────────────────
 #
 # `/api/metrics/query` wraps CloudWatch GetMetricData behind a single

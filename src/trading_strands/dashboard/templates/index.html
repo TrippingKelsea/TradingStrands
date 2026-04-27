@@ -1353,6 +1353,7 @@
           </div>
         </div>
 
+        <div id="metric-charts-panel" style="margin-top:12px;"></div>
         <div id="cost-panel" style="margin-top:12px;"></div>
 
         <div style="text-align:right;padding:8px 0;font-size:0.7rem;color:var(--dim)">
@@ -1362,10 +1363,167 @@
       // Costs are sysadmin-only. The endpoint returns 403 for other users,
       // which we surface as a muted notice rather than an error.
       loadCosts();
+      // Metric charts pull from /api/metrics/query (EMF → CloudWatch).
+      // Last 1h, 1-minute buckets. Failures render inline as a muted
+      // placeholder rather than an error — same pattern as other
+      // optional telemetry panels.
+      loadMetricCharts();
     } catch(e) {
       container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:16px;">Failed to load telemetry: ' + e.message + '</div>';
     }
   }
+
+  // ── Metric charts (EMF-backed) ───────────────────────────────────────
+
+  async function _queryMetric(metric_name, stat, dimensions) {
+    try {
+      const resp = await fetch('/api/metrics/query', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          metric_name: metric_name,
+          dimensions: dimensions || {},
+          stat: stat || 'Average',
+          period_seconds: 60,
+          lookback_seconds: 3600,
+        }),
+      });
+      if (!resp.ok) return null;
+      return await resp.json();
+    } catch(e) {
+      return null;
+    }
+  }
+
+  // Pull recent deploy timestamps from the GitHub Actions runs so we
+  // can overlay them as vertical markers on the charts. Best-effort —
+  // if the endpoint doesn't exist or the fetch fails we render
+  // without markers rather than failing the whole panel.
+  async function _fetchDeployMarkers() {
+    try {
+      const resp = await fetch('/api/deploys/recent');
+      if (!resp.ok) return [];
+      const body = await resp.json();
+      return body.deploys || [];
+    } catch(e) { return []; }
+  }
+
+  function _drawLineChart(canvas, datapoints, opts) {
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.clientWidth, H = canvas.clientHeight;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    if (!datapoints || datapoints.length === 0) {
+      ctx.fillStyle = 'rgba(180,180,180,0.5)';
+      ctx.font = '11px system-ui, sans-serif';
+      ctx.fillText('No data in window', 8, H / 2);
+      return;
+    }
+
+    const xs = datapoints.map(d => d.ts);
+    const ys = datapoints.map(d => d.value);
+    const xmin = Math.min(...xs), xmax = Math.max(...xs);
+    const ymin = Math.min(...ys, 0), ymax = Math.max(...ys, 0.001);
+    const pad = 20;
+    const x = t => pad + (t - xmin) / Math.max(1, xmax - xmin) * (W - pad * 2);
+    const y = v => H - pad - (v - ymin) / Math.max(0.001, ymax - ymin) * (H - pad * 2);
+
+    // Axes (minimal).
+    ctx.strokeStyle = 'rgba(140,140,140,0.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, H - pad); ctx.lineTo(W - pad, H - pad);
+    ctx.moveTo(pad, pad); ctx.lineTo(pad, H - pad);
+    ctx.stroke();
+
+    // Deploy markers (vertical lines, dashed).
+    if (opts && opts.deploys && opts.deploys.length) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(220,160,40,0.55)';
+      ctx.setLineDash([4, 4]);
+      for (const d of opts.deploys) {
+        if (d.ts < xmin || d.ts > xmax) continue;
+        const xd = x(d.ts);
+        ctx.beginPath(); ctx.moveTo(xd, pad); ctx.lineTo(xd, H - pad);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // Line.
+    ctx.strokeStyle = (opts && opts.color) || '#4aa3ff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    datapoints.forEach((d, i) => {
+      const px = x(d.ts), py = y(d.value);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+
+    // Max/current labels.
+    ctx.fillStyle = 'rgba(200,200,200,0.75)';
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.fillText('max: ' + ymax.toFixed(1), W - 70, pad + 10);
+    ctx.fillText('now: ' + ys[ys.length - 1].toFixed(1), W - 70, pad + 22);
+    ctx.fillText(opts && opts.unit || '', pad + 2, pad + 10);
+  }
+
+  async function loadMetricCharts() {
+    const panel = $('metric-charts-panel');
+    if (!panel) return;
+    panel.innerHTML = `<div class="telem-service telem-full">
+      <h3>Metric charts (EMF, last 1h)
+        <span class="badge badge-active" style="font-size:0.65rem;">
+          CloudWatch
+        </span>
+      </h3>
+      <div style="font-size:0.7rem;color:var(--dim);margin-bottom:8px;">
+        Decision latency + broker intent throughput. Deploy markers
+        (vertical amber dashes) overlay CI pushes so a latency regression
+        lines up with the deploy that caused it.
+      </div>
+      <div class="grid" style="gap:12px;grid-template-columns:1fr 1fr;">
+        <div>
+          <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
+            agent.decision.latency_ms — strategy agents, p95
+          </div>
+          <canvas id="chart-latency" style="width:100%;height:140px;"></canvas>
+        </div>
+        <div>
+          <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
+            broker.intent.received.count — all orgs, per min
+          </div>
+          <canvas id="chart-intent" style="width:100%;height:140px;"></canvas>
+        </div>
+      </div>
+    </div>`;
+
+    const [latency, intent, deploys] = await Promise.all([
+      _queryMetric(
+        'agent.decision.latency_ms', 'p95',
+        {agent_type: 'strategy'},
+      ),
+      _queryMetric(
+        'broker.intent.received.count', 'Sum', {},
+      ),
+      _fetchDeployMarkers(),
+    ]);
+
+    _drawLineChart(
+      $('chart-latency'),
+      (latency && latency.datapoints) || [],
+      {color: '#5fd18a', unit: 'ms', deploys: deploys},
+    );
+    _drawLineChart(
+      $('chart-intent'),
+      (intent && intent.datapoints) || [],
+      {color: '#4aa3ff', unit: 'count/min', deploys: deploys},
+    );
+  }
+  window.loadMetricCharts = loadMetricCharts;
 
   async function loadCosts() {
     const panel = $('cost-panel');

@@ -90,12 +90,19 @@ jobs:
         working-directory: infra
         env:
           ALLOWED_CIDR: ${{ secrets.ALLOWED_CIDR }}
+          DEPLOY_COMMIT: ${{ github.sha }}
         run: |
           pip install -r requirements.txt
+          # Stamp the dashboard container with the commit SHA + deploy
+          # timestamp so the metric-charts panel can overlay deploy
+          # markers. Read back in api.py via /api/deploys/recent.
+          DEPLOY_TIMESTAMP="$(date +%s)"
           cdk deploy --require-approval never \
             -c domain=app.tradingstrands.xyz \
             -c zone_name=tradingstrands.xyz \
             -c zone_id=Z04993921Q8ZI5T322JJX \
+            -c "deploy_commit=${DEPLOY_COMMIT}" \
+            -c "deploy_timestamp=${DEPLOY_TIMESTAMP}" \
             --parameters AllowedCidr="${ALLOWED_CIDR}"
 
       - name: Seed Cognito client secret

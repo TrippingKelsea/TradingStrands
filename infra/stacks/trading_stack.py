@@ -484,6 +484,17 @@ class TradingStrandsStack(cdk.Stack):
             log_group_name="/ecs/trading-strands/dashboard",
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
+        # DEPLOY_COMMIT + DEPLOY_TIMESTAMP feed the dashboard's deploy-
+        # marker overlay on metric charts. Pulled from CDK context so
+        # CI can pass --context deploy_commit=<sha> without code
+        # changes; missing/empty values produce an empty markers list,
+        # which the client already handles gracefully.
+        deploy_commit = (
+            self.node.try_get_context("deploy_commit") or ""
+        )
+        deploy_timestamp = (
+            self.node.try_get_context("deploy_timestamp") or ""
+        )
         dashboard_task_def.add_container(
             "DashboardContainer",
             image=ecs.ContainerImage.from_ecr_repository(repository, tag="dashboard"),
@@ -493,6 +504,8 @@ class TradingStrandsStack(cdk.Stack):
                 "COGNITO_CLIENT_ID": user_pool_client.user_pool_client_id,
                 "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
                 "ECS_CLUSTER": cluster.cluster_name,
+                "DEPLOY_COMMIT": str(deploy_commit),
+                "DEPLOY_TIMESTAMP": str(deploy_timestamp),
             },
             secrets={
                 "COGNITO_CLIENT_SECRET": ecs.Secret.from_secrets_manager(

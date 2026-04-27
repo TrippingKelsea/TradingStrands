@@ -3059,6 +3059,72 @@ def test_metrics_query_requires_auth() -> None:
     assert resp.status_code in (401, 403)
 
 
+# ── /api/deploys/recent ────────────────────────────────────────────────
+
+
+def test_deploys_recent_returns_marker_when_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With DEPLOY_COMMIT + DEPLOY_TIMESTAMP set at container start,
+    the endpoint returns one marker. The UI overlays it on metric
+    charts so a regression lines up with the causing deploy."""
+
+    import time as _time
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        monkeypatch.setenv("DEPLOY_COMMIT", "abc123def456" * 3)
+        monkeypatch.setenv("DEPLOY_TIMESTAMP", str(int(_time.time())))
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/deploys/recent")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["deploys"]) == 1
+        assert body["deploys"][0]["commit"] == "abc123d"
+
+
+def test_deploys_recent_empty_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        monkeypatch.delenv("DEPLOY_COMMIT", raising=False)
+        monkeypatch.delenv("DEPLOY_TIMESTAMP", raising=False)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/deploys/recent")
+        assert resp.status_code == 200
+        assert resp.json() == {"deploys": []}
+
+
+def test_deploys_recent_rejects_garbage_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed DEPLOY_TIMESTAMP must not 500 — render as 'no
+    markers' and move on. CI misconfiguration shouldn't break the
+    dashboard panel."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        monkeypatch.setenv("DEPLOY_COMMIT", "abc")
+        monkeypatch.setenv("DEPLOY_TIMESTAMP", "not-a-number")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/deploys/recent")
+        assert resp.status_code == 200
+        assert resp.json()["deploys"] == []
+
+
 def test_update_strategy_can_modify_tools_and_skills() -> None:
     with mock_aws():
         from trading_strands.strategies_store.store import StrategyStore
