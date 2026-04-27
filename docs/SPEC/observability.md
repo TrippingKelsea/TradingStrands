@@ -142,7 +142,81 @@ Phase 3 (far future):
 
 - **Decision replay**: pick a past decision, load the A2A trace + memory file + market data refs, render a timeline.
 
-### Implementation
+## Per-strategy detail page
+
+Distinct from the fleet-level graphs above. Clicking a strategy card on
+the Strategies tab opens a **detail view** for that specific bot. The
+existing edit form is reachable from the detail view via an explicit
+"Edit strategy" button — the first click on a card is no longer a
+direct entry into the edit form.
+
+### Tabs
+
+1. **Overview** — the operator's default "what is this bot doing?" view.
+   - Header: status, service state, last heartbeat age, `current_activity`
+     from the heartbeat payload, active model, watched symbols, current
+     equity + realized PnL.
+   - **Thought log** (primary panel): rendered agent memory markdown
+     for the selected date range, newest-first. `[MARKETDATA#...]`,
+     `[LEDGER#...]`, and `[DECISION#...]` pointers render as inline
+     references; a future iteration may make them clickable.
+   - Recent decisions: one row per decision (action, symbol, quantity,
+     rationale, latency, token cost). Derived from the memory file's
+     decision lines to avoid a second persistence hop.
+   - Tool calls: recent `tool.call.count` events with tool name,
+     symbol, outcome (`cache_hit`, `quota_exceeded`, `ok`, etc.).
+     Pulled via CloudWatch Logs Insights, scoped to this bot.
+   - Open positions + ledger summary.
+
+2. **Prompt** — read-only view of the last prompt the agent saw.
+   - Full rendered **system prompt** (base framing + composed skills +
+     strategy markdown).
+   - Full rendered **user prompt** (the `_DECISION_PROMPT_TEMPLATE`
+     output, i.e., market data + calendar + TA + portfolio state +
+     recent decisions block as it was supplied to the LLM).
+   - A "last rendered at `<ts>`" line so operators know this is a
+     snapshot, not static.
+   - Written by `StrategyBot.decide` each tick as a single DDB row
+     `PROMPTSNAPSHOT#{bot_id}` (overwritten in place). Best-effort —
+     a prompt-snapshot write failure never interrupts the decide path.
+
+3. **Self-critique** — existing data, collected here for this bot:
+   - Lessons stream from `lessons.md`.
+   - Proposals list (pending / applied / rejected) with apply + reject
+     buttons gated on the existing UPDATE authz.
+
+### Time range
+
+A single date-range picker at the top of the Overview tab drives
+thought log + decisions + tool calls. Default: **today UTC**. No
+presets — operators type the range they need. Prompt tab has no range
+control (it's always the current snapshot); Self-critique tab shows
+full history.
+
+### Backend endpoints
+
+- `GET /api/strategies/{sid}/memory?start=YYYY-MM-DD&end=YYYY-MM-DD`
+  — returns raw memory markdown joined for the day range. Authz: READ
+  on the Strategy resource.
+- `GET /api/strategies/{sid}/tool-calls?start=...&end=...` — queries
+  CloudWatch Logs Insights over the trading log group filtered on
+  `strategy_id = <bot_id>`. Authz: READ.
+- `GET /api/strategies/{sid}/prompt-snapshot` — one DDB read.
+  Authz: READ.
+
+Decisions are derived client-side from the memory markdown; no
+dedicated endpoint. Open positions come from the existing ledger
+summary path.
+
+### Non-goals for v1 of this page
+
+- Decision replay (Phase 3 above) — out of scope; the data pointers in
+  the thought log are enough to reconstruct manually.
+- Streaming updates. Page fetches on load + a manual refresh button.
+  SSE can come later if the view becomes the operator's always-on
+  surface.
+
+## Metric query API
 
 Dashboard calls `/api/metrics/query` which wraps CloudWatch `GetMetricData`. Query parameters:
 
