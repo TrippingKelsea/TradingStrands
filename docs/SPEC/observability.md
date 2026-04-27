@@ -170,6 +170,16 @@ Access to the audit log is sysadmin-only in v1. Eventual plan: scoped audit view
 
 ## Alerting
 
+> **Status (2026-04-27):** alarms are defined in CDK and the dashboard
+> surfaces their state on the Supervisor panel, but `actions_enabled=False`
+> on all three. SNS wiring is deferred pending an operator decision on the
+> alert destination (email vs PagerDuty vs Slack webhook). The dashboard's
+> `/api/supervisor/alarms` endpoint flags `actions_enabled=False` so a
+> silent-but-firing alarm is visible on the UI — that's the v0 mitigation
+> until a destination is chosen. When the destination is picked, the CDK
+> stack gets an `alarm_action_topic` parameter and each MetricAlarm gets
+> `.add_alarm_action(topic)`; nothing else in the code path changes.
+
 Minimum alerts that page sysadmin (via SNS → future integration with PagerDuty or equivalent):
 
 - Broker Agent down for >2 minutes
