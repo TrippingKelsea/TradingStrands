@@ -44,10 +44,19 @@ def _make_filings_factory() -> ToolFactory:
     return factory
 
 
+def _make_social_factory() -> ToolFactory:
+    def factory(ctx: ToolContext) -> Any:
+        from trading_strands.tools.social import make_social_tool
+        return make_social_tool(ctx, daily_quota=50)
+
+    return factory
+
+
 def build_default_registry() -> ToolRegistry:
     """Return a ToolRegistry pre-populated with the ship-time tools."""
 
     reg = ToolRegistry()
     reg.register("news", _make_news_factory())
     reg.register("filings", _make_filings_factory())
+    reg.register("social", _make_social_factory())
     return reg
