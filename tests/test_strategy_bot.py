@@ -106,6 +106,63 @@ class TestBotDecision:
         assert decision.quantity == "10"
 
 
+class TestMemoryLineFormat:
+    """_format_memory_line: per docs/SPEC/agent_memory.md §"Anti-
+    confabulation rule" every memory line must carry a MARKETDATA#
+    pointer so a reviewer can dereference the claim."""
+
+    def _fake_gmtime(
+        self, hour: int = 15, minute: int = 47, second: int = 3,
+    ) -> object:
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            tm_year=2026, tm_mon=4, tm_mday=26,
+            tm_hour=hour, tm_min=minute, tm_sec=second,
+        )
+
+    def test_includes_marketdata_pointer(self) -> None:
+        from trading_strands.strategies.bot import _format_memory_line
+
+        decision = BotDecision(
+            action="buy", symbol="SPY", quantity="10",
+            rationale="RSI cross on 15m",
+        )
+        ledger = Ledger(starting_capital=Decimal("10000"))
+        line = _format_memory_line(
+            decision,
+            prices={"SPY": Decimal("521.43")},
+            ledger=ledger,
+            now_gmtime=self._fake_gmtime(hour=15, minute=47, second=3),
+        )
+        # MARKETDATA pointer with hourly bucket — auditors dereference
+        # this to confirm the price and reasoning actually line up
+        # with observed market state at the tick.
+        assert "[MARKETDATA#SPY#2026042615]" in line
+        assert "BUY SPY x10" in line
+        assert "521.43" in line
+        assert "15:47:03Z" in line
+
+    def test_missing_price_still_has_pointer(self) -> None:
+        """If the symbol isn't in the price dict the line still carries
+        a pointer — the reviewer dereferencing it will see "no data for
+        this bucket" and flag the confabulation, which is the intended
+        audit signal. Dropping the pointer would hide the gap."""
+
+        from trading_strands.strategies.bot import _format_memory_line
+
+        decision = BotDecision(
+            action="noop", symbol="TSLA", quantity="0",
+            rationale="stand down",
+        )
+        ledger = Ledger(starting_capital=Decimal("10000"))
+        line = _format_memory_line(
+            decision, prices={}, ledger=ledger,
+            now_gmtime=self._fake_gmtime(),
+        )
+        assert "[MARKETDATA#TSLA#2026042615]" in line
+        assert "~?" in line
+
+
 class TestCalendarContext:
     """_build_calendar_context: the four cases documented above the
     function. These exercise the decision-prompt injection path

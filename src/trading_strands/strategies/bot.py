@@ -131,6 +131,37 @@ def _map_action(action_str: str) -> IntentAction:
     return mapping.get(action_str.lower(), IntentAction.NOOP)
 
 
+def _format_memory_line(
+    decision: BotDecision,
+    prices: dict[str, Decimal],
+    ledger: Ledger,
+    now_gmtime: Any,
+) -> str:
+    """Format a single memory-append line.
+
+    Module-level so tests can verify the line format + the anti-
+    confabulation MARKETDATA# pointer without constructing a full
+    StrategyBot (which pulls in Strands / Bedrock). `now_gmtime` is
+    injected so tests can fix the timestamp.
+    """
+
+    ts_str = (
+        f"{now_gmtime.tm_hour:02d}:{now_gmtime.tm_min:02d}:"
+        f"{now_gmtime.tm_sec:02d}Z"
+    )
+    hourly_bucket = (
+        f"{now_gmtime.tm_year:04d}{now_gmtime.tm_mon:02d}"
+        f"{now_gmtime.tm_mday:02d}{now_gmtime.tm_hour:02d}"
+    )
+    price_ref = prices.get(decision.symbol, "?")
+    marketdata_ref = f"[MARKETDATA#{decision.symbol}#{hourly_bucket}]"
+    return (
+        f"- {ts_str} {decision.action.upper()} {decision.symbol} "
+        f"x{decision.quantity} @ ~{price_ref} {marketdata_ref} "
+        f"(equity ${ledger.equity}). {decision.rationale}"
+    )
+
+
 def _build_ta_context(
     ta_store: Any | None,
     ta_enabled: bool,
@@ -262,10 +293,23 @@ class StrategyBot:
         # between the base and the strategy body. When no skills are
         # supplied, the bot falls back to the v0 behavior of using
         # the strategy_prompt as the whole prompt body.
+        # Anti-confabulation clause (docs/SPEC/agent_memory.md §"Anti-
+        # confabulation rule"): every concrete market-state claim the
+        # agent makes in its rationale or memory must carry a data
+        # pointer (MARKETDATA#/LEDGER#/DECISION#). Keeps weekly review
+        # + chat trustworthy instead of plausible-sounding fiction.
         base_prompt = (
             "You are a disciplined trading bot. Follow your strategy rules "
             "precisely. Never deviate from the strategy. Be conservative "
-            "when uncertain — prefer to hold rather than make a bad trade."
+            "when uncertain — prefer to hold rather than make a bad trade.\n\n"
+            "ANTI-CONFABULATION: when your rationale references a concrete "
+            "market state (a price, a level, a range, a fill), you must "
+            "either (a) cite the data pointer it came from (e.g. "
+            "[MARKETDATA#SPY#2026042615] for an hourly bucket, "
+            "[LEDGER#<bot>#<yyyymmddhhmm>], [DECISION#<bot>#<ts>]) or "
+            "(b) say explicitly you don't have the data. Never invent "
+            "specifics you don't see in the inputs above. 'Looks choppy' "
+            "without a reference is worse than 'I don't have the data'."
         )
         if skills:
             from trading_strands.skills_store.store import (
@@ -411,21 +455,19 @@ class StrategyBot:
         Failures are swallowed — memory is useful but the tick loop must
         never crash on S3 issues. If writes fail repeatedly that'll
         surface in the health check (v1).
+
+        Each line includes a [MARKETDATA#<symbol>#<yyyymmddhh>] pointer
+        per docs/SPEC/agent_memory.md §"Anti-confabulation rule" — the
+        hourly bucket that contains this tick's observed price. A weekly
+        reviewer can dereference it to audit the claim instead of
+        trusting the agent's prose.
         """
 
         if self._memory_store is None:
             return
         import time as _time
 
-        ts = _time.gmtime()
-        ts_str = f"{ts.tm_hour:02d}:{ts.tm_min:02d}:{ts.tm_sec:02d}Z"
-        # Price reference; v1 will include the MARKETDATA# bucket pointer.
-        price_ref = prices.get(decision.symbol, "?")
-        line = (
-            f"- {ts_str} {decision.action.upper()} {decision.symbol} "
-            f"x{decision.quantity} @ ~{price_ref} "
-            f"(equity ${ledger.equity}). {decision.rationale}"
-        )
+        line = _format_memory_line(decision, prices, ledger, _time.gmtime())
         try:
             self._memory_store.append_to_today(line)
         except Exception:
