@@ -389,6 +389,18 @@ class TradingStrandsStack(cdk.Stack):
                 },
             )
         )
+        # Dashboard reads CloudWatch alarm state for the supervisor panel
+        # so operators can see whether the halt/missing-agent alarms are
+        # currently firing. DescribeAlarms is a list API — AWS doesn't
+        # support resource-level scoping for it; we allow * and rely on
+        # the dashboard-side allowlist of trading-strands-* alarm names
+        # to filter what's actually returned to the UI.
+        dashboard_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["cloudwatch:DescribeAlarms"],
+                resources=["*"],
+            )
+        )
         # Dashboard writes per-org Alpaca credentials to Secrets Manager.
         # Deliberately scoped to /org/*/alpaca — the dashboard never needs
         # to touch the global trading-strands/alpaca secret, which remains

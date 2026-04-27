@@ -168,6 +168,9 @@
       orchestrator's self-reported status below — mismatches are
       diagnostic.
     </div>
+    <div id="supervisor-alarms-content" style="margin-bottom:12px;">
+      <div style="color:var(--dim);font-size:0.85rem;">Loading alarm state…</div>
+    </div>
     <div id="supervisor-agents-content">
       <div style="color:var(--dim);font-size:0.85rem;">Loading supervisor view…</div>
     </div>
@@ -802,9 +805,70 @@
 
   window.loadSupervisorAgents = loadSupervisorAgents;
 
+  async function loadSupervisorAlarms() {
+    const el = $('supervisor-alarms-content');
+    if (!el) return;
+
+    try {
+      const resp = await fetch('/api/supervisor/alarms');
+      if (resp.status === 503) {
+        el.innerHTML = '<div style="color:var(--amber,#d4a017);font-size:0.78rem;">Alarm state unavailable (check dashboard IAM for cloudwatch:DescribeAlarms).</div>';
+        return;
+      }
+      if (!resp.ok) {
+        el.innerHTML = '<div style="color:var(--red);font-size:0.78rem;">Failed to load alarm state (' + resp.status + ').</div>';
+        return;
+      }
+      const body = await resp.json();
+
+      if (!body.alarms || body.alarms.length === 0) {
+        el.innerHTML = '<div style="color:var(--dim);font-size:0.78rem;">No stack alarms configured yet.</div>';
+        return;
+      }
+
+      const stateStyle = {
+        OK: 'color:var(--green,#3a9d3a);',
+        ALARM: 'color:var(--red,#c93c3c);font-weight:bold;',
+        INSUFFICIENT_DATA: 'color:var(--dim);',
+      };
+
+      let html = '<div style="font-size:0.7rem;color:var(--dim);text-transform:uppercase;margin-bottom:4px;">CloudWatch alarms</div>';
+      html += '<div style="display:grid;grid-template-columns:1fr auto auto;gap:6px 16px;font-size:0.78rem;align-items:center;">';
+      body.alarms.forEach(a => {
+        const style = stateStyle[a.state] || '';
+        const silentHint = a.actions_enabled
+          ? ''
+          : ' <span title="actions_enabled=False — alarm is silent, will not notify" style="color:var(--amber,#d4a017);">⚠ silent</span>';
+        html += '<div style="font-family:monospace;">' + a.name + '</div>';
+        html += '<div style="' + style + '">' + a.state + silentHint + '</div>';
+        html += '<div style="font-size:0.7rem;color:var(--dim);">' +
+          (a.last_change ? a.last_change.slice(0, 19).replace('T', ' ') : '') +
+          '</div>';
+      });
+      html += '</div>';
+
+      // Collapsible-looking footer hint about silent alarms, shown only
+      // if at least one alarm is actions-disabled.
+      const silentCount = body.alarms.filter(a => !a.actions_enabled).length;
+      if (silentCount > 0) {
+        html += '<div style="margin-top:6px;font-size:0.7rem;color:var(--amber,#d4a017);">';
+        html += silentCount + ' alarm' + (silentCount > 1 ? 's' : '') +
+          ' will not notify on trigger — wire an SNS target and set actions_enabled=True to arm.';
+        html += '</div>';
+      }
+
+      el.innerHTML = html;
+    } catch(e) {
+      el.innerHTML = '<div style="color:var(--red);font-size:0.78rem;">Network error loading alarm state.</div>';
+    }
+  }
+
+  window.loadSupervisorAlarms = loadSupervisorAlarms;
+
   async function loadAgents() {
     // Supervisor view renders first — independent of the orchestrator
     // snapshot, so a broken orchestrator still shows heartbeat data.
+    loadSupervisorAlarms();
     loadSupervisorAgents();
 
     const container = $('agents-content');

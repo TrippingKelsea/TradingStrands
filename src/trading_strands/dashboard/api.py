@@ -1164,6 +1164,72 @@ async def unhalt_trading(
 # ── Platform Supervisor (external agent-health view) ───────────────────
 
 
+_cloudwatch_client_cache: Any = None
+
+# Alarms defined by this stack's CDK. Kept as an explicit allowlist so
+# unrelated account-level alarms (other teams, other stacks) don't leak
+# into the dashboard's supervisor panel.
+_TRADING_STRANDS_ALARM_NAMES = frozenset({
+    "trading-strands-system-halt",
+    "trading-strands-org-halt",
+    "trading-strands-missing-agents",
+})
+
+
+def _get_cloudwatch_client() -> Any:
+    """Lazily construct the CW client. Cached so tests can patch this
+    helper rather than boto3 globally."""
+
+    global _cloudwatch_client_cache
+    if _cloudwatch_client_cache is None:
+        _cloudwatch_client_cache = boto3.client("cloudwatch")
+    return _cloudwatch_client_cache
+
+
+@app.get("/api/supervisor/alarms")
+async def supervisor_alarms(request: Request) -> dict[str, Any]:
+    """Return the state of the stack's CloudWatch alarms.
+
+    Operators use this to confirm alarm wiring at a glance: an alarm
+    in ALARM state with actions_enabled=False is a silent alarm,
+    which is exactly what we don't want once SNS is wired. Surfaces
+    both state and actions_enabled so the UI can call that out.
+    """
+
+    _ = _get_principal(request)
+
+    cw = _get_cloudwatch_client()
+    try:
+        resp = cw.describe_alarms(MaxRecords=100)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"alarm state unavailable: {exc}",
+        ) from exc
+
+    metric_alarms = resp.get("MetricAlarms", []) or []
+    filtered = [
+        a for a in metric_alarms
+        if a.get("AlarmName") in _TRADING_STRANDS_ALARM_NAMES
+    ]
+    alarms = [
+        {
+            "name": a.get("AlarmName", ""),
+            "state": a.get("StateValue", "INSUFFICIENT_DATA"),
+            "reason": a.get("StateReason", ""),
+            "actions_enabled": bool(a.get("ActionsEnabled", False)),
+            "last_change": str(a.get("StateUpdatedTimestamp", "")),
+        }
+        for a in filtered
+    ]
+    alarms.sort(key=lambda a: a["name"])
+    worst_is_alarm = any(a["state"] == "ALARM" for a in alarms)
+    return {
+        "ok": not worst_is_alarm,
+        "alarms": alarms,
+    }
+
+
 @app.get("/api/supervisor/agents")
 async def supervisor_agents(request: Request) -> dict[str, Any]:
     """Return the Platform Supervisor's live view of agent health.

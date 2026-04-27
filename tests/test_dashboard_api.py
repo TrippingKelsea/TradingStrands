@@ -2182,3 +2182,197 @@ def test_login_page_no_notice_when_fresh() -> None:
         resp = client.get("/login")
         assert resp.status_code == 200
         assert "Your session expired" not in resp.text
+
+
+# ── Supervisor alarms endpoint ──────────────────────────────────────
+
+
+def _alarm_item(
+    name: str, state: str = "OK",
+    reason: str = "", actions_enabled: bool = False,
+    last_change: str = "2026-04-27T00:00:00+00:00",
+) -> dict[str, Any]:
+    """Match the shape cloudwatch.describe_alarms returns."""
+
+    return {
+        "AlarmName": name,
+        "StateValue": state,
+        "StateReason": reason,
+        "ActionsEnabled": actions_enabled,
+        "StateUpdatedTimestamp": last_change,
+    }
+
+
+def test_supervisor_alarms_returns_three_expected() -> None:
+    """Happy path: the three alarms we created in CDK show up in the
+    response, states pulled through verbatim."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        cw_mock = MagicMock()
+        cw_mock.describe_alarms.return_value = {
+            "MetricAlarms": [
+                _alarm_item("trading-strands-system-halt", state="OK"),
+                _alarm_item(
+                    "trading-strands-org-halt", state="ALARM",
+                    reason="Threshold crossed: 1 out of 1 > 1.0",
+                ),
+                _alarm_item(
+                    "trading-strands-missing-agents",
+                    state="INSUFFICIENT_DATA",
+                ),
+            ],
+        }
+
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=cw_mock,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.get("/api/supervisor/alarms")
+            assert resp.status_code == 200
+            body = resp.json()
+
+        assert len(body["alarms"]) == 3
+        states = {a["name"]: a["state"] for a in body["alarms"]}
+        assert states == {
+            "trading-strands-system-halt": "OK",
+            "trading-strands-org-halt": "ALARM",
+            "trading-strands-missing-agents": "INSUFFICIENT_DATA",
+        }
+        # All three have actions_enabled=False per current CDK — the
+        # endpoint should carry that through so UI can warn.
+        assert all(a["actions_enabled"] is False for a in body["alarms"])
+
+
+def test_supervisor_alarms_ok_flag_reflects_worst_state() -> None:
+    """Any ALARM = ok:False. OK alarms alone = ok:True. Helps the UI
+    render a single summary badge without re-walking the list."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        all_ok = MagicMock()
+        all_ok.describe_alarms.return_value = {
+            "MetricAlarms": [
+                _alarm_item("trading-strands-system-halt"),
+                _alarm_item("trading-strands-org-halt"),
+            ],
+        }
+
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=all_ok,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            assert client.get("/api/supervisor/alarms").json()["ok"] is True
+
+        one_alarm = MagicMock()
+        one_alarm.describe_alarms.return_value = {
+            "MetricAlarms": [
+                _alarm_item("trading-strands-system-halt"),
+                _alarm_item("trading-strands-org-halt", state="ALARM"),
+            ],
+        }
+
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=one_alarm,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            assert client.get("/api/supervisor/alarms").json()["ok"] is False
+
+
+def test_supervisor_alarms_empty_when_none_configured() -> None:
+    """Fresh environment — alarms not yet deployed. Return empty list,
+    not an error. UI shows 'no alarms configured'."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        cw = MagicMock()
+        cw.describe_alarms.return_value = {"MetricAlarms": []}
+
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=cw,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.get("/api/supervisor/alarms")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["alarms"] == []
+            assert body["ok"] is True
+
+
+def test_supervisor_alarms_cw_failure_returns_503() -> None:
+    """CW API error shouldn't crash the dashboard — return 503 so the
+    UI can render 'alarm state unavailable' rather than the generic
+    500 and a blank panel."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        cw = MagicMock()
+        cw.describe_alarms.side_effect = RuntimeError("AccessDenied")
+
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=cw,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.get("/api/supervisor/alarms")
+            assert resp.status_code == 503
+            assert "alarm" in resp.json().get("detail", "").lower()
+
+
+def test_supervisor_alarms_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/supervisor/alarms")
+        assert resp.status_code == 401
+
+
+def test_supervisor_alarms_filters_to_our_alarms_only() -> None:
+    """If the AWS account has other CW alarms unrelated to this stack,
+    they must not leak into the response. Filter on the name prefix."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        cw = MagicMock()
+        cw.describe_alarms.return_value = {
+            "MetricAlarms": [
+                _alarm_item("trading-strands-system-halt"),
+                _alarm_item("some-other-teams-alarm"),
+                _alarm_item("trading-strands-missing-agents"),
+            ],
+        }
+
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=cw,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            body = client.get("/api/supervisor/alarms").json()
+
+        names = {a["name"] for a in body["alarms"]}
+        assert "some-other-teams-alarm" not in names
+        assert names == {
+            "trading-strands-system-halt",
+            "trading-strands-missing-agents",
+        }
