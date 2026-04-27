@@ -2376,3 +2376,65 @@ def test_supervisor_alarms_filters_to_our_alarms_only() -> None:
             "trading-strands-system-halt",
             "trading-strands-missing-agents",
         }
+
+
+# ── Halt events endpoint ────────────────────────────────────────────
+
+
+def test_halt_events_returns_newest_first() -> None:
+    import time as _time
+
+    with mock_aws():
+        from trading_strands.halt.store import HaltStore
+
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        hs = HaltStore(table)
+        hs.set_system_halt(True, reason="first")
+        _time.sleep(1.05)
+        hs.set_org_halt(oid, True, reason="second")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/halt/events")
+        assert resp.status_code == 200
+        events = resp.json()["events"]
+        assert len(events) == 2
+        # Newest first.
+        assert events[0]["reason"] == "second"
+        assert events[0]["scope"] == "org"
+        assert events[1]["reason"] == "first"
+        assert events[1]["scope"] == "system"
+
+
+def test_halt_events_empty_when_none_ever() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/halt/events")
+        assert resp.status_code == 200
+        assert resp.json()["events"] == []
+
+
+def test_halt_events_rejects_bad_limit() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        assert client.get("/api/halt/events?limit=0").status_code == 400
+        assert client.get("/api/halt/events?limit=1000").status_code == 400
+
+
+def test_halt_events_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/halt/events")
+        assert resp.status_code == 401

@@ -1057,6 +1057,35 @@ def _halt_scope_and_org(
     )
 
 
+@app.get("/api/halt/events")
+async def get_halt_events(
+    request: Request, limit: int = 50,
+) -> dict[str, Any]:
+    """Recent halt/unhalt transitions, newest first. Backs the
+    dashboard's halt-history view."""
+
+    from trading_strands.halt.store import HaltStore
+
+    _ = _get_principal(request)
+    if limit <= 0 or limit > 200:
+        raise HTTPException(
+            status_code=400, detail="limit must be between 1 and 200",
+        )
+    events = HaltStore(_get_table()).list_events(limit=limit)
+    return {
+        "events": [
+            {
+                "ts": e.ts,
+                "scope": e.scope,
+                "halted": e.halted,
+                "reason": e.reason,
+                "org_id": e.org_id,
+            }
+            for e in events
+        ],
+    }
+
+
 @app.get("/api/halt")
 async def get_halt_state(request: Request) -> dict[str, Any]:
     """Return halt state + caller's permission flags.

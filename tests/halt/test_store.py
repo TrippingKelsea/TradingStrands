@@ -7,6 +7,8 @@ another org's trades; sysadmin halting via CONTROL stops everything.
 
 from __future__ import annotations
 
+from typing import Any
+
 import boto3
 from moto import mock_aws
 
@@ -170,3 +172,141 @@ def test_no_emit_when_state_unchanged_false_to_false(capsys) -> None:
         store.set_org_halt("org-a", False, reason="defensive")
         out = capsys.readouterr().out
         assert '"halt.transition.count"' not in out
+
+
+# ── Halt-event audit log ────────────────────────────────────────────
+
+
+def _scan_halt_events(table: Any) -> list[dict[str, Any]]:
+    resp = table.scan(
+        FilterExpression="begins_with(pk, :p)",
+        ExpressionAttributeValues={":p": "HALT_EVENT#"},
+    )
+    return list(resp.get("Items", []))
+
+
+def test_event_written_on_halt_transition() -> None:
+    """Same transition that emits the EMF metric also writes an audit
+    row — same 'real transition' guard drives both."""
+
+    import boto3 as _boto3
+    from moto import mock_aws as _mock
+
+    with _mock():
+        ddb = _boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        store = HaltStore(table)
+        store.set_org_halt("org-a", True, reason="auditor: drift")
+
+        events = _scan_halt_events(table)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev["scope"] == "org"
+        assert ev["org_id"] == "org-a"
+        assert bool(ev["halted"]) is True
+        assert "auditor" in str(ev["reason"])
+        # TTL is forward-dated.
+        assert int(ev["ttl"]) > int(ev["ts"])
+
+
+def test_no_event_written_when_state_unchanged() -> None:
+    """Re-writing the same state must not produce a new event row —
+    the audit trail should reflect real transitions only."""
+
+    import boto3 as _boto3
+    from moto import mock_aws as _mock
+
+    with _mock():
+        ddb = _boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        store = HaltStore(table)
+        # Halt (1st event), then re-halt (should NOT add a 2nd).
+        store.set_org_halt("org-a", True, reason="auditor: drift")
+        store.set_org_halt("org-a", True, reason="auditor: drift")
+        events = _scan_halt_events(table)
+        assert len(events) == 1
+
+
+def test_events_cover_halt_and_unhalt_transitions() -> None:
+    import boto3 as _boto3
+    from moto import mock_aws as _mock
+
+    with _mock():
+        ddb = _boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        store = HaltStore(table)
+        store.set_system_halt(True, reason="sysadmin")
+        store.set_system_halt(False, reason="orgadmin cleared")
+        events = _scan_halt_events(table)
+        assert len(events) == 2
+        halted_vals = [bool(e["halted"]) for e in events]
+        assert True in halted_vals and False in halted_vals
+
+
+def test_list_events_returns_newest_first() -> None:
+    """Reader returns events sorted newest-first. Used by the dashboard
+    halt-history view — operators expect most-recent at the top."""
+
+    import time
+
+    import boto3 as _boto3
+    from moto import mock_aws as _mock
+
+    with _mock():
+        ddb = _boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        store = HaltStore(table)
+        store.set_org_halt("org-a", True, reason="first")
+        time.sleep(1.05)
+        store.set_org_halt("org-a", False, reason="second")
+        time.sleep(1.05)
+        store.set_org_halt("org-b", True, reason="third")
+
+        events = store.list_events(limit=10)
+        assert len(events) == 3
+        # Newest-first ordering — the third write's ts is latest.
+        assert "third" in (events[0].reason or "")
+        assert "first" in (events[-1].reason or "")
+
+
+def test_list_events_respects_limit() -> None:
+    import boto3 as _boto3
+    from moto import mock_aws as _mock
+
+    with _mock():
+        ddb = _boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[{"AttributeName": "pk", "AttributeType": "S"}],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        store = HaltStore(table)
+        for i in range(5):
+            store.set_org_halt(f"org-{i}", True, reason=f"r{i}")
+        assert len(store.list_events(limit=3)) == 3

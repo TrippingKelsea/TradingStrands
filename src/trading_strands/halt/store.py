@@ -14,6 +14,7 @@ Keeping the two separate means:
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,6 +22,13 @@ from trading_strands.emf.emitter import emit_metric
 
 SYSTEM_HALT_PK = "CONTROL"
 ORG_HALT_PK_PREFIX = "CONTROL#"
+HALT_EVENT_PK_PREFIX = "HALT_EVENT#"
+
+# Audit rows self-expire after 90 days — same retention as other
+# event logs in this codebase (LEDGER_EVENT#, TOKENEVENT#, etc.).
+# TTL attribute on the table does the cleanup; operators pulling
+# longer history point at S3-exported logs instead.
+_HALT_EVENT_TTL_SECONDS = 90 * 24 * 3600
 
 
 @dataclass
@@ -28,6 +36,17 @@ class HaltState:
     halted: bool
     reason: str | None
     updated_at: int
+
+
+@dataclass
+class HaltEvent:
+    """One row from the halt audit log — what changed, when, why."""
+
+    ts: int
+    scope: str  # "system" | "org"
+    halted: bool
+    reason: str | None
+    org_id: str | None = None
 
 
 def _empty() -> HaltState:
@@ -72,14 +91,42 @@ class HaltStore:
     def __init__(self, table: Any) -> None:
         self._table = table
 
+    def _record_transition(
+        self, *, scope: str, halted: bool,
+        org_id: str | None, reason: str,
+    ) -> None:
+        """Fan out a real state change to: the EMF metric (drives CW
+        alarms) and the audit log (drives dashboard history). Same
+        guard upstream means the two stay consistent."""
+
+        _emit_transition(
+            scope=scope, halted=halted, org_id=org_id, reason=reason,
+        )
+        now = int(time.time())
+        # Rand suffix breaks ties when two transitions land in the
+        # same second — matches LEDGER_EVENT# conventions.
+        pk = f"{HALT_EVENT_PK_PREFIX}{now}-{uuid.uuid4().hex[:8]}"
+        item: dict[str, Any] = {
+            "pk": pk,
+            "ts": now,
+            "scope": scope,
+            "halted": halted,
+            "reason": reason or "",
+            "ttl": now + _HALT_EVENT_TTL_SECONDS,
+        }
+        if org_id:
+            item["org_id"] = org_id
+        self._table.put_item(Item=item)
+
     # ── Per-org ─────────────────────────────────────────────────────
 
     def set_org_halt(
         self, org_id: str, halted: bool, reason: str = "",
     ) -> None:
-        """Set the org's halt flag. Emits halt.transition.count ONLY on
-        a state change — re-writing the same state (defensive unhalts
-        on startup, re-triggered auditor halts) is a no-op for alarms.
+        """Set the org's halt flag. Records a transition (EMF metric +
+        audit row) ONLY on a state change — re-writing the same state
+        (defensive unhalts on startup, re-triggered auditor halts) is
+        a no-op.
         """
 
         prior = self.get_org_state(org_id)
@@ -91,7 +138,7 @@ class HaltStore:
             "updated_at": int(time.time()),
         })
         if prior.halted != halted:
-            _emit_transition(
+            self._record_transition(
                 scope="org", halted=halted,
                 org_id=org_id, reason=reason,
             )
@@ -125,8 +172,9 @@ class HaltStore:
             "updated_at": int(time.time()),
         })
         if prior.halted != halted:
-            _emit_transition(
-                scope="system", halted=halted, reason=reason,
+            self._record_transition(
+                scope="system", halted=halted,
+                org_id=None, reason=reason,
             )
 
     def get_system_state(self) -> HaltState:
@@ -163,3 +211,31 @@ class HaltStore:
         if org_state.halted:
             return org_state.reason
         return None
+
+    # ── Audit log ───────────────────────────────────────────────────
+
+    def list_events(self, limit: int = 50) -> list[HaltEvent]:
+        """Return the most-recent halt/unhalt events, newest first.
+
+        Uses a scan on the pk prefix. Expected sizes (a handful of
+        halts per day over 90d retention) make this cheap; if halt
+        frequency ever justifies it, a GSI on ts solves the cost.
+        """
+
+        from boto3.dynamodb.conditions import Attr
+
+        resp = self._table.scan(
+            FilterExpression=Attr("pk").begins_with(HALT_EVENT_PK_PREFIX),
+        )
+        items = resp.get("Items", [])
+        items.sort(key=lambda x: int(x.get("ts", 0)), reverse=True)
+        return [
+            HaltEvent(
+                ts=int(i.get("ts", 0)),
+                scope=str(i.get("scope", "")),
+                halted=bool(i.get("halted", False)),
+                reason=str(i.get("reason", "")) or None,
+                org_id=(str(i["org_id"]) if i.get("org_id") else None),
+            )
+            for i in items[:limit]
+        ]

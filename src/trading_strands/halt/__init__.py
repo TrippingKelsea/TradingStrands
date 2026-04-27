@@ -11,6 +11,6 @@ reads the effective state before routing trades; rejecting when halted
 is unchanged from v0 behavior — only the source of the flag is broader.
 """
 
-from trading_strands.halt.store import HaltState, HaltStore
+from trading_strands.halt.store import HaltEvent, HaltState, HaltStore
 
-__all__ = ["HaltState", "HaltStore"]
+__all__ = ["HaltEvent", "HaltState", "HaltStore"]

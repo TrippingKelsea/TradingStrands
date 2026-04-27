@@ -386,9 +386,15 @@
         'display:flex;align-items:center;justify-content:center;z-index:1000;';
       dlg.innerHTML =
         '<div style="background:var(--surface);padding:20px;border-radius:8px;' +
-        'max-width:440px;border:1px solid var(--border);">' +
+        'max-width:520px;border:1px solid var(--border);">' +
         '<h3 id="halt-dialog-title" style="margin-top:0;">Halt trading</h3>' +
         '<div id="halt-dialog-body" style="font-size:0.85rem;"></div>' +
+        '<details style="margin-top:14px;font-size:0.78rem;">' +
+        '<summary style="cursor:pointer;color:var(--dim);">Recent halt events</summary>' +
+        '<div id="halt-dialog-events" style="margin-top:8px;max-height:220px;overflow:auto;">' +
+        'Loading…' +
+        '</div>' +
+        '</details>' +
         '<div id="halt-dialog-actions" style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;"></div>' +
         '</div>';
       document.body.appendChild(dlg);
@@ -463,6 +469,44 @@
         'Close', 'btn', () => dlg.remove(),
       ));
       body.innerHTML += '<div style="color:var(--red);margin-top:8px;">You do not have permission to change halt state.</div>';
+    }
+
+    // Lazy-load the audit log so dialog open stays snappy. A scan of
+    // HALT_EVENT# rows is cheap but not instant on a populated table.
+    _loadHaltEvents();
+  }
+
+  async function _loadHaltEvents() {
+    const el = $('halt-dialog-events');
+    if (!el) return;
+    try {
+      const resp = await fetch('/api/halt/events?limit=20');
+      if (!resp.ok) {
+        el.textContent = 'Failed to load halt history (' + resp.status + ').';
+        return;
+      }
+      const body = await resp.json();
+      if (!body.events || body.events.length === 0) {
+        el.innerHTML = '<div style="color:var(--dim);">No halt transitions recorded yet.</div>';
+        return;
+      }
+      let html = '<div style="display:grid;grid-template-columns:auto auto auto 1fr;gap:4px 10px;font-family:monospace;font-size:0.72rem;">';
+      body.events.forEach(e => {
+        const when = new Date(e.ts * 1000).toISOString().slice(0, 19).replace('T', ' ');
+        const action = e.halted
+          ? '<span style="color:var(--red,#c93c3c);">HALT</span>'
+          : '<span style="color:var(--green,#3a9d3a);">RESUME</span>';
+        const scope = e.scope + (e.org_id ? ':' + e.org_id : '');
+        const reason = (e.reason || '').replace(/[<>]/g, '');
+        html += '<div>' + when + '</div>';
+        html += '<div>' + action + '</div>';
+        html += '<div style="color:var(--dim);">' + scope + '</div>';
+        html += '<div>' + reason + '</div>';
+      });
+      html += '</div>';
+      el.innerHTML = html;
+    } catch(e) {
+      el.textContent = 'Network error loading halt history.';
     }
   }
 
