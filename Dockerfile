@@ -15,11 +15,18 @@ WORKDIR /app
 # LICENSE and README.md are required by hatchling metadata validation
 COPY pyproject.toml uv.lock LICENSE README.md ./
 
-# Install production dependencies only
-RUN uv sync --frozen --no-dev
+# Install production dependencies only (no project yet — layer cache).
+RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy source code
 COPY src/ ./src/
+
+# Install the project itself into the venv so direct
+# `/app/.venv/bin/python -m trading_strands...` invocations work
+# (Lambda uses this path via awslambdaric; `uv run` is an ECS-only
+# entrypoint that would re-resolve the project at startup). Without
+# this step the venv has every dep but not the trading_strands package.
+RUN uv sync --frozen --no-dev
 
 # Create non-root user and set ownership
 RUN useradd --system --create-home --shell /bin/bash app \
