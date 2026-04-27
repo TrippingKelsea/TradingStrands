@@ -3,6 +3,9 @@ from aws_cdk import (
     aws_certificatemanager as acm,
 )
 from aws_cdk import (
+    aws_cloudwatch as cloudwatch,
+)
+from aws_cdk import (
     aws_cognito as cognito,
 )
 from aws_cdk import (
@@ -1061,6 +1064,70 @@ class TradingStrandsStack(cdk.Stack):
                 events_targets.LambdaFunction(platform_supervisor_fn),
             ],
         )
+
+        # -- Halt-transition alarms ------------------------------------------
+        #
+        # halt.transition.count is emitted by HaltStore ONLY on actual
+        # state changes (see src/trading_strands/halt/store.py). Any
+        # breach of the alarm below = a real halt just happened.
+        #
+        # No alarm action wired yet — no SNS target exists in the account.
+        # Alarms show in the CloudWatch console; once an ops target
+        # (email/Slack via SNS) is chosen, wire it via add_alarm_action().
+        # Treating missing data as notBreaching is load-bearing: the
+        # metric emits nothing during normal operation and CloudWatch
+        # would otherwise evaluate missing data as breach.
+        system_halt_alarm = cloudwatch.Alarm(
+            self,
+            "SystemHaltAlarm",
+            alarm_name="trading-strands-system-halt",
+            alarm_description=(
+                "Sysadmin emergency stop fired. All orgs halted. "
+                "Investigate via dashboard /api/halt state + reason."
+            ),
+            metric=cloudwatch.Metric(
+                namespace="TradingStrands",
+                metric_name="halt.transition.count",
+                dimensions_map={"scope": "system", "halted": "true"},
+                period=cdk.Duration.minutes(1),
+                statistic="Sum",
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator
+                .GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            # Disabled until an SNS notification target exists.
+            # Flip actions_enabled=True after wiring add_alarm_action().
+            actions_enabled=False,
+        )
+        cdk.Tags.of(system_halt_alarm).add("Component", "halt-alarms")
+
+        org_halt_alarm = cloudwatch.Alarm(
+            self,
+            "OrgHaltAlarm",
+            alarm_name="trading-strands-org-halt",
+            alarm_description=(
+                "One or more orgs halted (Auditor drift or orgadmin "
+                "action). Dimensions identify which org from logs."
+            ),
+            metric=cloudwatch.Metric(
+                namespace="TradingStrands",
+                metric_name="halt.transition.count",
+                dimensions_map={"scope": "org", "halted": "true"},
+                # 5-min window smooths short halt/resume sequences
+                # during drift-confirmation testing.
+                period=cdk.Duration.minutes(5),
+                statistic="Sum",
+            ),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator
+                .GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            actions_enabled=False,
+        )
+        cdk.Tags.of(org_halt_alarm).add("Component", "halt-alarms")
 
         # -- Outputs ----------------------------------------------------------
 
