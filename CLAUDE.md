@@ -102,7 +102,7 @@ These are non-negotiable across both v0 and v1:
 1. **The deterministic code in the hot path is never replaced by an LLM call.** In v0 that's the Risk Manager + Coordinator path. In v1 it's the deterministic checks embedded in the Broker Agent's intake.
 2. **Every trade passes through a single chokepoint.** v0: Coordinator. v1: Broker Agent per org. No agent has broker credentials except the chokepoint.
 3. **Halt-the-desk works at the chokepoint.** One flag, honored immediately, survives restarts.
-4. **Memory is per-Agent and IAM-isolated.** No Agent reads another Agent's memory directly. (v0: not yet; v1: enforced by per-bot S3 buckets + IAM.)
+4. **Memory is per-Agent.** No Agent reads another Agent's memory directly. v0 enforces this at the application layer: `AgentMemoryStore` is constructed per-Agent and derives every S3 key from its `(org_id, agent_type, agent_id)` scope, so callers cannot construct cross-Agent keys. v1 adds IAM enforcement (per-bot role scoped to per-Agent bucket or prefix), so even a buggy/compromised bot cannot read across Agents. Data layout is already v1-shaped; only the IAM role boundary is the remaining v0→v1 step.
 5. **No backtesting, paper-trading, or simulation modes.** Weekend self-critique on real recorded market data is NOT backtesting — see `docs/SPEC/agents.md#self-critique-agent`.
 
 ## Key design decisions

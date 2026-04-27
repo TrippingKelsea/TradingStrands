@@ -19,7 +19,12 @@ Every Agent needs memory. Ephemeral in-process state is insufficient because:
 - The Self-Critique Agent needs to read a full week of a Strategy Agent's reasoning.
 - The durable ledger needs a stable external store (the Strategy Agent can't be the only copy).
 
-Memory is per-Agent. An Agent has its own bucket; it cannot read another Agent's bucket. This isolation is enforced by IAM (see [deployment.md](./deployment.md)), not by application-level scoping alone.
+Memory is per-Agent. An Agent cannot read another Agent's memory.
+
+- **v1 target:** isolation is enforced by IAM. Each Agent has its own S3 bucket (or a dedicated prefix under an org bucket, if we've migrated off per-Agent buckets per the bucket-limit note below), and the Agent's IAM role grants access only to that resource. Cross-Agent reads are physically impossible even if an Agent's code had a bug that tried.
+- **v0 reality:** isolation is enforced at the application layer by `AgentMemoryStore`'s prefix derivation. The store is constructed with `(org_id, agent_type, agent_id)` and derives every S3 key from that scope — callers don't construct keys. All bots share a single IAM role with access to the bucket, so a *compromised or buggy* bot code path could theoretically read across prefixes. The v0-to-v1 migration is the IAM hardening step; the application-layer scoping is already in place so v1 rolls out without data reshape.
+
+Both layers are defense-in-depth when v1 lands. The rule "no Agent reads another Agent's memory" holds in v0 because only the store constructs keys and the store is constructed per-Agent; it hardens in v1 when IAM refuses the cross-Agent request at the AWS layer.
 
 ## Storage model
 
