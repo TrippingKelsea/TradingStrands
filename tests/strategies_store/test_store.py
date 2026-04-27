@@ -194,6 +194,50 @@ def test_can_perform_non_author_cannot_update(table: Any) -> None:
     assert not can_perform(bob, Action.UPDATE, strategy=strat)
 
 
+def test_list_all_paginates_across_ddb_pages(table: Any) -> None:
+    """Regression: DDB scan returned 1 of 2 ACTIVE strategies because
+    the 1 MB pre-filter page cap dropped matches that straddled a page
+    boundary. The store must follow LastEvaluatedKey rather than reading
+    one page and stopping.
+
+    Simulated by patching the table's scan to paginate artificially:
+    two strategies, two single-item pages. Pre-fix the store only saw
+    the first; post-fix it sees both.
+    """
+
+    s = _store(table)
+    a = s.create(org_id="org_a", author_user_id="u1", name="a", markdown="")
+    b = s.create(org_id="org_b", author_user_id="u2", name="b", markdown="")
+
+    real_scan = table.scan
+    calls: list[dict[str, Any]] = []
+
+    def paginated_scan(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        resp = real_scan(**kwargs)
+        items = resp.get("Items", [])
+        start = kwargs.get("ExclusiveStartKey")
+        if start is None and len(items) > 1:
+            # First call: return one item, leave a continuation token.
+            return {
+                "Items": items[:1],
+                "LastEvaluatedKey": {"pk": items[0]["pk"]},
+            }
+        # Second call: return the rest, no continuation.
+        return {"Items": items[1:] if start is None else items}
+
+    table.scan = paginated_scan  # type: ignore[method-assign]
+    try:
+        results = s.list_all()
+    finally:
+        table.scan = real_scan  # type: ignore[method-assign]
+
+    ids = sorted(r.strategy_id for r in results)
+    assert ids == sorted([a.strategy_id, b.strategy_id])
+    assert len(calls) == 2
+    assert "ExclusiveStartKey" in calls[1]
+
+
 def test_can_perform_acl_delegates_update_rights(table: Any) -> None:
     s = _store(table)
     strat = s.create(
