@@ -158,6 +158,20 @@
 
 <!-- Agents Tab -->
 <div class="tab-content" id="tab-agents">
+  <div class="panel" style="margin-bottom:12px;">
+    <h2 style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Platform Supervisor</span>
+      <span id="supervisor-ok-badge" class="badge badge-unknown">…</span>
+    </h2>
+    <div style="font-size:0.7rem;color:var(--dim);margin-bottom:8px;">
+      External observation of agent heartbeats. Independent from the
+      orchestrator's self-reported status below — mismatches are
+      diagnostic.
+    </div>
+    <div id="supervisor-agents-content">
+      <div style="color:var(--dim);font-size:0.85rem;">Loading supervisor view…</div>
+    </div>
+  </div>
   <div id="agents-content">
     <div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading agents...</div>
   </div>
@@ -730,7 +744,69 @@
 
   // ── Agents ───────────────────────────────────────────────────────────
 
+  async function loadSupervisorAgents() {
+    const container = $('supervisor-agents-content');
+    const badge = $('supervisor-ok-badge');
+    if (!container || !badge) return;
+
+    try {
+      const resp = await fetch('/api/supervisor/agents');
+      if (!resp.ok) {
+        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load supervisor view (' + resp.status + ').</div>';
+        badge.textContent = '?';
+        badge.className = 'badge badge-unknown';
+        return;
+      }
+      const body = await resp.json();
+
+      badge.textContent = body.ok ? 'OK' : 'ALERT';
+      badge.className = 'badge ' + (body.ok ? 'badge-ok' : 'badge-error');
+
+      if (body.total === 0) {
+        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No heartbeats recorded yet. The supervisor writes rows as agents begin beating.</div>';
+        return;
+      }
+
+      const statusStyle = {
+        healthy: 'color:var(--green,#3a9d3a);',
+        stale: 'color:var(--amber,#d4a017);',
+        missing: 'color:var(--red,#c93c3c);font-weight:bold;',
+        untracked: 'color:var(--dim);',
+      };
+
+      let html = '<div style="display:grid;grid-template-columns:auto 1fr auto auto;gap:8px 16px;font-size:0.78rem;align-items:center;">';
+      html += '<div style="color:var(--dim);font-size:0.7rem;text-transform:uppercase;">Type</div>';
+      html += '<div style="color:var(--dim);font-size:0.7rem;text-transform:uppercase;">ID</div>';
+      html += '<div style="color:var(--dim);font-size:0.7rem;text-transform:uppercase;">Last beat</div>';
+      html += '<div style="color:var(--dim);font-size:0.7rem;text-transform:uppercase;">Status</div>';
+      body.agents.forEach(a => {
+        const style = statusStyle[a.status] || '';
+        const age = a.last_beat_ts ? _formatAge(a.last_beat_ts) : '—';
+        html += '<div>' + a.agent_type + '</div>';
+        html += '<div style="font-family:monospace;">' + a.agent_id + '</div>';
+        html += '<div style="' + style + '">' + age + '</div>';
+        html += '<div style="' + style + '">' + a.status + '</div>';
+      });
+      html += '</div>';
+
+      html += '<div style="margin-top:10px;font-size:0.7rem;color:var(--dim);">';
+      html += body.total + ' total · ' + body.healthy + ' healthy · ';
+      html += body.stale + ' stale · ' + body.missing + ' missing';
+      html += '</div>';
+
+      container.innerHTML = html;
+    } catch(e) {
+      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Network error loading supervisor view.</div>';
+    }
+  }
+
+  window.loadSupervisorAgents = loadSupervisorAgents;
+
   async function loadAgents() {
+    // Supervisor view renders first — independent of the orchestrator
+    // snapshot, so a broken orchestrator still shows heartbeat data.
+    loadSupervisorAgents();
+
     const container = $('agents-content');
     container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading agents...</div>';
 

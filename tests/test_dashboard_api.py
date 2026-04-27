@@ -2052,3 +2052,100 @@ def test_review_heartbeats_partial_coverage() -> None:
         assert body["risk"] is not None
         assert body["compliance"] is None
         assert body["auditor"] is None
+
+
+# ── Platform Supervisor view ────────────────────────────────────────
+
+
+def test_supervisor_agents_returns_heartbeat_classification() -> None:
+    """Authenticated user sees the supervisor's classification: one
+    entry per heartbeat row with status=healthy/stale/missing/untracked."""
+
+    import time as _time
+
+    with mock_aws():
+        from trading_strands.heartbeat.store import HeartbeatStore
+
+        table = _make_table()
+        uid, oid = _make_user(table)
+        hb = HeartbeatStore(table)
+        hb.beat("strategy", "strategy-abc")
+        # Manually write a stale fast-cadence row.
+        table.put_item(Item={
+            "pk": "HEARTBEAT#strategy#strategy-old",
+            "agent_type": "strategy",
+            "agent_id": "strategy-old",
+            "last_beat_ts": int(_time.time() - 3600),
+            "ttl": int(_time.time() + 3600),
+        })
+        # And a review-agent untracked beat.
+        hb.beat("risk", oid)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/supervisor/agents")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ok"] is False  # one missing fast-cadence agent
+        assert body["total"] == 3
+        statuses = {a["agent_id"]: a["status"] for a in body["agents"]}
+        assert statuses["strategy-abc"] == "healthy"
+        assert statuses["strategy-old"] == "missing"
+        assert statuses[oid] == "untracked"
+
+
+def test_supervisor_agents_empty_table_is_ok() -> None:
+    """Fresh deploy: zero heartbeats, the supervisor reports ok."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/supervisor/agents")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 0
+        assert body["ok"] is True
+        assert body["agents"] == []
+
+
+def test_supervisor_agents_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/supervisor/agents")
+        assert resp.status_code == 401
+
+
+def test_supervisor_agents_uses_env_thresholds() -> None:
+    """The endpoint honors the same thresholds as the Lambda, read
+    from env — so operators see the same classification in the UI
+    that CW alarms fire on."""
+
+    import time as _time
+
+    os.environ["SUPERVISOR_STALE_AFTER_SECONDS"] = "10"
+    os.environ["SUPERVISOR_MISSING_AFTER_SECONDS"] = "30"
+    try:
+        with mock_aws():
+            table = _make_table()
+            uid, oid = _make_user(table)
+            # 20s ago — stale under tight thresholds, healthy under defaults.
+            table.put_item(Item={
+                "pk": "HEARTBEAT#strategy#bot-1",
+                "agent_type": "strategy",
+                "agent_id": "bot-1",
+                "last_beat_ts": int(_time.time() - 20),
+                "ttl": int(_time.time() + 3600),
+            })
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.get("/api/supervisor/agents")
+            body = resp.json()
+            assert body["agents"][0]["status"] == "stale"
+    finally:
+        del os.environ["SUPERVISOR_STALE_AFTER_SECONDS"]
+        del os.environ["SUPERVISOR_MISSING_AFTER_SECONDS"]

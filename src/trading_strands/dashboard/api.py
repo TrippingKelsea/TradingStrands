@@ -1154,6 +1154,53 @@ async def unhalt_trading(
     return {"status": "running", "scope": "org", "org_id": org_id}
 
 
+# ── Platform Supervisor (external agent-health view) ───────────────────
+
+
+@app.get("/api/supervisor/agents")
+async def supervisor_agents(request: Request) -> dict[str, Any]:
+    """Return the Platform Supervisor's live view of agent health.
+
+    Reads heartbeats directly (same data the supervisor Lambda sees)
+    and classifies per the supervisor's rules. Authenticated users
+    only — this is infra health, not org data.
+
+    Thresholds come from the same env vars the Lambda uses so the
+    dashboard's classification matches what CloudWatch alarms on.
+    """
+
+    _ = _get_principal(request)
+
+    from trading_strands.heartbeat.store import HeartbeatStore
+    from trading_strands.platform_supervisor.supervisor import check_health
+
+    stale = float(os.environ.get("SUPERVISOR_STALE_AFTER_SECONDS", "60"))
+    missing = float(os.environ.get("SUPERVISOR_MISSING_AFTER_SECONDS", "300"))
+
+    store = HeartbeatStore(_get_table())
+    report = check_health(
+        heartbeat_store=store,
+        stale_after_seconds=stale,
+        missing_after_seconds=missing,
+    )
+    return {
+        "ok": report.ok,
+        "total": report.total,
+        "healthy": report.healthy,
+        "stale": report.stale,
+        "missing": report.missing,
+        "agents": [
+            {
+                "agent_type": a.agent_type,
+                "agent_id": a.agent_id,
+                "last_beat_ts": a.last_beat_ts,
+                "status": a.status.value,
+            }
+            for a in report.agents
+        ],
+    }
+
+
 # ── Telemetry ──────────────────────────────────────────────────────────
 
 
