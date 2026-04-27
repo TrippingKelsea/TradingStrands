@@ -1776,3 +1776,149 @@ def test_org_recommendations_requires_auth() -> None:
         client = TestClient(app)
         resp = client.get("/api/orgs/abc/recommendations/risk")
         assert resp.status_code == 401
+
+
+# ── GET /api/halt (scoped halt status) ──────────────────────────────
+
+
+def test_get_halt_returns_both_scopes_for_member() -> None:
+    """Any authenticated user can read halt state — they need to know
+    whether trading is running. Per-org data only for orgs they belong
+    to (system state is coarse + universally observable)."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.halt.store import HaltStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        hs = HaltStore(table)
+        hs.set_org_halt(org.org_id, True, reason="auditor: drift")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get("/api/halt")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["system"]["halted"] is False
+        assert body["org"]["halted"] is True
+        assert body["effective_halted"] is True
+        assert "auditor" in (body["org"]["reason"] or "").lower()
+
+
+def test_get_halt_shows_system_halt_for_anyone() -> None:
+    """A sysadmin emergency stop is visible to every user — they need
+    to know trading is frozen."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.halt.store import HaltStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.VIEWER)
+
+        HaltStore(table).set_system_halt(True, reason="sysadmin emergency")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get("/api/halt")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["system"]["halted"] is True
+        assert body["effective_halted"] is True
+
+
+def test_get_halt_without_active_org_returns_system_only() -> None:
+    """A sysadmin who hasn't picked an active org still gets system
+    state — empty org block rather than a 400."""
+
+    with mock_aws():
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        tenancy.grant_sysadmin(alice.user_id)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, None,
+        ))
+        resp = client.get("/api/halt")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["system"]["halted"] is False
+        assert body["org"] is None
+        assert body["effective_halted"] is False
+
+
+def test_get_halt_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/halt")
+        assert resp.status_code == 401
+
+
+def test_get_halt_surfaces_permissions_for_ui() -> None:
+    """UI uses these flags to enable/disable the system-halt option in
+    the scoped-halt dialog."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+
+        admin = tenancy.create_user(email="admin@x.com")
+        viewer = tenancy.create_user(email="viewer@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(admin.user_id, org.org_id, Role.ORGADMIN)
+        tenancy.add_membership(viewer.user_id, org.org_id, Role.VIEWER)
+
+        from trading_strands.dashboard.api import app
+
+        resp_admin = TestClient(app, cookies=_session_cookie(
+            admin.user_id, org.org_id,
+        )).get("/api/halt")
+        assert resp_admin.json()["can_halt_org"] is True
+        assert resp_admin.json()["can_halt_system"] is False
+
+        resp_viewer = TestClient(app, cookies=_session_cookie(
+            viewer.user_id, org.org_id,
+        )).get("/api/halt")
+        assert resp_viewer.json()["can_halt_org"] is False
+        assert resp_viewer.json()["can_halt_system"] is False
+
+
+def test_get_halt_sysadmin_can_halt_system() -> None:
+    with mock_aws():
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        root = tenancy.create_user(email="root@x.com")
+        tenancy.grant_sysadmin(root.user_id)
+
+        from trading_strands.dashboard.api import app
+        resp = TestClient(app, cookies=_session_cookie(
+            root.user_id, None,
+        )).get("/api/halt")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["can_halt_system"] is True

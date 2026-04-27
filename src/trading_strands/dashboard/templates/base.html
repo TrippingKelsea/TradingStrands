@@ -257,35 +257,185 @@
     $('active-strat-count').textContent = bots.length;
 
     // Update halt button state from snapshot
+    // The snapshot's desk_halted flag reflects only the in-memory
+    // RiskManager. For per-org halt visibility we'd use /api/halt
+    // directly, but we still pick up the system-halted case here as
+    // a cheap fallback for when /api/halt hasn't polled yet.
     const halted = snap.risk && snap.risk.desk_halted;
     _deskHalted = halted;
+    refreshHaltButton();
+  }
+
+  // Full halt state: system + per-org + permissions. Loaded on tick so
+  // the header button label matches reality even if the orchestrator's
+  // in-memory flag is stale.
+  let _haltState = null;
+
+  async function refreshHaltState() {
+    try {
+      const r = await fetch('/api/halt');
+      if (!r.ok) return;
+      _haltState = await r.json();
+      _deskHalted = _haltState.effective_halted;
+      refreshHaltButton();
+    } catch(e) { /* ignore — keep prior state */ }
+  }
+
+  function refreshHaltButton() {
     const btn = $('halt-btn');
+    if (!btn) return;
+    const halted = _haltState ? _haltState.effective_halted : _deskHalted;
     if (halted) {
       btn.textContent = 'RESUME TRADING';
       btn.className = 'btn btn-success';
+      btn.title = _haltReasonText() || 'Desk halted';
     } else {
       btn.textContent = 'HALT TRADING';
       btn.className = 'btn btn-danger';
+      btn.title = '';
     }
+  }
+
+  function _haltReasonText() {
+    if (!_haltState) return '';
+    if (_haltState.system && _haltState.system.halted) {
+      return 'SYSTEM halt: ' + (_haltState.system.reason || '(no reason given)');
+    }
+    if (_haltState.org && _haltState.org.halted) {
+      return 'ORG halt: ' + (_haltState.org.reason || '(no reason given)');
+    }
+    return '';
   }
 
   async function haltTrading() {
-    const btn = $('halt-btn');
-    btn.disabled = true;
-    btn.textContent = _deskHalted ? 'Resuming...' : 'Halting...';
+    // Refresh first so the dialog reflects the real current state.
+    await refreshHaltState();
+    if (!_haltState) {
+      alert('Could not read halt state. Try again in a moment.');
+      return;
+    }
+    _showHaltDialog();
+  }
+  window.haltTrading = haltTrading;
 
-    try {
-      const endpoint = _deskHalted ? '/api/unhalt' : '/api/halt';
-      const resp = await fetch(endpoint, {method: 'POST'});
-      if (!resp.ok) {
-        alert('Failed to ' + (_deskHalted ? 'resume' : 'halt') + ' trading');
+  // ── Scoped halt dialog ──────────────────────────────────────────
+  //
+  // Body-inserted on first open; subsequent opens reuse it. Keeps the
+  // template markup clean (no modal scaffold checked in permanently).
+  function _showHaltDialog() {
+    let dlg = $('halt-dialog');
+    if (!dlg) {
+      dlg = document.createElement('div');
+      dlg.id = 'halt-dialog';
+      dlg.style.cssText =
+        'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);' +
+        'display:flex;align-items:center;justify-content:center;z-index:1000;';
+      dlg.innerHTML =
+        '<div style="background:var(--surface);padding:20px;border-radius:8px;' +
+        'max-width:440px;border:1px solid var(--border);">' +
+        '<h3 id="halt-dialog-title" style="margin-top:0;">Halt trading</h3>' +
+        '<div id="halt-dialog-body" style="font-size:0.85rem;"></div>' +
+        '<div id="halt-dialog-actions" style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;"></div>' +
+        '</div>';
+      document.body.appendChild(dlg);
+      dlg.addEventListener('click', e => {
+        if (e.target === dlg) dlg.remove();
+      });
+    }
+
+    const sys = _haltState.system;
+    const org = _haltState.org;
+    const title = $('halt-dialog-title');
+    const body = $('halt-dialog-body');
+    const actions = $('halt-dialog-actions');
+    title.textContent = _haltState.effective_halted ? 'Resume trading' : 'Halt trading';
+
+    let status = '';
+    if (sys.halted) status += '<div style="color:var(--red);">SYSTEM halted — ' + (sys.reason || '(no reason)') + '</div>';
+    if (org && org.halted) status += '<div style="color:var(--amber,#d4a017);">This org halted — ' + (org.reason || '(no reason)') + '</div>';
+    if (!sys.halted && !(org && org.halted)) status = '<div style="color:var(--green,#3a9d3a);">Desk is running normally.</div>';
+    body.innerHTML =
+      status +
+      '<div style="margin-top:12px;font-size:0.75rem;color:var(--dim);">' +
+      'Org halt stops this org only. System halt stops every org — sysadmin only.' +
+      '</div>';
+
+    actions.innerHTML = '';
+    const mkBtn = (label, cls, handler) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.className = cls;
+      b.onclick = handler;
+      return b;
+    };
+
+    // Cancel.
+    actions.appendChild(mkBtn('Cancel', 'btn', () => dlg.remove()));
+
+    // Per-scope controls. When halted, show unhalt buttons; when
+    // running, show halt buttons. A sysadmin looking at a mixed
+    // state (system halted + org not halted) may want both visible;
+    // the dialog surfaces whichever are actionable.
+    if (_haltState.can_halt_org && org) {
+      if (org.halted) {
+        actions.appendChild(mkBtn(
+          'Resume this org', 'btn btn-success',
+          () => _submitHalt(false, 'org', dlg),
+        ));
+      } else {
+        actions.appendChild(mkBtn(
+          'Halt this org', 'btn btn-danger',
+          () => _submitHalt(true, 'org', dlg),
+        ));
       }
+    }
+    if (_haltState.can_halt_system) {
+      if (sys.halted) {
+        actions.appendChild(mkBtn(
+          'Resume SYSTEM', 'btn btn-success',
+          () => _submitHalt(false, 'system', dlg),
+        ));
+      } else {
+        actions.appendChild(mkBtn(
+          'Halt SYSTEM (all orgs)', 'btn btn-danger',
+          () => _submitHalt(true, 'system', dlg),
+        ));
+      }
+    }
+
+    // If the caller can do nothing, say so.
+    if (!_haltState.can_halt_org && !_haltState.can_halt_system) {
+      actions.appendChild(mkBtn(
+        'Close', 'btn', () => dlg.remove(),
+      ));
+      body.innerHTML += '<div style="color:var(--red);margin-top:8px;">You do not have permission to change halt state.</div>';
+    }
+  }
+
+  async function _submitHalt(halt, scope, dlg) {
+    const endpoint = halt ? '/api/halt' : '/api/unhalt';
+    const reason = prompt(
+      (halt ? 'Halt' : 'Resume') + ' reason (shown in dashboard + logs):',
+      '',
+    );
+    if (reason === null) return;  // user cancelled
+    try {
+      const resp = await fetch(endpoint, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({scope, reason}),
+      });
+      if (!resp.ok) {
+        const msg = await resp.text();
+        alert('Failed: ' + msg);
+        return;
+      }
+      dlg.remove();
+      await refreshHaltState();
     } catch(e) {
       alert('Network error');
     }
-    btn.disabled = false;
   }
-  window.haltTrading = haltTrading;
 
   // ── Session + org switcher ────────────────────────────────────────────
 
@@ -436,6 +586,10 @@
 
   loadSession();
   connect();
+  refreshHaltState();
+  // Poll halt state every 15s so an Auditor-driven halt surfaces on
+  // the header even between snapshot ticks.
+  setInterval(refreshHaltState, 15000);
   {% block init %}{% endblock %}
 })();
 </script>

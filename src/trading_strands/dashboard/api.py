@@ -1015,6 +1015,61 @@ def _halt_scope_and_org(
     )
 
 
+@app.get("/api/halt")
+async def get_halt_state(request: Request) -> dict[str, Any]:
+    """Return halt state + caller's permission flags.
+
+    - `system`: always included — a sysadmin emergency stop affects
+      every user and must be visible regardless of org membership.
+    - `org`: included for the active org if the caller is a member;
+      `None` otherwise (e.g. sysadmin with no active org selected).
+    - `effective_halted`: the OR-view the Coordinator enforces, scoped
+      to the active org (or system-only if no active org).
+    - `can_halt_system` / `can_halt_org`: permission hints for the UI
+      so it can enable/disable scope options without guessing.
+    """
+
+    from trading_strands.halt.store import HaltStore
+
+    principal = _get_principal(request)
+    active = _active_org_or_empty(request)
+
+    hs = HaltStore(_get_table())
+    sys_state = hs.get_system_state()
+    system_view = {
+        "halted": sys_state.halted,
+        "reason": sys_state.reason,
+        "updated_at": sys_state.updated_at,
+    }
+
+    org_view: dict[str, Any] | None = None
+    if active and active in principal.memberships:
+        org_state = hs.get_org_state(active)
+        org_view = {
+            "halted": org_state.halted,
+            "reason": org_state.reason,
+            "updated_at": org_state.updated_at,
+            "org_id": active,
+        }
+
+    effective = sys_state.halted or bool(org_view and org_view["halted"])
+
+    can_halt_system = principal.sysadmin
+    can_halt_org = (
+        principal.sysadmin
+        or (active and principal.memberships.get(active)
+            and principal.memberships[active].value == "orgadmin")
+    )
+
+    return {
+        "system": system_view,
+        "org": org_view,
+        "effective_halted": effective,
+        "can_halt_system": bool(can_halt_system),
+        "can_halt_org": bool(can_halt_org),
+    }
+
+
 @app.post("/api/halt")
 async def halt_trading(
     request: Request, body: HaltRequest | None = None,
