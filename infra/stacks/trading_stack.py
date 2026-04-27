@@ -1478,6 +1478,35 @@ class TradingStrandsStack(cdk.Stack):
 
         # -- Outputs ----------------------------------------------------------
 
+        # ── Lambda uv cache redirect ──────────────────────────────────────
+        #
+        # The container image uses `uv run` as its ENTRYPOINT. ECS tasks
+        # work fine because $HOME is writable, but Lambda's execution
+        # environment gives each invocation a read-only /home, so uv
+        # crash-loops at init trying to create ~/.cache/uv. Redirect
+        # the cache to /tmp (the one writable path under Lambda, 512 MB
+        # available) so every uv-entrypoint Lambda starts cleanly.
+        #
+        # Applied here as a single post-construction pass so the fix
+        # stays in one place and the individual `environment=` dicts
+        # above don't each grow a UV_CACHE_DIR key.
+        for _fn in (
+            self_critique_fn,
+            memory_compactor_fn,
+            risk_agent_fn,
+            compliance_agent_fn,
+            auditor_agent_fn,
+            org_fanout_fn,
+            bot_provisioner_fn,
+            strategy_supervisor_fn,
+            reconcile_all_fn,
+            platform_supervisor_fn,
+            calendar_fetcher_fn,
+            ta_computer_fn,
+            edgar_watcher_fn,
+        ):
+            _fn.add_environment("UV_CACHE_DIR", "/tmp/.uv-cache")
+
         dashboard_url = (
             f"https://{domain_name}"
             if tls_enabled
