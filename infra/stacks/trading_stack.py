@@ -71,6 +71,25 @@ _LAMBDA_ENTRYPOINT: list[str] = [
 ]
 
 
+def _lambda_image_tag(stack: cdk.Stack) -> str:
+    """Resolve the image tag each Lambda should use.
+
+    CDK's `from_ecr(tag_or_digest="latest")` does NOT repoint CloudFormation
+    at a new digest just because `latest` moved in ECR — the template's
+    image URI string is unchanged, so CloudFormation sees no drift and
+    skips the function update. Every Lambda ends up stuck on the first
+    image ever deployed with the `latest` tag.
+
+    Fix: CI passes `--context deploy_commit=<sha>` on every deploy, and
+    we use that SHA as the image tag here. New commit => new tag string
+    => CloudFormation actually pushes the new image to each Lambda.
+    Falls back to "latest" for local synth when no context is set.
+    """
+
+    ctx = stack.node.try_get_context("deploy_commit")
+    return str(ctx) if ctx else "latest"
+
+
 class TradingStrandsStack(cdk.Stack):
     def __init__(
         self,
@@ -686,7 +705,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-self-critique",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.self_critique.lambda_handler.handler"],
             ),
@@ -725,7 +744,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-memory-compactor",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.memory_compactor.lambda_handler.handler"],
             ),
@@ -777,7 +796,7 @@ class TradingStrandsStack(cdk.Stack):
                 function_name=function_name,
                 code=lambda_.DockerImageCode.from_ecr(
                     repository=repository,
-                    tag_or_digest="latest",
+                    tag_or_digest=_lambda_image_tag(self),
                     entrypoint=_LAMBDA_ENTRYPOINT,
                     cmd=[handler_path],
                 ),
@@ -856,7 +875,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-auditor-agent",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.auditor_agent.lambda_handler.handler",
@@ -920,7 +939,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-org-fanout",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.org_fanout.fanout.handler"],
             ),
@@ -970,7 +989,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-bot-provisioner",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.provisioner.bot_provisioner.handler"],
             ),
@@ -1092,7 +1111,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-strategy-supervisor",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.supervisor.strategy_supervisor.handler",
@@ -1162,7 +1181,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-reconcile-all",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.supervisor.reconcile_all.handler",
@@ -1191,7 +1210,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-platform-supervisor",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.platform_supervisor.supervisor.handler",
@@ -1246,7 +1265,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-calendar-fetcher",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.calendar_fetcher.fetcher.handler",
@@ -1284,7 +1303,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-ta-computer",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.ta_computer.computer.handler",
@@ -1329,7 +1348,7 @@ class TradingStrandsStack(cdk.Stack):
             function_name="trading-strands-edgar-watcher",
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
-                tag_or_digest="latest",
+                tag_or_digest=_lambda_image_tag(self),
                 entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.edgar_watcher.watcher.handler",
