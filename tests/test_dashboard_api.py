@@ -399,6 +399,91 @@ def test_create_strategy() -> None:
         assert data["status"] == "active"
 
 
+def test_create_strategy_with_model_id() -> None:
+    """Allowlisted model_id round-trips through the store."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/strategies", json={
+            "name": "Opus test",
+            "markdown": "# rules",
+            "symbols": ["AAPL"],
+            "capital": "1000",
+            "model_id": "us.anthropic.claude-opus-4-7",
+        })
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["model_id"] == "us.anthropic.claude-opus-4-7"
+
+
+def test_create_strategy_rejects_unknown_model_id() -> None:
+    """Typo in model_id must 400 at save time, not silently accept."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/strategies", json={
+            "name": "Broken",
+            "markdown": "# rules",
+            "model_id": "us.anthropic.claude-wrong",
+        })
+        assert resp.status_code == 400
+        assert "unknown model_id" in resp.json()["detail"]
+
+
+def test_update_strategy_rejects_unknown_model_id() -> None:
+    """PUT with a bad model_id surfaces as 400 from the store validator."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        from trading_strands.strategies_store.store import StrategyStore
+
+        store = StrategyStore(table)
+        strat = store.create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.put(
+            f"/api/strategies/{strat.strategy_id}",
+            json={"model_id": "nope-not-real"},
+        )
+        assert resp.status_code == 400
+
+
+def test_list_models_returns_allowlist() -> None:
+    """GET /api/models returns the registry entries for the UI dropdown."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="viewer")
+
+        from trading_strands.dashboard.api import app
+
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        models = resp.json()
+        assert len(models) > 0
+        ids = [m["id"] for m in models]
+        assert "us.anthropic.claude-sonnet-4-6" in ids
+        # Exactly one default is flagged.
+        defaults = [m for m in models if m["is_default"] == "true"]
+        assert len(defaults) == 1
+
+
 def test_viewer_cannot_create_strategy() -> None:
     with mock_aws():
         table = _make_table()

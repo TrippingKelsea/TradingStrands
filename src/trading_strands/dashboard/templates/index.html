@@ -109,6 +109,13 @@
         </div>
       </div>
       <div class="form-group">
+        <label>Model <span style="font-size:0.7rem;color:var(--dim);">(LLM that runs this strategy)</span></label>
+        <select id="edit-strat-model" style="width:100%;padding:6px;">
+          <option value="">Loading models…</option>
+        </select>
+        <div id="edit-strat-model-desc" style="font-size:0.7rem;color:var(--dim);margin-top:2px;"></div>
+      </div>
+      <div class="form-group">
         <label>Strategy Prompt (Markdown)</label>
         <textarea id="edit-strat-markdown" style="min-height:200px;"></textarea>
       </div>
@@ -165,6 +172,13 @@
           <label>Capital ($)</label>
           <input type="text" id="strat-capital" value="1000" required>
         </div>
+      </div>
+      <div class="form-group">
+        <label>Model <span style="font-size:0.7rem;color:var(--dim);">(LLM that runs this strategy)</span></label>
+        <select id="strat-model" style="width:100%;padding:6px;">
+          <option value="">Loading models…</option>
+        </select>
+        <div id="strat-model-desc" style="font-size:0.7rem;color:var(--dim);margin-top:2px;"></div>
       </div>
       <div class="form-group">
         <label>Strategy Prompt (Markdown)</label>
@@ -705,6 +719,42 @@
   ];
 
   let _editedStrategy = null;
+  let _modelsCache = null;
+
+  async function fetchModels() {
+    if (_modelsCache) return _modelsCache;
+    try {
+      const resp = await fetch('/api/models');
+      if (!resp.ok) return [];
+      _modelsCache = await resp.json();
+      return _modelsCache;
+    } catch(e) {
+      return [];
+    }
+  }
+
+  // Populate a <select> with allowlisted models. `selectedId` is the
+  // current value on the strategy (empty = platform default). A blank
+  // "(default)" option is always prepended so a user can clear the
+  // override.
+  async function populateModelSelect(selectEl, descEl, selectedId) {
+    const models = await fetchModels();
+    const current = selectedId || '';
+    let html = '<option value="">(use platform default)</option>';
+    for (const m of models) {
+      const tag = m.is_default === 'true' ? ' ★' : '';
+      const sel = (current === m.id) ? ' selected' : '';
+      html += '<option value="' + m.id + '"' + sel + '>' + m.label + tag + '</option>';
+    }
+    selectEl.innerHTML = html;
+    // Surface the description for the current selection, if any.
+    const updateDesc = () => {
+      const chosen = models.find(m => m.id === selectEl.value);
+      descEl.textContent = chosen ? chosen.description : '';
+    };
+    selectEl.onchange = updateDesc;
+    updateDesc();
+  }
 
   async function openEditStrategy(sid) {
     const list = $('strategies-list');
@@ -726,6 +776,9 @@
       $('edit-strat-symbols').value = (s.symbols || []).join(', ');
       $('edit-strat-capital').value = s.capital || '1000';
       $('edit-strat-markdown').value = s.markdown || '';
+      await populateModelSelect(
+        $('edit-strat-model'), $('edit-strat-model-desc'), s.model_id || '',
+      );
       status.textContent = '';
     } catch(e) {
       status.textContent = 'Failed to load strategy';
@@ -881,6 +934,7 @@
       capital: $('edit-strat-capital').value.trim(),
       tools: tools,
       skills: skills,
+      model_id: $('edit-strat-model').value,
     };
 
     try {
@@ -906,6 +960,13 @@
 
   // ── Strategy submission ───────────────────────────────────────────────
 
+  // Populate the "Submit New Strategy" model dropdown once on load. The
+  // Edit form populates lazily in openEditStrategy; the Submit form
+  // doesn't have a per-open hook so we do it here.
+  populateModelSelect(
+    $('strat-model'), $('strat-model-desc'), '',
+  ).catch(() => {});
+
   $('strategy-form').addEventListener('submit', async function(e) {
     e.preventDefault();
     const status = $('submit-status');
@@ -917,6 +978,7 @@
       markdown: $('strat-markdown').value,
       symbols: $('strat-symbols').value.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
       capital: $('strat-capital').value.trim(),
+      model_id: $('strat-model').value,
     };
 
     try {
@@ -930,6 +992,8 @@
         status.style.color = 'var(--green)';
         $('strategy-form').reset();
         $('strat-capital').value = '1000';
+        $('strat-model').value = '';
+        $('strat-model-desc').textContent = '';
       } else {
         const err = await resp.json();
         status.textContent = 'Error: ' + (err.detail || 'Unknown error');

@@ -591,6 +591,32 @@ async def stream(request: Request) -> StreamingResponse:
     )
 
 
+# ── Model allowlist (for strategy edit UI dropdown) ────────────────────
+
+
+@app.get("/api/models")
+async def list_models(request: Request) -> list[dict[str, str]]:
+    """Return the allowlisted models a strategy author can choose from.
+
+    Gated on authenticated session only — the list itself is not org-
+    scoped. UI renders this as the <select> in the strategy form so the
+    dropdown options never drift from `validate_model_id` on save.
+    """
+
+    _ = _get_principal(request)
+    from trading_strands.models.registry import DEFAULT_MODEL_ID, available_models
+    return [
+        {
+            "id": m.id,
+            "label": m.label,
+            "provider": m.provider,
+            "description": m.description,
+            "is_default": "true" if m.id == DEFAULT_MODEL_ID else "false",
+        }
+        for m in available_models()
+    ]
+
+
 # ── Strategy CRUD (org-scoped) ─────────────────────────────────────────
 
 
@@ -603,6 +629,9 @@ class StrategyCreate(BaseModel):
     # the v0 default.
     tools: dict[str, dict[str, Any]] = {}
     skills: list[str] = []
+    # Empty string = platform default model. Allowlist-validated at
+    # the store; surfaces as 400 here on unknown ids.
+    model_id: str = ""
 
 
 class StrategyUpdate(BaseModel):
@@ -613,6 +642,7 @@ class StrategyUpdate(BaseModel):
     status: str | None = None
     tools: dict[str, dict[str, Any]] | None = None
     skills: list[str] | None = None
+    model_id: str | None = None
 
 
 @app.get("/api/strategies")
@@ -648,21 +678,27 @@ async def create_strategy(
         Resource(ResourceType.STRATEGY, org_id=org_id, author_user_id=principal.user_id),
     )
 
+    from trading_strands.models.registry import UnknownModelError
     from trading_strands.tools.base import StrategyToolConfig
 
     store = StrategyStore(_get_table())
-    strat = store.create(
-        org_id=org_id,
-        author_user_id=principal.user_id,
-        name=body.name,
-        markdown=body.markdown,
-        symbols=body.symbols,
-        capital=body.capital,
-        tools={
-            name: StrategyToolConfig(**cfg) for name, cfg in body.tools.items()
-        },
-        skills=body.skills,
-    )
+    try:
+        strat = store.create(
+            org_id=org_id,
+            author_user_id=principal.user_id,
+            name=body.name,
+            markdown=body.markdown,
+            symbols=body.symbols,
+            capital=body.capital,
+            tools={
+                name: StrategyToolConfig(**cfg)
+                for name, cfg in body.tools.items()
+            },
+            skills=body.skills,
+            model_id=body.model_id,
+        )
+    except UnknownModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return strat.model_dump(mode="json")
 
 
@@ -715,8 +751,14 @@ async def update_strategy(
         update_fields["tools"] = body.tools
     if body.skills is not None:
         update_fields["skills"] = body.skills
+    if body.model_id is not None:
+        update_fields["model_id"] = body.model_id
 
-    updated = store.update(strategy_id, update_fields)
+    from trading_strands.models.registry import UnknownModelError
+    try:
+        updated = store.update(strategy_id, update_fields)
+    except UnknownModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return updated.model_dump(mode="json")
 
 

@@ -50,6 +50,12 @@ class Strategy(BaseModel):
     # its system prompt. Missing-skill lookup warns + skips, doesn't
     # block.
     skills: list[str] = Field(default_factory=list)
+    # Allowlisted model id the bot should use. Empty → use the
+    # platform default (trading_strands.models.registry
+    # DEFAULT_MODEL_ID). Validation runs at create/update time;
+    # legacy rows with missing / unknown ids resolve to default at
+    # bot-start with a warning.
+    model_id: str = ""
 
 
 class StrategyACL(BaseModel):
@@ -93,7 +99,12 @@ class StrategyStore:
         capital: str = "1000",
         tools: dict[str, StrategyToolConfig] | None = None,
         skills: list[str] | None = None,
+        model_id: str = "",
     ) -> Strategy:
+        # Validate model choice at save time — typos fail here, not
+        # silently at bot-start. Empty string is legal (= use default).
+        from trading_strands.models.registry import validate_model_id
+        validate_model_id(model_id)
         strat = Strategy(
             strategy_id=_new_id(),
             org_id=org_id,
@@ -107,6 +118,7 @@ class StrategyStore:
             updated_at=_now(),
             tools=tools or {},
             skills=skills or [],
+            model_id=model_id,
         )
         self._table.put_item(
             Item={
@@ -166,6 +178,11 @@ class StrategyStore:
         if not fields:
             # No-op update — still bump updated_at.
             fields = {}
+
+        # Allowlist validation on model changes — same as create.
+        if "model_id" in fields:
+            from trading_strands.models.registry import validate_model_id
+            validate_model_id(str(fields["model_id"]))
 
         update_parts: list[str] = ["updated_at = :t"]
         names: dict[str, str] = {}

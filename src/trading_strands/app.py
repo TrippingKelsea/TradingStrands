@@ -80,6 +80,7 @@ class SingleBotConfig:
     # SingleBotConfig without these fields don't break.
     tools: dict[str, Any] = None  # type: ignore[assignment]
     skills: list[str] = None      # type: ignore[assignment]
+    model_id: str = ""
 
     def __post_init__(self) -> None:
         # Frozen dataclass can't assign normally; object.__setattr__
@@ -148,6 +149,7 @@ def load_single_bot_config(table: Any, env: dict[str, str]) -> SingleBotConfig:
         name=str(item.get("name", "")),
         tools=dict(item.get("tools", {}) or {}),
         skills=list(item.get("skills", []) or []),
+        model_id=str(item.get("model_id", "") or ""),
     )
 
 
@@ -272,6 +274,7 @@ def _register_strategy(
     strategy_name: str = "",
     tools_table: Any | None = None,
     tools_secrets_client: Any | None = None,
+    model_id: str = "",
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
@@ -382,11 +385,29 @@ def _register_strategy(
                     bot_id, name,
                 )
 
+    # Resolve model — empty string → platform default. Unknown id
+    # that somehow survived save-time validation falls back to
+    # default with a loud warning rather than crashing the bot.
+    from trading_strands.models.registry import (
+        UnknownModelError,
+        resolve_model_id,
+    )
+    try:
+        resolved_model = resolve_model_id(model_id)
+    except UnknownModelError:
+        from trading_strands.models.registry import DEFAULT_MODEL_ID
+        logger.warning(
+            "strategy.unknown_model_id_fallback bot_id=%s model_id=%s default=%s",
+            bot_id, model_id, DEFAULT_MODEL_ID,
+        )
+        resolved_model = DEFAULT_MODEL_ID
+
     bot = StrategyBot(
         bot_id=bot_id,
         org_id=org_id,
         strategy_prompt=strategy_prompt,
         symbols=symbols,
+        model=resolved_model,
         token_store=token_store,
         memory_store=memory_store,
         heartbeat_store=heartbeat_store,
@@ -602,6 +623,7 @@ async def run(
             tools_config=cfg.tools,
             skills_config=cfg.skills,
             strategy_name=cfg.name,
+            model_id=cfg.model_id,
         )
         await logger.ainfo(
             "system.start.single_bot",
@@ -636,6 +658,7 @@ async def run(
             tools_config={},
             skills_config=[],
             strategy_name=Path(strategy_path).stem,
+            model_id="",
         )
         await logger.ainfo(
             "system.start.local",
@@ -681,6 +704,7 @@ async def run(
                 tools_config=strat.get("tools", {}),
                 skills_config=strat.get("skills", []),
                 strategy_name=str(strat.get("name", "")),
+                model_id=str(strat.get("model_id", "") or ""),
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -765,6 +789,7 @@ async def run(
                                     tools_config=strat.get("tools", {}),
                                     skills_config=strat.get("skills", []),
                                     strategy_name=str(strat.get("name", "")),
+                                    model_id=str(strat.get("model_id", "") or ""),
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

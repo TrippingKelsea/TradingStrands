@@ -19,6 +19,11 @@ MODEL_PRICING: dict[str, tuple[Decimal, Decimal]] = {
     "claude-opus-4-6":           (Decimal("0.015"),  Decimal("0.075")),
     "claude-sonnet-4-6":         (Decimal("0.003"),  Decimal("0.015")),
     "claude-haiku-4-5":          (Decimal("0.0008"), Decimal("0.004")),
+    # Amazon Nova Pro (us-west-2) — published as $0.0008 input /
+    # $0.0032 output per 1K tokens. Keep in sync with the model
+    # allowlist in trading_strands.models.registry; a test enforces
+    # every bedrock allowlisted model has an entry here.
+    "nova-pro-v1":               (Decimal("0.0008"), Decimal("0.0032")),
     # Fallback: if we don't recognize the model, both rates are 0. This is
     # deliberate — we'd rather surface "unknown cost" than invent a price.
 }
