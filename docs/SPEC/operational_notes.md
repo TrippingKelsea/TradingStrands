@@ -302,6 +302,66 @@ made, using actual recorded market data. No phantom fills, no simulated PnL.
 
 This rule is codified in `CLAUDE.md` and repeated in [agents.md](./agents.md).
 
+## TODO: DDB scan pagination sweep
+
+**Status:** partial. Tracked as a follow-up.
+
+Observed bug class (three instances, same root cause):
+
+- `StrategyStore.list_all` returned 1 of 2 ACTIVE strategies →
+  `reconcile_all` skipped provisioning one bot's Fargate service.
+- `StrategyStore.list_for_org` / `acl_users` / delete's ACL cleanup —
+  same pattern, same fix.
+- `TenancyStore.memberships_for_user` returned `[]` for a real
+  member → `principal.memberships` empty → every org-scoped
+  endpoint 403'd (observed on `/api/strategies`, `/api/tokens/today`).
+
+Root cause: `table.scan(FilterExpression=...)` returns at most ~1 MB
+of **pre-filter** items per call. The shared single-PK table mixes
+many prefix families (`MARKETDATA#` dominates by volume, plus
+`STRATEGY#`, `USERORG#`, `ORG#`, `CALENDAR#`, `TA_SNAPSHOT#`, `NEWS#`,
+`FILING_INDEX#`, `SOCIAL#`, `TOOL_QUOTA#`, `SKILL#`, `ORG_TOOL#`,
+`HALT_EVENT#`, `HEARTBEAT#`, `LEDGER#`, `RECOMMENDATION#`,
+`STRATEGYPROPOSAL#`, `PROMPTSNAPSHOT#`, `DEPLOY#`). A filtered scan
+on any lighter prefix can burn its 1 MB page budget on non-matching
+rows and return fewer matches than exist. The fix is always
+`LastEvaluatedKey` follow-up, which each store currently handles
+(or doesn't) independently.
+
+**Already fixed inline:** `strategies_store` (`_scan_all` helper) and
+`tenancy` (same helper copied in).
+
+**Pending stores with the same pattern, to be swept in one pass:**
+
+- `org_tools/store.py`
+- `strategy_proposals/store.py`
+- `dashboard/publisher.py`
+- `filings_store/stores.py`
+- `recommendations_store/store.py`
+- `halt/store.py`
+- `skills_store/store.py`
+- `heartbeat/store.py`
+- `ledger_store/store.py`
+
+**Proposed cleanup (future commit):**
+
+1. Promote `_scan_all` to a shared module (e.g.
+   `trading_strands.ddb.scan_all`) and have every store import it
+   instead of duplicating the helper.
+2. Emit a WARN log when the helper observes a `LastEvaluatedKey` on
+   the *first* page — a live "this scan would have silently dropped
+   rows in a one-shot call" signal that surfaces in CloudWatch
+   before a user notices a bug.
+3. Add a pytest AST check that walks `src/` and fails if it finds
+   `.scan(` on a `self._table` outside the helper. Prevents the
+   class of bug from re-entering via a hurried new store. Simpler
+   than a custom ruff plugin and doesn't need a new dependency.
+
+Lightweight library + lint guard rather than a repository/ORM layer —
+the table is single-PK and the access patterns are narrow enough
+that a thin helper plus a CI check closes the door without paying
+for indirection on every row read.
+
 ## References
 
 - [multi_tenancy.md](./multi_tenancy.md) — authz and schema-evolution rules
