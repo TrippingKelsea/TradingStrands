@@ -213,3 +213,47 @@ def test_grant_and_revoke_sysadmin(table: Any) -> None:
     assert store.is_sysadmin(alice.user_id) is True
     store.revoke_sysadmin(alice.user_id)
     assert store.is_sysadmin(alice.user_id) is False
+
+
+def test_memberships_for_user_paginates_across_ddb_pages(
+    table: Any,
+) -> None:
+    """Regression: memberships_for_user returned [] for a real member
+    when the member's USERORG# rows straddled a scan page boundary in
+    production (the shared table was dominated by MARKETDATA# rows, so
+    the first page of a filtered scan didn't always include the
+    caller's USERORG#). Pagination closes that gap — exercised here
+    by forcing the underlying table.scan to emit pages of 1 row."""
+
+    store = TenancyStore(table)
+    alice = store.create_user(email="alice@x.com")
+    org_a = store.create_org("A")
+    org_b = store.create_org("B")
+    store.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+    store.add_membership(alice.user_id, org_b.org_id, Role.VIEWER)
+
+    real_scan = table.scan
+    calls: list[dict[str, Any]] = []
+
+    def paginated_scan(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        resp = real_scan(**kwargs)
+        items = resp.get("Items", [])
+        start = kwargs.get("ExclusiveStartKey")
+        if start is None and len(items) > 1:
+            return {
+                "Items": items[:1],
+                "LastEvaluatedKey": {"pk": items[0]["pk"]},
+            }
+        return {"Items": items[1:] if start is None else items}
+
+    table.scan = paginated_scan  # type: ignore[method-assign]
+    try:
+        memberships = store.memberships_for_user(alice.user_id)
+    finally:
+        table.scan = real_scan  # type: ignore[method-assign]
+
+    org_ids = sorted(m.org_id for m in memberships)
+    assert org_ids == sorted([org_a.org_id, org_b.org_id])
+    assert len(calls) == 2  # follow-up call with ExclusiveStartKey
+    assert "ExclusiveStartKey" in calls[1]

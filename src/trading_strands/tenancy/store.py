@@ -34,6 +34,30 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _scan_all(table: Any, filter_expression: Any) -> list[dict[str, Any]]:
+    """Exhaustively scan with pagination.
+
+    DDB scan returns at most ~1 MB of pre-filter items per call; a one-
+    shot scan can silently drop matches when they live outside the
+    first page. This shared table mixes many prefixes (USER#, ORG#,
+    USERORG#, MARKETDATA#, STRATEGY#, …) with MARKETDATA# dominating
+    the volume, so a filter on any lighter prefix easily misses rows.
+
+    Observed symptom: memberships_for_user returned [] for a real
+    member, which cascaded into 403s on every org-scoped endpoint.
+    """
+
+    items: list[dict[str, Any]] = []
+    kwargs: dict[str, Any] = {"FilterExpression": filter_expression}
+    while True:
+        resp = table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            return items
+        kwargs["ExclusiveStartKey"] = last
+
+
 class EmailAlreadyInUseError(Exception):
     """Raised when creating a user whose email is already registered."""
 
@@ -76,12 +100,10 @@ class TenancyStore:
         """Scan all orgs. Scan is acceptable here — the number of orgs is
         small (< 1000) and this is only called by sysadmin meta-views."""
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with("ORG#"),
-        )
+        items = _scan_all(self._table, Attr("pk").begins_with("ORG#"))
         return [
             Org.model_validate({k: v for k, v in item.items() if k != "pk"})
-            for item in resp.get("Items", [])
+            for item in items
         ]
 
     def find_system_org(self) -> Org | None:
@@ -173,12 +195,10 @@ class TenancyStore:
             return None
 
     def list_users(self) -> list[User]:
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with("USER#"),
-        )
+        items = _scan_all(self._table, Attr("pk").begins_with("USER#"))
         return [
             User.model_validate({k: v for k, v in item.items() if k != "pk"})
-            for item in resp.get("Items", [])
+            for item in items
         ]
 
     def set_last_active_org(self, user_id: str, org_id: str | None) -> None:
@@ -242,20 +262,26 @@ class TenancyStore:
         self._table.delete_item(Key={"pk": f"ORGUSER#{org_id}#{user_id}"})
 
     def memberships_for_user(self, user_id: str) -> list[Membership]:
-        """Cheap query by key prefix — no scan."""
+        """Membership rows for one user. Returns all orgs the user is in.
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(f"USERORG#{user_id}#"),
+        The comment previously said "cheap query by key prefix — no
+        scan"; that was aspirational. The table has no sort key, so
+        this IS a filtered scan under the hood, and it must paginate
+        or it silently drops rows (see _scan_all docstring).
+        """
+
+        items = _scan_all(
+            self._table, Attr("pk").begins_with(f"USERORG#{user_id}#"),
         )
-        return [_to_membership(item) for item in resp.get("Items", [])]
+        return [_to_membership(item) for item in items]
 
     def memberships_for_org(self, org_id: str) -> list[Membership]:
         """List all users in an org with their roles."""
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(f"ORGUSER#{org_id}#"),
+        items = _scan_all(
+            self._table, Attr("pk").begins_with(f"ORGUSER#{org_id}#"),
         )
-        return [_to_membership(item) for item in resp.get("Items", [])]
+        return [_to_membership(item) for item in items]
 
     def role_of(self, user_id: str, org_id: str) -> Role | None:
         """Lookup of role for (user, org). Returns None if not a member."""
