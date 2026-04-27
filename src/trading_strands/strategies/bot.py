@@ -204,6 +204,8 @@ class StrategyBot:
         calendar_enabled: bool = False,
         ta_store: Any | None = None,
         ta_enabled: bool = False,
+        skills: list[Any] | None = None,
+        strategy_name: str = "",
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -228,17 +230,36 @@ class StrategyBot:
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
+        # Base system-prompt framing. Skills (if any) get composed
+        # into this at construction time — per SPEC §8.4 they appear
+        # between the base and the strategy body. When no skills are
+        # supplied, the bot falls back to the v0 behavior of using
+        # the strategy_prompt as the whole prompt body.
+        base_prompt = (
+            "You are a disciplined trading bot. Follow your strategy rules "
+            "precisely. Never deviate from the strategy. Be conservative "
+            "when uncertain — prefer to hold rather than make a bad trade."
+        )
+        if skills:
+            from trading_strands.skills_store.store import (
+                compose_system_prompt,
+            )
+            system_prompt = compose_system_prompt(
+                base_prompt=base_prompt,
+                skills=skills,
+                strategy_name=strategy_name or bot_id,
+                strategy_markdown=strategy_prompt,
+            )
+        else:
+            system_prompt = base_prompt
+
         # Tools are bound by the caller (app.py) via
         # tools.base.bind_tools_for_strategy. We pass them straight
         # through to the Strands Agent — None/empty means the agent
         # has no tools, which is the default v0 behavior.
         agent_kwargs: dict[str, Any] = {
             "model": model,
-            "system_prompt": (
-                "You are a disciplined trading bot. Follow your strategy rules "
-                "precisely. Never deviate from the strategy. Be conservative "
-                "when uncertain — prefer to hold rather than make a bad trade."
-            ),
+            "system_prompt": system_prompt,
         }
         if tools:
             agent_kwargs["tools"] = tools
