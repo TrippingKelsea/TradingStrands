@@ -122,6 +122,16 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     table = ddb.Table(table_name)
     ledger_store = LedgerStore(table)
 
+    # Heartbeat (untracked-cadence). Platform Supervisor records the beat
+    # but doesn't drive alarms off it — the weekly cadence is too slow
+    # to classify against tick-level thresholds. Still valuable: the
+    # dashboard can show "last risk review: 3 days ago" per org.
+    import contextlib as _contextlib
+
+    from trading_strands.heartbeat.store import HeartbeatStore as _HB
+    with _contextlib.suppress(Exception):
+        _HB(table).beat(agent_type="risk", agent_id=org_id)
+
     memory = AgentMemoryStore(
         s3_client=s3, bucket=bucket,
         org_id=org_id, agent_type="risk", agent_id=org_id,

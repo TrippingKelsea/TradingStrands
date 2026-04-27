@@ -30,6 +30,17 @@ class AgentHealthStatus(Enum):
     HEALTHY = "healthy"
     STALE = "stale"
     MISSING = "missing"
+    # Agent beats on a cadence slower than the supervisor's thresholds
+    # (weekly/daily review agents). Their last beat is recorded for
+    # observability but doesn't contribute to the missing/stale counts
+    # that drive alarms.
+    UNTRACKED = "untracked"
+
+
+# Agent types that beat at tick-level cadence (seconds). Other types
+# run on a schedule slower than the supervisor's thresholds; we record
+# their beats but don't classify them as stale/missing.
+FAST_CADENCE_AGENT_TYPES = frozenset({"strategy", "subscriber"})
 
 
 @dataclass
@@ -82,25 +93,34 @@ def check_health(
 ) -> HealthReport:
     """Walk every heartbeat, return a classified report.
 
+    Fast-cadence agents (see FAST_CADENCE_AGENT_TYPES) are classified
+    against the stale/missing thresholds. Slower agents (review Lambdas)
+    are recorded with status UNTRACKED — their last_beat_ts is
+    available for UI display but they don't drive alarms because their
+    natural cadence exceeds the thresholds.
+
     Agents list is sorted (agent_type, agent_id) for stable diffing
     across runs — operators compare consecutive reports by eye and
     shuffled ordering makes that hard.
     """
 
     beats = heartbeat_store.list_all()
-    agents = [
-        AgentHealth(
-            agent_type=b.agent_type,
-            agent_id=b.agent_id,
-            last_beat_ts=b.last_beat_ts,
-            status=classify_beat(
+    agents: list[AgentHealth] = []
+    for b in beats:
+        if b.agent_type in FAST_CADENCE_AGENT_TYPES:
+            status = classify_beat(
                 b.last_beat_ts,
                 stale_after_seconds,
                 missing_after_seconds,
-            ),
-        )
-        for b in beats
-    ]
+            )
+        else:
+            status = AgentHealthStatus.UNTRACKED
+        agents.append(AgentHealth(
+            agent_type=b.agent_type,
+            agent_id=b.agent_id,
+            last_beat_ts=b.last_beat_ts,
+            status=status,
+        ))
     agents.sort(key=lambda a: (a.agent_type, a.agent_id))
 
     healthy = sum(1 for a in agents if a.status is AgentHealthStatus.HEALTHY)

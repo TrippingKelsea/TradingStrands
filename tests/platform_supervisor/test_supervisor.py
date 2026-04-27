@@ -170,6 +170,54 @@ def test_check_health_empty_table_is_ok() -> None:
         assert report.ok is True
 
 
+def test_check_health_ignores_non_fast_agent_types_for_classification() -> None:
+    """Review agents (risk, compliance, auditor, self_critique) run on
+    daily/weekly cadences — their heartbeats are always older than a
+    tick-level stale threshold. We record them for UI purposes but
+    don't count them toward the missing total that drives alerts.
+    """
+
+    with mock_aws():
+        table = _table()
+        hb = HeartbeatStore(table)
+        # Fresh fast-cadence beat.
+        hb.beat("strategy", "s-1")
+        # Old slow-cadence beats — would be "missing" if not filtered.
+        table.put_item(Item={
+            "pk": "HEARTBEAT#risk#org-a",
+            "agent_type": "risk",
+            "agent_id": "org-a",
+            "last_beat_ts": int(time.time() - 86400 * 3),
+            "ttl": int(time.time() + 3600),
+        })
+        table.put_item(Item={
+            "pk": "HEARTBEAT#self_critique#strategy-abc",
+            "agent_type": "self_critique",
+            "agent_id": "strategy-abc",
+            "last_beat_ts": int(time.time() - 86400 * 5),
+            "ttl": int(time.time() + 3600),
+        })
+
+        report = check_health(
+            heartbeat_store=hb,
+            stale_after_seconds=60,
+            missing_after_seconds=300,
+        )
+        # All three beats surfaced in the agents list.
+        assert report.total == 3
+        # But only the strategy beat counts toward classification:
+        # healthy=1, stale+missing from the fast-cadence perspective=0.
+        assert report.healthy == 1
+        assert report.stale == 0
+        assert report.missing == 0
+        assert report.ok is True
+
+        # The review-agent rows are present in the agents list with a
+        # distinct status so operators can still see them.
+        risk_entry = next(a for a in report.agents if a.agent_type == "risk")
+        assert risk_entry.status.value == "untracked"
+
+
 # ── handler ─────────────────────────────────────────────────────────
 
 

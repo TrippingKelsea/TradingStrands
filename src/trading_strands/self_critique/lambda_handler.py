@@ -95,6 +95,15 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     table_name = os.environ["DYNAMODB_TABLE"]
     table = ddb.Table(table_name)
 
+    # Heartbeat keyed by the bot being critiqued — one row per
+    # bot per reflection cadence. Helps answer "did Saturday's
+    # self-critique actually run for strategy-abc?"
+    import contextlib as _contextlib
+
+    from trading_strands.heartbeat.store import HeartbeatStore as _HB
+    with _contextlib.suppress(Exception):
+        _HB(table).beat(agent_type="self_critique", agent_id=bot_id)
+
     memory_bucket = os.environ["AGENT_MEMORY_BUCKET"]
     model_id = os.environ.get("SELF_CRITIQUE_MODEL_ID", "")
 

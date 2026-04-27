@@ -119,6 +119,12 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     table = ddb.Table(table_name)
     ledger_store = LedgerStore(table)
 
+    import contextlib as _contextlib
+
+    from trading_strands.heartbeat.store import HeartbeatStore as _HB
+    with _contextlib.suppress(Exception):
+        _HB(table).beat(agent_type="auditor", agent_id=org_id)
+
     memory = AgentMemoryStore(
         s3_client=s3, bucket=bucket,
         org_id=org_id, agent_type="auditor", agent_id=org_id,
