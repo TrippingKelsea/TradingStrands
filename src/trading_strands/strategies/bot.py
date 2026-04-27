@@ -44,6 +44,9 @@ conditions and your portfolio state, then decide what action to take.
 ## Current Market Data
 {market_data}
 
+## Calendar (today + tomorrow)
+{calendar_context}
+
 ## Your Portfolio
 {portfolio_state}
 
@@ -98,6 +101,56 @@ def _map_action(action_str: str) -> IntentAction:
     return mapping.get(action_str.lower(), IntentAction.HOLD)
 
 
+def _build_calendar_context(
+    calendar_store: Any | None,
+    calendar_enabled: bool,
+    symbols: set[str],
+    bot_id: str,
+) -> str:
+    """Render the calendar section for the decision prompt.
+
+    Four cases worth distinguishing so the LLM reasons correctly:
+      - not wired at all → "(no calendar)"  (local dev / legacy)
+      - wired but strategy opts out → "(calendar disabled)"
+      - wired and enabled but store read fails → error placeholder
+      - wired and enabled → today + tomorrow summary via the
+        formatter (symbols filtered to the strategy's watch list)
+
+    A store read failure never interrupts the decision — the bot
+    falls back to a marker that tells the LLM the calendar is
+    unavailable this tick. Same posture as every other optional
+    context path.
+
+    Module-level rather than a method so the logic is unit-testable
+    without constructing a StrategyBot (which pulls in Strands/Bedrock).
+    """
+
+    if calendar_store is None:
+        return "(no calendar wired)"
+    if not calendar_enabled:
+        return "(calendar disabled for this strategy)"
+
+    try:
+        import time as _time
+
+        from trading_strands.calendar_store.store import (
+            summarize_for_symbols,
+        )
+
+        today_str = _time.strftime("%Y-%m-%d", _time.gmtime())
+        tomorrow_str = _time.strftime(
+            "%Y-%m-%d", _time.gmtime(_time.time() + 86400),
+        )
+        today = calendar_store.get_day(today_str)
+        tomorrow = calendar_store.get_day(tomorrow_str)
+        return summarize_for_symbols(
+            symbols=symbols, today=today, tomorrow=tomorrow,
+        )
+    except Exception:
+        logger.exception("calendar.read_failed", bot_id=bot_id)
+        return "Calendar read failed."
+
+
 class StrategyBot:
     """A strategy bot backed by a Strands agent.
 
@@ -118,6 +171,8 @@ class StrategyBot:
         memory_store: Any | None = None,
         heartbeat_store: Any | None = None,
         tools: list[Any] | None = None,
+        calendar_store: Any | None = None,
+        calendar_enabled: bool = False,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -128,6 +183,14 @@ class StrategyBot:
         self._token_store = token_store
         self._memory_store = memory_store
         self._heartbeat_store = heartbeat_store
+        # Calendar is context-injected (not a tool call). Store handle
+        # is always optional — when absent, no calendar section is
+        # rendered. `calendar_enabled` is the per-strategy opt-in; a
+        # strategy with the store wired but enabled=False gets a
+        # "(disabled)" placeholder so the prompt template doesn't
+        # blow up on missing keys.
+        self._calendar_store = calendar_store
+        self._calendar_enabled = calendar_enabled
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
@@ -173,6 +236,7 @@ class StrategyBot:
         prompt = _DECISION_PROMPT_TEMPLATE.format(
             strategy_prompt=self.strategy_prompt,
             market_data=_format_market_data(prices),
+            calendar_context=self._calendar_context(),
             portfolio_state=_format_portfolio(ledger),
             recent_decisions=self._format_recent() or "No recent decisions.",
         )
@@ -285,4 +349,12 @@ class StrategyBot:
             return ""
         return "\n".join(
             f"  {i + 1}. {d}" for i, d in enumerate(self._recent_decisions)
+        )
+
+    def _calendar_context(self) -> str:
+        return _build_calendar_context(
+            calendar_store=self._calendar_store,
+            calendar_enabled=self._calendar_enabled,
+            symbols=set(self.symbols),
+            bot_id=self.bot_id,
         )

@@ -86,3 +86,74 @@ class TestBotDecision:
         assert decision.action == "buy"
         assert decision.symbol == "AAPL"
         assert decision.quantity == "10"
+
+
+class TestCalendarContext:
+    """_build_calendar_context: the four cases documented above the
+    function. These exercise the decision-prompt injection path
+    without requiring a full StrategyBot (which would need Bedrock)."""
+
+    def test_no_store_returns_not_wired(self) -> None:
+        from trading_strands.strategies.bot import _build_calendar_context
+
+        out = _build_calendar_context(
+            calendar_store=None,
+            calendar_enabled=True,   # irrelevant when no store
+            symbols={"AAPL"},
+            bot_id="bot-1",
+        )
+        assert "(no calendar wired)" in out
+
+    def test_wired_but_disabled(self) -> None:
+        from trading_strands.strategies.bot import _build_calendar_context
+
+        class _Store:
+            def get_day(self, _date: str) -> None: ...  # never called
+
+        out = _build_calendar_context(
+            calendar_store=_Store(),
+            calendar_enabled=False,
+            symbols={"AAPL"},
+            bot_id="bot-1",
+        )
+        assert "disabled" in out.lower()
+
+    def test_store_read_failure_falls_back(self) -> None:
+        """Store read raising must not crash the decision. Returns a
+        marker telling the LLM calendar data is unavailable."""
+
+        from trading_strands.strategies.bot import _build_calendar_context
+
+        class _BrokenStore:
+            def get_day(self, _date: str) -> None:
+                raise RuntimeError("ddb throttled")
+
+        out = _build_calendar_context(
+            calendar_store=_BrokenStore(),
+            calendar_enabled=True,
+            symbols={"AAPL"},
+            bot_id="bot-1",
+        )
+        assert "failed" in out.lower()
+
+    def test_wired_enabled_produces_summary(self) -> None:
+        """Happy path: store returns None (no events today/tomorrow)
+        so summarize_for_symbols produces the empty-day response.
+        Proves the helper actually calls into summarize_for_symbols
+        rather than short-circuiting."""
+
+        from trading_strands.strategies.bot import _build_calendar_context
+
+        class _EmptyStore:
+            def get_day(self, _date: str) -> None:
+                return None  # no row for any date
+
+        out = _build_calendar_context(
+            calendar_store=_EmptyStore(),
+            calendar_enabled=True,
+            symbols={"AAPL"},
+            bot_id="bot-1",
+        )
+        # With both days None, summarize_for_symbols returns the
+        # "Calendar data unavailable." marker (§ formatter test).
+        assert "unavailable" in out.lower()
