@@ -132,6 +132,7 @@ def run_compliance_review(
     memory_store: Any,
     strategies: list[StrategyMandate],
     llm_invoker: Any,
+    recommendations_store: Any | None = None,
 ) -> ComplianceReviewReport:
     """Run one Compliance Agent invocation for an org."""
 
@@ -173,6 +174,19 @@ def run_compliance_review(
         memory_store.append_recommendation(entry)
     except Exception as exc:
         report.errors.append(f"memory.append_recommendation: {exc}")
+
+    if recommendations_store is not None:
+        try:
+            recommendations_store.append(
+                org_id=org_id,
+                agent_type="compliance",
+                agent_id=f"compliance-{org_id}",
+                severity="info",
+                summary=(report.recommendation or "")[:200],
+                body=report.recommendation,
+            )
+        except Exception as exc:
+            report.errors.append(f"recommendations_store.append: {exc}")
 
     logger.info(
         "compliance.complete org_id=%s strategies=%d tokens_in=%d tokens_out=%d",

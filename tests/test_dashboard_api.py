@@ -2953,6 +2953,91 @@ def test_create_strategy_with_tools_and_skills() -> None:
         assert body["skills"] == ["morning_prep"]
 
 
+# ── /api/orgs/{org_id}/advisories ─────────────────────────────────────
+
+
+def test_advisories_merges_cross_agent_output() -> None:
+    """Risk + Compliance + Auditor all write to RecommendationsStore;
+    the endpoint returns them merged, newest-first. Org Advisories
+    is the single panel an orgadmin checks for advisories across all
+    three review agents."""
+
+    with mock_aws():
+        from trading_strands.recommendations_store.store import (
+            RecommendationsStore,
+        )
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        store = RecommendationsStore(table)
+        store.append(
+            org_id=oid, agent_type="risk", agent_id="r",
+            severity="info", summary="concentration ok",
+            created_at=1_700_000_100,
+        )
+        store.append(
+            org_id=oid, agent_type="compliance", agent_id="c",
+            severity="warn", summary="mandate drift",
+            created_at=1_700_000_200,
+        )
+        store.append(
+            org_id=oid, agent_type="auditor", agent_id="a",
+            severity="critical", summary="[HALT] position drift",
+            created_at=1_700_000_300,
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(f"/api/orgs/{oid}/advisories")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 3
+        # Newest first — auditor (300) > compliance (200) > risk (100).
+        assert body[0]["agent_type"] == "auditor"
+        assert body[0]["severity"] == "critical"
+        assert body[2]["agent_type"] == "risk"
+
+
+def test_advisories_is_org_scoped() -> None:
+    """A user in org A must not see org B's advisories."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.recommendations_store.store import (
+            RecommendationsStore,
+        )
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.ORGADMIN)
+
+        rstore = RecommendationsStore(table)
+        rstore.append(
+            org_id=org_a.org_id, agent_type="risk", agent_id="r",
+            severity="info", summary="for A", created_at=1,
+        )
+        rstore.append(
+            org_id=org_b.org_id, agent_type="risk", agent_id="r",
+            severity="info", summary="for B", created_at=2,
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, org_a.org_id),
+        )
+        # Can see own org.
+        resp = client.get(f"/api/orgs/{org_a.org_id}/advisories")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+        # Cannot see another org's advisories (403 on authz).
+        resp = client.get(f"/api/orgs/{org_b.org_id}/advisories")
+        assert resp.status_code == 403
+
+
 # ── /api/metrics/query ─────────────────────────────────────────────────
 
 

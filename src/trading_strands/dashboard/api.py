@@ -938,6 +938,37 @@ async def get_org_review_heartbeats(
     return result
 
 
+@app.get("/api/orgs/{org_id}/advisories")
+async def list_org_advisories(
+    request: Request, org_id: str, limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Org Advisories: merged view of Risk/Compliance/Auditor advisories.
+
+    Each review agent also writes its own recommendations.md (retained
+    in the agent's S3 memory as the audit trail). This endpoint reads
+    the aggregated RECOMMENDATION#{org_id}#* rows from DDB for a
+    single newest-first stream an orgadmin can scan at a glance —
+    per docs/SPEC/agents.md. Authz: READ on the Org; cross-org
+    advisories are physically filtered out by the store.
+    """
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(type=ResourceType.ORG, org_id=org_id),
+    )
+
+    from trading_strands.recommendations_store.store import (
+        RecommendationsStore,
+    )
+    store = RecommendationsStore(_get_table())
+    # Clamp limit so a misbehaving client can't request the full
+    # window; 500 is already plenty of backlog for a single UI panel.
+    clamped = max(1, min(int(limit), 500))
+    entries = store.list_for_org(org_id, limit=clamped)
+    return [e.model_dump(mode="json") for e in entries]
+
+
 class OrgToolToggle(BaseModel):
     enabled: bool
 

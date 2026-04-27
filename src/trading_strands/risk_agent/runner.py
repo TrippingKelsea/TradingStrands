@@ -138,6 +138,7 @@ def run_risk_review(
     ledgers: dict[str, Any],
     recent_fills: list[dict[str, Any]],
     llm_invoker: Any,
+    recommendations_store: Any | None = None,
 ) -> RiskReviewReport:
     """Run one Risk Agent invocation for an org.
 
@@ -145,6 +146,12 @@ def run_risk_review(
     matching Self-Critique. Failures produce a report with errors set
     and an empty recommendation — callers decide whether to retry or
     alert.
+
+    `recommendations_store` is the cross-agent aggregator; when set,
+    the runner also publishes a RECOMMENDATION#* entry so the
+    dashboard's Org Advisories endpoint sees this review alongside
+    Compliance/Auditor output. Optional for back-compat with existing
+    callers and local-dev (None = S3 recommendations.md only).
     """
 
     date = _today_utc()
@@ -184,6 +191,19 @@ def run_risk_review(
         memory_store.append_recommendation(entry)
     except Exception as exc:
         report.errors.append(f"memory.append_recommendation: {exc}")
+
+    if recommendations_store is not None:
+        try:
+            recommendations_store.append(
+                org_id=org_id,
+                agent_type="risk",
+                agent_id=f"risk-{org_id}",
+                severity="info",
+                summary=(report.recommendation or "")[:200],
+                body=report.recommendation,
+            )
+        except Exception as exc:
+            report.errors.append(f"recommendations_store.append: {exc}")
 
     logger.info(
         "risk_agent.complete org_id=%s tokens_in=%d tokens_out=%d",

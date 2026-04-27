@@ -169,6 +169,7 @@ def run_audit_review(
     broker_positions: list[Any],
     llm_invoker: Any,
     audit_config: AuditConfig | None = None,
+    recommendations_store: Any | None = None,
 ) -> AuditReviewReport:
     """Run one Auditor Agent invocation.
 
@@ -247,6 +248,28 @@ def run_audit_review(
             memory_store.append_recommendation(entry)
         except Exception as exc:
             report.errors.append(f"memory.append_recommendation: {exc}")
+
+    # Auditor severity ties to whether the deterministic check tripped
+    # halt — if the desk was halted by this pass, the advisory is
+    # categorically more urgent than an LLM-suggested future concern.
+    if recommendations_store is not None and report.recommendation:
+        severity = "critical" if report.halt_triggered else "info"
+        summary = (
+            f"[HALT] {report.recommendation[:180]}"
+            if report.halt_triggered
+            else report.recommendation[:200]
+        )
+        try:
+            recommendations_store.append(
+                org_id=org_id,
+                agent_type="auditor",
+                agent_id=f"auditor-{org_id}",
+                severity=severity,
+                summary=summary,
+                body=report.recommendation,
+            )
+        except Exception as exc:
+            report.errors.append(f"recommendations_store.append: {exc}")
 
     logger.info(
         "auditor.complete org_id=%s status=%s halt=%s",
