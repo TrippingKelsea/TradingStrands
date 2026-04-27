@@ -28,22 +28,21 @@ logger = structlog.get_logger()
 
 
 class _DdbHaltControl:
-    """Writes the CONTROL row — same shape /api/halt uses. Single-row
-    system-wide halt for now; per-org halt becomes {pk:CONTROL#org_id}
-    when v1 multi-tenant halting lands."""
+    """Per-org halt writer. Scope is intentional: the Auditor Agent
+    that invoked this handler only reviewed ONE org's ledger vs broker.
+    If it saw drift, halting only that org keeps sibling orgs running.
+    System-wide halt stays the sysadmin's lever via the dashboard."""
 
-    def __init__(self, table: Any) -> None:
+    def __init__(self, table: Any, org_id: str) -> None:
         self._table = table
+        self._org_id = org_id
 
     def set_halted(self, halted: bool, reason: str = "") -> None:
-        import time as _time
+        from trading_strands.halt.store import HaltStore
 
-        self._table.put_item(Item={
-            "pk": "CONTROL",
-            "desk_halted": halted,
-            "halt_reason": reason,
-            "updated_at": int(_time.time()),
-        })
+        HaltStore(self._table).set_org_halt(
+            self._org_id, halted, reason=reason,
+        )
 
 
 def _strands_invoker(model_id: str) -> Any:
@@ -125,7 +124,7 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         org_id=org_id, agent_type="auditor", agent_id=org_id,
     )
 
-    halt_control = _DdbHaltControl(table)
+    halt_control = _DdbHaltControl(table, org_id)
     ledgers = _load_org_ledgers(table, ledger_store, org_id)
 
     try:

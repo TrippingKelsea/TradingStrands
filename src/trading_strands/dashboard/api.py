@@ -111,6 +111,19 @@ def _get_active_org(request: Request, principal: Principal) -> str:
     return str(claimed)
 
 
+def _active_org_or_empty(request: Request) -> str:
+    """Lenient variant of _get_active_org for callers (like /api/halt)
+    where an unset active org is not an error on its own. Returns empty
+    string when nothing's claimed; does no membership check — callers
+    decide what to do."""
+
+    claimed = request.query_params.get("org") or (
+        request.state.session.get("active_org_id")
+        if hasattr(request.state, "session") else None
+    )
+    return str(claimed or "")
+
+
 def _require(principal: Principal, action: Action, resource: Resource) -> None:
     """Check authorization or raise 403. Audit-friendly — the denial reason
     becomes the detail so logs carry it."""
@@ -926,48 +939,129 @@ async def get_strategy_lessons(
 # ── Halt control ───────────────────────────────────────────────────────
 
 
+class HaltRequest(BaseModel):
+    """Halt scope + optional reason. Omit scope for back-compat: callers
+    with sysadmin get system halt, orgadmins get their active-org halt."""
+
+    scope: str | None = None  # "system" | "org"
+    org_id: str | None = None
+    reason: str | None = None
+
+
+def _halt_scope_and_org(
+    principal: Principal, body: HaltRequest, active_org_id: str,
+) -> tuple[str, str | None]:
+    """Resolve (scope, org_id) for a halt/unhalt request with authz.
+
+    Rules:
+      - Explicit scope=system: sysadmin only.
+      - Explicit scope=org, org_id=X: the caller must be orgadmin of X
+        (or sysadmin).
+      - No explicit scope:
+          - sysadmin → system halt (broadest power they have)
+          - orgadmin of active org → org halt of active org
+          - anyone else → 403
+    """
+
+    if body.scope == "system":
+        if not principal.sysadmin:
+            raise HTTPException(
+                status_code=403,
+                detail="system halt requires sysadmin",
+            )
+        return "system", None
+
+    if body.scope == "org":
+        target = body.org_id or active_org_id
+        if not target:
+            raise HTTPException(
+                status_code=400, detail="org halt requires org_id",
+            )
+        is_admin = principal.memberships.get(target)
+        if not principal.sysadmin and (
+            is_admin is None or is_admin.value != "orgadmin"
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail=f"org halt requires orgadmin of {target}",
+            )
+        return "org", target
+
+    # No explicit scope — pick the narrowest the caller is entitled to.
+    if principal.sysadmin:
+        return "system", None
+    if any(r.value == "orgadmin" for r in principal.memberships.values()):
+        # Prefer the active org; fall back to the caller's single
+        # orgadmin membership when nothing's active.
+        resolved: str
+        if active_org_id and principal.memberships.get(active_org_id):
+            resolved = active_org_id
+        else:
+            admin_orgs = [
+                oid for oid, r in principal.memberships.items()
+                if r.value == "orgadmin"
+            ]
+            if len(admin_orgs) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="specify org_id — caller admins multiple orgs",
+                )
+            resolved = admin_orgs[0]
+        return "org", resolved
+
+    raise HTTPException(
+        status_code=403,
+        detail="halt requires orgadmin or sysadmin",
+    )
+
+
 @app.post("/api/halt")
-async def halt_trading(request: Request) -> dict[str, str]:
-    """Emergency halt — writes desk halt flag. System-wide action, gated
-    on orgadmin-of-anywhere OR sysadmin. For now any authenticated user
-    with at least orgadmin somewhere can halt — halting is a safety net,
-    we'd rather it be accessible in an emergency than gated too tightly.
-    Re-evaluate when we have multiple unrelated customer orgs."""
+async def halt_trading(
+    request: Request, body: HaltRequest | None = None,
+) -> dict[str, str]:
+    """Halt trading. Scope depends on caller + request body; see
+    _halt_scope_and_org for the resolution rules.
+
+    Sysadmin halt (scope=system) stops every org regardless of per-org
+    state. Orgadmin halt (scope=org) stops one org only — sibling orgs
+    keep running."""
+
+    from trading_strands.halt.store import HaltStore
 
     principal = _get_principal(request)
-    if not principal.sysadmin and not any(
-        role.value == "orgadmin" for role in principal.memberships.values()
-    ):
-        raise HTTPException(status_code=403, detail="halt requires orgadmin")
+    active = _active_org_or_empty(request)
+    body = body or HaltRequest()
+    scope, org_id = _halt_scope_and_org(principal, body, active)
+    reason = body.reason or f"dashboard halt by {principal.email}"
 
-    import time as _time
-
-    table = _get_table()
-    table.put_item(Item={
-        "pk": "CONTROL",
-        "desk_halted": True,
-        "updated_at": int(_time.time()),
-    })
-    return {"status": "halted"}
+    hs = HaltStore(_get_table())
+    if scope == "system":
+        hs.set_system_halt(True, reason=reason)
+        return {"status": "halted", "scope": "system"}
+    assert org_id is not None  # _halt_scope_and_org post-condition
+    hs.set_org_halt(org_id, True, reason=reason)
+    return {"status": "halted", "scope": "org", "org_id": org_id}
 
 
 @app.post("/api/unhalt")
-async def unhalt_trading(request: Request) -> dict[str, str]:
+async def unhalt_trading(
+    request: Request, body: HaltRequest | None = None,
+) -> dict[str, str]:
+    from trading_strands.halt.store import HaltStore
+
     principal = _get_principal(request)
-    if not principal.sysadmin and not any(
-        role.value == "orgadmin" for role in principal.memberships.values()
-    ):
-        raise HTTPException(status_code=403, detail="unhalt requires orgadmin")
+    active = _active_org_or_empty(request)
+    body = body or HaltRequest()
+    scope, org_id = _halt_scope_and_org(principal, body, active)
+    reason = body.reason or f"dashboard unhalt by {principal.email}"
 
-    import time as _time
-
-    table = _get_table()
-    table.put_item(Item={
-        "pk": "CONTROL",
-        "desk_halted": False,
-        "updated_at": int(_time.time()),
-    })
-    return {"status": "running"}
+    hs = HaltStore(_get_table())
+    if scope == "system":
+        hs.set_system_halt(False, reason=reason)
+        return {"status": "running", "scope": "system"}
+    assert org_id is not None
+    hs.set_org_halt(org_id, False, reason=reason)
+    return {"status": "running", "scope": "org", "org_id": org_id}
 
 
 # ── Telemetry ──────────────────────────────────────────────────────────

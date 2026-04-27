@@ -265,3 +265,147 @@ class TestPerOrgBrokerRouting:
             action=IntentAction.BUY, quantity=Decimal("1"),
         ))
         assert call_count == 2
+
+
+class TestHaltEnforcement:
+    """Per-org + system-wide halt enforcement via an injected HaltStore."""
+
+    class HaltStub:
+        """Small HaltStore-shaped fake. Returns halt state from a dict."""
+
+        def __init__(
+            self,
+            system_halted: bool = False,
+            org_halted: dict[str, bool] | None = None,
+            effective_reason: str | None = None,
+        ) -> None:
+            self.system_halted = system_halted
+            self.org_halted = org_halted or {}
+            self._reason = effective_reason
+
+        def is_effective_halted(self, org_id: str) -> bool:
+            return self.system_halted or self.org_halted.get(org_id, False)
+
+        def get_effective_reason(self, org_id: str) -> str | None:
+            if self.system_halted:
+                return self._reason or "system halted"
+            if self.org_halted.get(org_id):
+                return self._reason or "org halted"
+            return None
+
+    @pytest.mark.anyio
+    async def test_org_halt_rejects_intent_before_broker_call(self) -> None:
+        """Per-org halt must stop the trade BEFORE hitting the broker —
+        both for speed (no wasted Secrets Manager call) and correctness
+        (the halt is the whole point)."""
+
+        broker = StubBroker()
+        halt = TestHaltEnforcement.HaltStub(
+            org_halted={"org-a": True},
+            effective_reason="auditor: AAPL drift",
+        )
+        coordinator = TradeCoordinator(
+            broker_factory=lambda _o, _b=broker: _b, default_broker=broker,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+            halt_store=halt,
+        )
+        intent = TradeIntent(
+            bot_id="bot-1", org_id="org-a", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        )
+        result = await coordinator.execute(intent)
+        assert not result.approved
+        assert result.risk_decision is not None
+        assert "halted" in (result.risk_decision.reason or "").lower()
+        # Broker must not have been called for the order.
+        assert broker.submitted_orders == []
+
+    @pytest.mark.anyio
+    async def test_sibling_org_not_halted_still_trades(self) -> None:
+        """org-a halted shouldn't touch org-b."""
+
+        broker = StubBroker()
+        halt = TestHaltEnforcement.HaltStub(
+            org_halted={"org-a": True},
+        )
+        coordinator = TradeCoordinator(
+            broker_factory=lambda _o, _b=broker: _b, default_broker=broker,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+            halt_store=halt,
+        )
+        intent = TradeIntent(
+            bot_id="bot-1", org_id="org-b", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        )
+        result = await coordinator.execute(intent)
+        assert result.approved
+        assert len(broker.submitted_orders) == 1
+
+    @pytest.mark.anyio
+    async def test_system_halt_rejects_every_org(self) -> None:
+        broker = StubBroker()
+        halt = TestHaltEnforcement.HaltStub(system_halted=True)
+        coordinator = TradeCoordinator(
+            broker_factory=lambda _o, _b=broker: _b, default_broker=broker,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+            halt_store=halt,
+        )
+        for org in ("org-a", "org-b", "org-c"):
+            result = await coordinator.execute(TradeIntent(
+                bot_id="bot-1", org_id=org, symbol="AAPL",
+                action=IntentAction.BUY, quantity=Decimal("1"),
+            ))
+            assert not result.approved
+        assert broker.submitted_orders == []
+
+    @pytest.mark.anyio
+    async def test_halt_store_read_error_fails_open(self) -> None:
+        """A transient HaltStore read error must not lock the desk —
+        the in-memory RiskManager._desk_halted flag is still the
+        authoritative safety net. Fail-open here, fail-closed on the
+        RiskManager side: belt-and-suspenders with opposite default."""
+
+        broker = StubBroker()
+
+        class BrokenHalt:
+            def is_effective_halted(self, org_id: str) -> bool:
+                raise RuntimeError("ddb throttled")
+
+            def get_effective_reason(self, org_id: str) -> str | None:
+                return None
+
+        coordinator = TradeCoordinator(
+            broker_factory=lambda _o, _b=broker: _b, default_broker=broker,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+            halt_store=BrokenHalt(),
+        )
+        result = await coordinator.execute(TradeIntent(
+            bot_id="bot-1", org_id="org-a", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+        # No halt detected → falls through to normal risk/broker path.
+        assert result.approved
+        assert len(broker.submitted_orders) == 1
+
+    @pytest.mark.anyio
+    async def test_no_halt_store_defaults_to_v0_behavior(self) -> None:
+        """Back-compat: callers without a halt_store get the legacy
+        single-flag behavior unchanged."""
+
+        broker = StubBroker()
+        coordinator = TradeCoordinator(
+            broker_factory=lambda _o, _b=broker: _b, default_broker=broker,
+            risk_manager=RiskManager(RiskConfig()),
+            ledgers={"bot-1": Ledger(starting_capital=Decimal("10000"))},
+            # halt_store intentionally not set
+        )
+        result = await coordinator.execute(TradeIntent(
+            bot_id="bot-1", org_id="org-a", symbol="AAPL",
+            action=IntentAction.BUY, quantity=Decimal("1"),
+        ))
+        assert result.approved
+        assert len(broker.submitted_orders) == 1

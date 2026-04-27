@@ -73,6 +73,7 @@ class TradeCoordinator:
         ledgers: dict[str, Ledger],
         default_broker: Any | None = None,
         ledger_store: Any | None = None,
+        halt_store: Any | None = None,
     ) -> None:
         self._broker_factory = broker_factory
         self._broker_cache: dict[str, Any] = {}
@@ -83,6 +84,12 @@ class TradeCoordinator:
         # fill to DynamoDB. Tests and local-dev pass None; the coordinator
         # still functions (just without durability).
         self._ledger_store = ledger_store
+        # Optional per-org halt check. When set, the coordinator consults
+        # halt_store.is_effective_halted(intent.org_id) before routing to
+        # a broker — system-wide halt OR org-scoped halt blocks the
+        # trade. v0 without a halt_store keeps the legacy in-memory
+        # RiskManager._desk_halted behavior.
+        self._halt_store = halt_store
 
     def broker_for(self, org_id: str) -> Any:
         """Return the broker adapter for this org, creating it on first use.
@@ -128,6 +135,32 @@ class TradeCoordinator:
                     intent=intent,
                 ),
             )
+
+        # Per-org / system-wide halt gate. Checked BEFORE broker resolution
+        # because "halted" is categorically different from "no creds" —
+        # we want the rejection reason to say so, and skipping the broker
+        # read avoids wasted Secrets Manager calls during a halt.
+        if self._halt_store is not None:
+            try:
+                halted = self._halt_store.is_effective_halted(intent.org_id)
+            except Exception:
+                halted = False  # fail-open on store read errors is safer
+                                # than fail-closed: a transient DDB issue
+                                # shouldn't lock the desk. The v0 in-memory
+                                # halt flag is still authoritative.
+            if halted:
+                reason = (
+                    self._halt_store.get_effective_reason(intent.org_id)
+                    or "desk halted"
+                )
+                return ExecutionResult(
+                    intent=intent,
+                    risk_decision=RiskDecision(
+                        verdict=RiskVerdict.REJECTED,
+                        intent=intent,
+                        reason=f"halted: {reason}",
+                    ),
+                )
 
         # Resolve the broker for this org BEFORE risk-checking. If the org
         # can't produce a broker (missing creds), reject the intent up-front

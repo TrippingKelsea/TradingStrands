@@ -380,6 +380,18 @@ async def run(
                 reason=f"{AGENT_MEMORY_BUCKET_ENV} not set",
             )
 
+    # HaltStore: per-org + system-wide halt state. Built from the same
+    # DDB table; when absent (no table_name, i.e. local dev), the
+    # coordinator falls back to its v0 in-memory RiskManager flag.
+    halt_store: Any | None = None
+    if table_name:
+        import boto3 as _boto3_halt
+
+        from trading_strands.halt.store import HaltStore as _HaltStore
+        halt_store = _HaltStore(
+            _boto3_halt.resource("dynamodb").Table(table_name),
+        )
+
     risk_manager = RiskManager(RiskConfig())
     coordinator = TradeCoordinator(
         broker_factory=broker_factory,
@@ -387,6 +399,7 @@ async def run(
         ledgers={},
         default_broker=market_broker,
         ledger_store=ledger_store,
+        halt_store=halt_store,
     )
 
     # Market-data source: broker by default (v0 behavior). Set

@@ -180,16 +180,22 @@ class StatePublisher:
         """Delete a strategy from DynamoDB."""
         self._table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})
 
-    def set_halt(self, halted: bool) -> None:
-        """Write desk halt flag to DynamoDB for the trading service to read."""
+    def set_halt(self, halted: bool, reason: str = "") -> None:
+        """Write system-wide desk halt flag. Preserved for back-compat
+        with the pre-v1 single-org deployment. New halt paths (per-org)
+        go through HaltStore directly."""
+
         self._table.put_item(Item={
             "pk": "CONTROL",
             "desk_halted": halted,
+            "halt_reason": reason,
             "updated_at": int(time.time()),
         })
 
     def get_halt(self) -> bool:
-        """Read desk halt flag from DynamoDB."""
+        """Read system-wide halt flag. Callers that care about per-org
+        halt should use HaltStore.is_effective_halted instead."""
+
         resp = self._table.get_item(Key={"pk": "CONTROL"})
         item = resp.get("Item")
         if item is None:
