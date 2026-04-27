@@ -719,6 +719,69 @@ class TradingStrandsStack(cdk.Stack):
             ),
         )
 
+        # -- Auditor Agent (per-org, has halt authority) ---------------------
+        #
+        # Not built via _build_review_agent because its IAM is
+        # qualitatively different: it needs Secrets Manager read for the
+        # org's Alpaca creds AND write access to the CONTROL row to halt
+        # the desk on drift. Keeping this out of the shared helper makes
+        # the "wait, why does this Lambda have DDB write?" answer
+        # immediate rather than buried in a helper kwarg.
+        auditor_agent_fn = lambda_.DockerImageFunction(
+            self,
+            "AuditorAgentFunction",
+            function_name="trading-strands-auditor-agent",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.auditor_agent.lambda_handler.handler",
+                ],
+            ),
+            memory_size=1024,
+            timeout=cdk.Duration.minutes(5),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                "AUDITOR_AGENT_MODEL_ID": "us.anthropic.claude-sonnet-4-6",
+            },
+        )
+        cdk.Tags.of(auditor_agent_fn).add("Component", "auditor-agent")
+        # Read + Write: the auditor writes the CONTROL row when it halts.
+        table.grant_read_write_data(auditor_agent_fn)
+        agent_memory_bucket.grant_read_write(auditor_agent_fn)
+        auditor_agent_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+            ],
+            resources=["*"],
+        ))
+        # Per-org Alpaca creds — same scoping as the trading task role.
+        auditor_agent_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=["secretsmanager:GetSecretValue"],
+            resources=[
+                f"arn:aws:secretsmanager:{self.region}:{self.account}:"
+                "secret:trading-strands/org/*",
+            ],
+        ))
+
+        # Daily-ish cadence lines up with the spec's "periodic pulls"
+        # language. Disabled on first deploy; same fan-out-Lambda story
+        # as Risk/Compliance before it's wired in.
+        events.Rule(
+            self,
+            "AuditorAgentDailySchedule",
+            description=(
+                "Weekdays 23:00 UTC — per-org Auditor Agent. Runs after "
+                "US close so broker positions are settled for the day."
+            ),
+            schedule=events.Schedule.cron(
+                minute="0", hour="23", week_day="MON-FRI",
+            ),
+            enabled=False,
+        )
+
         # -- BotProvisioner (weekend fan-out) --------------------------------
         #
         # Enumerates active strategies and invokes the Self-Critique function
