@@ -1012,8 +1012,13 @@
         el.textContent = 'No memory for this range.';
         return;
       }
+      // Memory is appended newest-at-bottom during the day. The
+      // endpoint returns days newest-first already; reverse lines
+      // within each day so the operator sees the latest thought at
+      // the top of each section without scrolling past history.
+      const reverseLines = (content) => content.split('\n').reverse().join('\n');
       el.textContent = nonEmpty.map(d =>
-        '# ' + d.date + '\n\n' + d.content.trim() + '\n'
+        '# ' + d.date + '\n\n' + reverseLines(d.content.trim()) + '\n'
       ).join('\n──────────────────────\n\n');
     } catch(e) {
       el.textContent = 'Memory fetch failed.';
@@ -1120,7 +1125,11 @@
     try {
       const resp = await fetch('/api/strategies/' + s.strategy_id + '/prompt-snapshot');
       if (resp.status === 404) {
-        sysEl.textContent = 'No prompt snapshot yet. The bot hasn\'t completed a decide tick since it started.';
+        // v0 bots that were provisioned before the init-time seed
+        // won't have a snapshot until they tick once; newly-deployed
+        // code seeds one at __init__. Both cases render the same
+        // placeholder.
+        sysEl.textContent = 'Prompt will render once the bot starts ticking (a few seconds after service health reports running).';
         userEl.textContent = '';
         tickEl.textContent = '?';
         renderedEl.textContent = '—';

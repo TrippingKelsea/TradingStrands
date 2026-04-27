@@ -350,6 +350,27 @@ class StrategyBot:
             agent_kwargs["tools"] = tools
         self._agent = Agent(**agent_kwargs)
 
+        # Seed an initial snapshot at construction time so the Prompt
+        # tab has something to show before the first decide() fires.
+        # user_prompt uses a placeholder that makes clear the bot
+        # hasn't ticked yet — updated in-place on every tick thereafter.
+        # Best-effort: a write failure never prevents the bot from
+        # starting.
+        if self._prompt_snapshot_store is not None:
+            import contextlib as _contextlib
+            with _contextlib.suppress(Exception):
+                self._prompt_snapshot_store.write(
+                    bot_id=self.bot_id,
+                    org_id=self.org_id,
+                    system_prompt=self._system_prompt,
+                    user_prompt=(
+                        "(pending first tick — the tick-time user "
+                        "prompt will be rendered here on the next "
+                        "decide cycle)"
+                    ),
+                    tick=0,
+                )
+
     async def decide(
         self,
         bot_id: str,
