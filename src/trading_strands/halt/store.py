@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from trading_strands.emf.emitter import emit_metric
+
 SYSTEM_HALT_PK = "CONTROL"
 ORG_HALT_PK_PREFIX = "CONTROL#"
 
@@ -32,6 +34,38 @@ def _empty() -> HaltState:
     return HaltState(halted=False, reason=None, updated_at=0)
 
 
+def _emit_transition(
+    *, scope: str, halted: bool, org_id: str | None = None,
+    reason: str = "",
+) -> None:
+    """Emit the EMF halt-transition metric. Kept as a module-level
+    helper so tests can read from stdout via capsys and any new halt
+    writers in the future get the emission for free by using HaltStore.
+
+    `halted` rides as a dimension (so CW alarms can key off it); the
+    scope dimension lets a single alarm fire on (scope=system, halted=true)
+    specifically, which is the "sysadmin emergency" case we most want
+    to alarm on immediately. Reason and org_id ride as extra fields
+    (searchable in Logs Insights, not chargeable dimensions).
+    """
+
+    extra: dict[str, Any] = {}
+    if org_id:
+        extra["halt_org_id"] = org_id
+    if reason:
+        extra["halt_reason"] = reason
+    emit_metric(
+        "halt.transition.count",
+        value=1,
+        unit="Count",
+        dimensions={
+            "scope": scope,
+            "halted": "true" if halted else "false",
+        },
+        extra=extra or None,
+    )
+
+
 class HaltStore:
     """Read/write halt flags. Single table, two pk shapes."""
 
@@ -43,6 +77,12 @@ class HaltStore:
     def set_org_halt(
         self, org_id: str, halted: bool, reason: str = "",
     ) -> None:
+        """Set the org's halt flag. Emits halt.transition.count ONLY on
+        a state change — re-writing the same state (defensive unhalts
+        on startup, re-triggered auditor halts) is a no-op for alarms.
+        """
+
+        prior = self.get_org_state(org_id)
         self._table.put_item(Item={
             "pk": f"{ORG_HALT_PK_PREFIX}{org_id}",
             "org_id": org_id,
@@ -50,6 +90,11 @@ class HaltStore:
             "halt_reason": reason,
             "updated_at": int(time.time()),
         })
+        if prior.halted != halted:
+            _emit_transition(
+                scope="org", halted=halted,
+                org_id=org_id, reason=reason,
+            )
 
     def get_org_state(self, org_id: str) -> HaltState:
         resp = self._table.get_item(
@@ -72,12 +117,17 @@ class HaltStore:
     def set_system_halt(
         self, halted: bool, reason: str = "",
     ) -> None:
+        prior = self.get_system_state()
         self._table.put_item(Item={
             "pk": SYSTEM_HALT_PK,
             "desk_halted": halted,
             "halt_reason": reason,
             "updated_at": int(time.time()),
         })
+        if prior.halted != halted:
+            _emit_transition(
+                scope="system", halted=halted, reason=reason,
+            )
 
     def get_system_state(self) -> HaltState:
         resp = self._table.get_item(Key={"pk": SYSTEM_HALT_PK})
