@@ -481,6 +481,27 @@ class TradingStrandsStack(cdk.Stack):
                 resources=["*"],
             )
         )
+        # CloudWatch Logs Insights for the per-strategy detail page's
+        # tool-call feed. GetMetricData is already wired above via
+        # /api/metrics/query; Insights is a separate set of actions
+        # because it can target arbitrary log groups and AWS treats
+        # the permission independently.
+        dashboard_task_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:StartQuery",
+                    "logs:GetQueryResults",
+                    "logs:StopQuery",
+                    "logs:DescribeQueries",
+                ],
+                # Scoped to the trading log group — dashboard has no
+                # reason to query any other team's logs.
+                resources=[
+                    f"arn:aws:logs:{self.region}:{self.account}:"
+                    "log-group:/ecs/trading-strands/trading:*",
+                ],
+            )
+        )
         # Dashboard writes per-org Alpaca credentials to Secrets Manager.
         # Deliberately scoped to /org/*/alpaca — the dashboard never needs
         # to touch the global trading-strands/alpaca secret, which remains
