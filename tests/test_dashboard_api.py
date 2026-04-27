@@ -3413,3 +3413,100 @@ def test_update_strategy_can_modify_tools_and_skills() -> None:
         body = resp.json()
         assert body["tools"]["news"]["enabled"] is True
         assert body["skills"] == ["greeks", "morning_prep"]
+
+
+# ── /api/strategies/{sid}/prompt-snapshot ─────────────────────────────
+
+
+def test_prompt_snapshot_returns_last_rendered_prompt() -> None:
+    """Happy path: a bot that decided at least once has a snapshot;
+    author of the strategy can read it."""
+
+    with mock_aws():
+        from trading_strands.prompt_snapshots.store import PromptSnapshotStore
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+        snaps = PromptSnapshotStore(table)
+        snaps.write(
+            bot_id=f"strategy-{strat.strategy_id}",
+            org_id=oid,
+            system_prompt="You are a disciplined bot.",
+            user_prompt="## Market data\nAAPL: $150",
+            tick=42,
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(
+            f"/api/strategies/{strat.strategy_id}/prompt-snapshot",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tick"] == 42
+        assert body["user_prompt"].startswith("## Market data")
+        assert body["system_prompt"].startswith("You are a disciplined")
+        assert body["rendered_at"] > 0
+
+
+def test_prompt_snapshot_404_when_bot_never_decided() -> None:
+    """A strategy that exists but whose bot hasn't had a decide tick
+    fire yet returns 404. The UI's placeholder is driven by this."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(
+            f"/api/strategies/{strat.strategy_id}/prompt-snapshot",
+        )
+        assert resp.status_code == 404
+
+
+def test_prompt_snapshot_forbidden_for_other_org() -> None:
+    """Cross-org access blocked — same authz as the strategy itself."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.prompt_snapshots.store import PromptSnapshotStore
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+
+        foreign = StrategyStore(table).create(
+            org_id=org_b.org_id, author_user_id="someone",
+            name="s", markdown="# m",
+        )
+        PromptSnapshotStore(table).write(
+            bot_id=f"strategy-{foreign.strategy_id}",
+            org_id=org_b.org_id,
+            system_prompt="sys", user_prompt="usr", tick=1,
+        )
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, org_a.org_id),
+        )
+        resp = client.get(
+            f"/api/strategies/{foreign.strategy_id}/prompt-snapshot",
+        )
+        assert resp.status_code == 403

@@ -1355,6 +1355,50 @@ async def get_strategy_lessons(
     }
 
 
+@app.get("/api/strategies/{strategy_id}/prompt-snapshot")
+async def get_strategy_prompt_snapshot(
+    request: Request, strategy_id: str,
+) -> dict[str, Any]:
+    """Return the last-rendered prompt this strategy's bot saw.
+
+    One row per bot in DDB (PROMPTSNAPSHOT#{bot_id}), overwritten each
+    tick. Returns 404 when no snapshot has been written yet — the UI
+    can render a "no snapshot yet" placeholder for a strategy that
+    hasn't had a decide tick fire.
+
+    Privacy boundary is the same as the strategy itself: READ on the
+    strategy = READ on its prompt. The system prompt may include
+    composed skills content, and the user prompt includes portfolio +
+    ledger state — both sensitive in the same way the strategy
+    markdown is.
+    """
+
+    principal = _get_principal(request)
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.READ, resource_for(strat, acl))
+
+    from trading_strands.prompt_snapshots.store import PromptSnapshotStore
+    snap_store = PromptSnapshotStore(_get_table())
+    bot_id = f"strategy-{strategy_id}"
+    snapshot = snap_store.get(bot_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "No prompt snapshot yet. The bot hasn't completed a "
+                "decide tick since it started, or prompt snapshot "
+                "persistence isn't wired."
+            ),
+        )
+    return snapshot.model_dump(mode="json")
+
+
 # ── Halt control ───────────────────────────────────────────────────────
 
 
