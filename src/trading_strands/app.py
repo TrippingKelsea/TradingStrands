@@ -383,7 +383,40 @@ async def run(
         ledger_store=ledger_store,
     )
 
-    market_data = MarketDataProvider(market_broker)
+    # Market-data source: broker by default (v0 behavior). Set
+    # MARKET_DATA_SOURCE=store to read from MarketDataStore instead,
+    # with the broker as fallback on miss/staleness. Opt-in because
+    # the swap is reversible only by restart; default-off lets us
+    # ship the subscriber side without affecting the hot path.
+    market_data_source = os.environ.get(
+        "MARKET_DATA_SOURCE", "broker",
+    ).lower()
+    market_data: Any
+    if (
+        market_data_source == "store"
+        and marketdata_store is not None
+    ):
+        from trading_strands.marketdata.store_provider import (
+            StoreBackedMarketDataProvider,
+        )
+        market_data = StoreBackedMarketDataProvider(
+            store=marketdata_store, fallback_broker=market_broker,
+        )
+        await logger.ainfo(
+            "market_data.source store staleness_seconds=120",
+        )
+    else:
+        market_data = MarketDataProvider(market_broker)
+        if market_data_source == "store":
+            # Caller asked for store-backed but no store wired (local
+            # dev without DYNAMODB_TABLE). Silently falling back to
+            # broker-only would be surprising; log so it's obvious.
+            await logger.awarn(
+                "market_data.source_requested_store_but_no_store "
+                "falling_back_to_broker",
+            )
+        else:
+            await logger.ainfo("market_data.source broker")
 
     # Auditor reconciler — checks ledger-broker consistency
     reconciler = Reconciler(AuditConfig())
