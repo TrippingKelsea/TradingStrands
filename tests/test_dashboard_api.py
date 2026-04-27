@@ -2438,3 +2438,202 @@ def test_halt_events_requires_auth() -> None:
         client = TestClient(app)
         resp = client.get("/api/halt/events")
         assert resp.status_code == 401
+
+
+# ── Halt scope resolution edge cases ────────────────────────────────
+
+
+def test_halt_explicit_system_scope_by_non_sysadmin_is_403() -> None:
+    """An orgadmin (no sysadmin) trying scope=system is asking for a
+    power they don't have. 403, not silently downgraded to org."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="orgadmin")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/halt", json={"scope": "system"})
+        assert resp.status_code == 403
+        assert "sysadmin" in resp.json().get("detail", "").lower()
+
+
+def test_halt_explicit_org_by_non_member_is_403() -> None:
+    """Even an orgadmin can't halt an org they're not in."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org_a.org_id,
+        ))
+        resp = client.post(
+            "/api/halt", json={"scope": "org", "org_id": org_b.org_id},
+        )
+        assert resp.status_code == 403
+
+
+def test_halt_explicit_org_no_org_id_no_active_is_400() -> None:
+    """scope=org with neither body.org_id nor an active org = 400."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        # Cookie with active_org_id=None so the lenient active lookup
+        # returns empty.
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, None,
+        ))
+        resp = client.post("/api/halt", json={"scope": "org"})
+        assert resp.status_code == 400
+        assert "org_id" in resp.json().get("detail", "").lower()
+
+
+def test_halt_no_scope_viewer_only_is_403() -> None:
+    """A user who's only a viewer — no orgadmin anywhere, no
+    sysadmin — can't halt. The resolution path must reject rather
+    than silently pick 'system'."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.VIEWER)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.post("/api/halt")
+        assert resp.status_code == 403
+        assert "orgadmin" in resp.json().get("detail", "").lower()
+
+
+def test_halt_no_scope_multi_orgadmin_no_active_requires_org_id() -> None:
+    """Orgadmin of multiple orgs with no active org can't implicitly
+    halt — they must specify which org."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        a = tenancy.create_org("A")
+        b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, a.org_id, Role.ORGADMIN)
+        tenancy.add_membership(alice.user_id, b.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, None,
+        ))
+        resp = client.post("/api/halt")
+        assert resp.status_code == 400
+        assert "multiple" in resp.json().get("detail", "").lower()
+
+
+def test_halt_no_scope_single_orgadmin_no_active_falls_back_to_that_org() -> None:
+    """Orgadmin of exactly one org, no active, no scope — resolve
+    to that org. Avoids requiring explicit org_id when there's no
+    ambiguity."""
+
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.halt.store import HaltStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("A")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.ORGADMIN)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, None,
+        ))
+        resp = client.post("/api/halt", json={"reason": "single-org test"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["scope"] == "org"
+        assert body["org_id"] == org.org_id
+
+        # And the HaltStore row actually landed on that org, not
+        # system-wide or a sibling.
+        assert HaltStore(table).is_org_halted(org.org_id) is True
+        assert HaltStore(table).is_system_halted() is False
+
+
+def test_halt_sysadmin_no_scope_defaults_to_system() -> None:
+    """Sysadmin with no explicit scope gets the broadest power they
+    have — system. Documented in _halt_scope_and_org."""
+
+    with mock_aws():
+        from trading_strands.halt.store import HaltStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        root = tenancy.create_user(email="root@x.com")
+        tenancy.grant_sysadmin(root.user_id)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            root.user_id, None,
+        ))
+        resp = client.post("/api/halt", json={"reason": "sysadmin test"})
+        assert resp.status_code == 200
+        assert resp.json()["scope"] == "system"
+        assert HaltStore(table).is_system_halted() is True
+
+
+def test_halt_sysadmin_can_halt_any_org_by_id() -> None:
+    """Sysadmin explicit scope=org halts that org without needing
+    membership. Complements the org-halt=orgadmin rule; sysadmin is
+    a super-right across orgs."""
+
+    with mock_aws():
+        from trading_strands.halt.store import HaltStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        root = tenancy.create_user(email="root@x.com")
+        tenancy.grant_sysadmin(root.user_id)
+        # Sysadmin is NOT in any org.
+        target_org = tenancy.create_org("target")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            root.user_id, None,
+        ))
+        resp = client.post("/api/halt", json={
+            "scope": "org", "org_id": target_org.org_id,
+            "reason": "sysadmin halting on behalf",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["org_id"] == target_org.org_id
+        assert HaltStore(table).is_org_halted(target_org.org_id) is True
