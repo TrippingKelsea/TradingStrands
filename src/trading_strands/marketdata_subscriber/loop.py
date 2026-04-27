@@ -118,6 +118,8 @@ async def run_forever(
     strategy_store: StrategyStore,
     poll_interval: float = 5.0,
     symbol_refresh_interval: float = 60.0,
+    heartbeat_store: Any | None = None,
+    heartbeat_agent_id: str = "marketdata-subscriber",
 ) -> None:
     """Main subscriber loop.
 
@@ -129,12 +131,26 @@ async def run_forever(
     Errors in the symbol refresh (e.g. transient DDB failures) log
     and continue with the prior symbol set — stale symbols are fine;
     crashing the service would be worse.
+
+    heartbeat_store (optional): if set, beats on every cycle so the
+    Platform Supervisor can flag a stuck subscriber.
     """
 
     symbols: frozenset[str] = frozenset()
     last_refresh = 0.0
 
     while True:
+        # Beat at the top of the cycle so a slow feed still registers
+        # the subscriber as alive to the supervisor.
+        if heartbeat_store is not None:
+            try:
+                heartbeat_store.beat(
+                    agent_type="subscriber",
+                    agent_id=heartbeat_agent_id,
+                )
+            except Exception:
+                await logger.aexception("subscriber.heartbeat_failed")
+
         now = time.monotonic()
         if now - last_refresh >= symbol_refresh_interval:
             try:

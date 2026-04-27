@@ -116,6 +116,7 @@ class StrategyBot:
         model: str | None = None,
         token_store: Any | None = None,
         memory_store: Any | None = None,
+        heartbeat_store: Any | None = None,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -125,6 +126,7 @@ class StrategyBot:
         self.model = model or ""
         self._token_store = token_store
         self._memory_store = memory_store
+        self._heartbeat_store = heartbeat_store
         self._recent_decisions: list[str] = []
         self._max_history = 10
 
@@ -148,6 +150,18 @@ class StrategyBot:
         This is called by the orchestrator on each tick where the TTA fires.
         Returns a TradeIntent or None (hold).
         """
+        # Heartbeat BEFORE the LLM call so a slow/failing Bedrock still
+        # registers as "this bot is alive" for the supervisor. Write
+        # failures must never interrupt the trade path — swallow them
+        # via contextlib.suppress. Bedrock observability already gives
+        # us a louder signal if decisions start failing.
+        if self._heartbeat_store is not None:
+            import contextlib as _contextlib
+            with _contextlib.suppress(Exception):
+                self._heartbeat_store.beat(
+                    agent_type="strategy", agent_id=self.bot_id,
+                )
+
         prompt = _DECISION_PROMPT_TEMPLATE.format(
             strategy_prompt=self.strategy_prompt,
             market_data=_format_market_data(prices),

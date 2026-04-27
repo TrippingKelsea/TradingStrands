@@ -250,6 +250,7 @@ def _register_strategy(
     ledger_store: LedgerStore | None = None,
     s3_client: Any | None = None,
     memory_bucket: str | None = None,
+    heartbeat_store: Any | None = None,
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
@@ -290,6 +291,7 @@ def _register_strategy(
         symbols=symbols,
         token_store=token_store,
         memory_store=memory_store,
+        heartbeat_store=heartbeat_store,
     )
 
     orchestrator.register_bot(
@@ -345,6 +347,7 @@ async def run(
     marketdata_store: MarketDataStore | None = None
     token_store: TokenUsageStore | None = None
     ledger_store: LedgerStore | None = None
+    heartbeat_store: Any | None = None
     s3_client: Any | None = None
     memory_bucket: str | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
@@ -357,10 +360,13 @@ async def run(
         marketdata_store = MarketDataStore(tbl)
         token_store = TokenUsageStore(tbl)
         ledger_store = LedgerStore(tbl)
+        from trading_strands.heartbeat.store import HeartbeatStore as _HB
+        heartbeat_store = _HB(tbl)
         await logger.ainfo("publisher.enabled", table=table_name)
         await logger.ainfo("marketdata_store.enabled", table=table_name)
         await logger.ainfo("token_store.enabled", table=table_name)
         await logger.ainfo("ledger_store.enabled", table=table_name)
+        await logger.ainfo("heartbeat_store.enabled", table=table_name)
 
         memory_bucket = os.environ.get(AGENT_MEMORY_BUCKET_ENV)
         if memory_bucket:
@@ -458,6 +464,7 @@ async def run(
             ledger_store=ledger_store,
             s3_client=s3_client,
             memory_bucket=memory_bucket,
+            heartbeat_store=heartbeat_store,
         )
         await logger.ainfo(
             "system.start.single_bot",
@@ -484,6 +491,7 @@ async def run(
             ledger_store=ledger_store,
             s3_client=s3_client,
             memory_bucket=memory_bucket,
+            heartbeat_store=heartbeat_store,
         )
         await logger.ainfo(
             "system.start.local",
@@ -521,6 +529,7 @@ async def run(
                 ledger_store=ledger_store,
                 s3_client=s3_client,
                 memory_bucket=memory_bucket,
+            heartbeat_store=heartbeat_store,
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -597,6 +606,7 @@ async def run(
                                     ledger_store=ledger_store,
                                     s3_client=s3_client,
                                     memory_bucket=memory_bucket,
+            heartbeat_store=heartbeat_store,
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

@@ -81,10 +81,13 @@ async def _main() -> None:
 
     import boto3
 
+    from trading_strands.heartbeat.store import HeartbeatStore
+
     ddb = boto3.resource("dynamodb")
     table: Any = ddb.Table(table_name)
     md_store = MarketDataStore(table)
     strategy_store = StrategyStore(table)
+    heartbeat = HeartbeatStore(table)
     broker = AlpacaAdapter(
         api_key=creds["ALPACA_API_KEY"],
         secret_key=creds["ALPACA_SECRET_KEY"],
@@ -122,6 +125,7 @@ async def _main() -> None:
                     strategy_store=strategy_store,
                     poll_interval=poll_interval,
                     symbol_refresh_interval=refresh_interval,
+                    heartbeat_store=heartbeat,
                 )
 
             tg.start_soon(_watch_signals)

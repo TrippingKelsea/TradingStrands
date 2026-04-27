@@ -1015,6 +1015,53 @@ class TradingStrandsStack(cdk.Stack):
         table.grant_read_data(reconcile_all_fn)
         _grant_supervisor_iam(reconcile_all_fn)
 
+        # -- Platform Supervisor (v1 health monitor) -------------------------
+        #
+        # Scans the heartbeat table on a 1-minute cron, classifies each
+        # agent as healthy/stale/missing, emits EMF metrics so a CloudWatch
+        # alarm can fire on any missing count > 0 without log scraping.
+        # Distinct from StrategySupervisor — this one only *observes*
+        # agent liveness, doesn't touch ECS.
+        platform_supervisor_fn = lambda_.DockerImageFunction(
+            self,
+            "PlatformSupervisorFunction",
+            function_name="trading-strands-platform-supervisor",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.platform_supervisor.supervisor.handler",
+                ],
+            ),
+            memory_size=256,
+            timeout=cdk.Duration.seconds(30),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "SUPERVISOR_STALE_AFTER_SECONDS": "60",
+                "SUPERVISOR_MISSING_AFTER_SECONDS": "300",
+            },
+        )
+        cdk.Tags.of(platform_supervisor_fn).add(
+            "Component", "platform-supervisor",
+        )
+        table.grant_read_data(platform_supervisor_fn)
+
+        # 1-minute cron. Minute-level resolution on missing agents is
+        # fine for this workload — the trade loop's 5s tick cadence
+        # means a missing agent is genuinely concerning after a full
+        # minute of no heartbeats.
+        events.Rule(
+            self,
+            "PlatformSupervisorSchedule",
+            description=(
+                "Every minute — scan heartbeats, emit EMF health metrics."
+            ),
+            schedule=events.Schedule.rate(cdk.Duration.minutes(1)),
+            targets=[
+                events_targets.LambdaFunction(platform_supervisor_fn),
+            ],
+        )
+
         # -- Outputs ----------------------------------------------------------
 
         dashboard_url = (
