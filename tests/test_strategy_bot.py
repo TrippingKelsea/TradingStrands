@@ -27,14 +27,32 @@ class TestActionMapping:
         assert _map_action("close") == IntentAction.CLOSE
 
     def test_hold(self) -> None:
+        """HOLD = 'maintain' — active decision to keep the existing
+        position shape."""
+
         assert _map_action("hold") == IntentAction.HOLD
+
+    def test_noop(self) -> None:
+        """NOOP = 'stand_down' — explicit decline to engage. Distinct
+        from HOLD: noop means no position and no signal worth acting
+        on; hold means a position exists and is being deliberately
+        kept."""
+
+        assert _map_action("noop") == IntentAction.NOOP
 
     def test_case_insensitive(self) -> None:
         assert _map_action("BUY") == IntentAction.BUY
         assert _map_action("Sell") == IntentAction.SELL
+        assert _map_action("NOOP") == IntentAction.NOOP
 
-    def test_unknown_defaults_to_hold(self) -> None:
-        assert _map_action("yolo") == IntentAction.HOLD
+    def test_unknown_defaults_to_noop(self) -> None:
+        """Unknown / garbled action string → NOOP (stand_down).
+        Changed from HOLD default because unknown input ≈ "bot is
+        confused"; the safer posture is to step away, not to imply
+        we're deliberately holding a position we can't reason about."""
+
+        assert _map_action("yolo") == IntentAction.NOOP
+        assert _map_action("") == IntentAction.NOOP
 
 
 class TestMarketDataFormatting:

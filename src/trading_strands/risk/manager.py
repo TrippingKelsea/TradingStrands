@@ -65,8 +65,12 @@ class RiskManager:
 
         Returns an approved or rejected decision with reason.
         """
-        # Hold is always a no-op
-        if intent.action == IntentAction.HOLD:
+        # HOLD and NOOP both produce no trade — the bot path returns
+        # None for these, but we guard defensively so a directly-
+        # constructed HOLD/NOOP intent (e.g., from a test helper)
+        # still short-circuits cleanly instead of running risk checks
+        # against a trade that isn't happening.
+        if intent.action in (IntentAction.HOLD, IntentAction.NOOP):
             return self._approve(intent)
 
         # Kill-switch checks first

@@ -126,8 +126,12 @@ class TradeCoordinator:
             msg = f"unknown bot: {intent.bot_id}"
             raise ValueError(msg)
 
-        # Hold is a no-op
-        if intent.action == IntentAction.HOLD:
+        # HOLD (maintain) and NOOP (stand_down) both short-circuit
+        # here. The bot's decide() returns None for these cases so
+        # the normal path never hits this branch — it's defensive
+        # against a directly-constructed HOLD/NOOP intent (test
+        # helpers, future callers) reaching the broker.
+        if intent.action in (IntentAction.HOLD, IntentAction.NOOP):
             return ExecutionResult(
                 intent=intent,
                 risk_decision=RiskDecision(

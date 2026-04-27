@@ -204,7 +204,9 @@ class Orchestrator:
                 await logger.aexception("bot.decide.error", bot_id=bot_id)
                 continue
 
-            if intent is None or intent.action == IntentAction.HOLD:
+            if intent is None or intent.action in (
+                IntentAction.HOLD, IntentAction.NOOP,
+            ):
                 continue
 
             # 3. Route intent through coordinator

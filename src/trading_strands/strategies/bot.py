@@ -28,7 +28,7 @@ logger = structlog.get_logger()
 class BotDecision(BaseModel):
     """Structured output from the strategy bot's LLM decision."""
 
-    action: str  # buy, sell, close, hold
+    action: str  # buy | sell | close | hold (maintain) | noop (stand_down)
     symbol: str
     quantity: str  # string to avoid float precision issues
     rationale: str
@@ -59,11 +59,26 @@ conditions and your portfolio state, then decide what action to take.
 ## Instructions
 Based on your strategy rules and the current conditions, decide your next action.
 - If conditions warrant a trade, specify the action (buy/sell/close), symbol, and quantity.
-- If no action is needed, respond with action "hold".
-- Always provide a clear rationale explaining your reasoning.
+- If you have an open position and are deliberately choosing to keep it as-is
+  (maintain), respond with action "hold". Hold is an ACTIVE decision: you looked
+  at the position, the market, and the signal, and concluded the current shape
+  is still right. A rationale is required.
+- If you have no position to act on AND no signal worth trading, respond with
+  action "noop" (stand down). Noop is the correct answer when nothing is
+  actionable — do not use "hold" in that case, it misleads downstream review.
+- Always provide a clear rationale explaining your reasoning, even for hold/noop.
 - Quantity should be a whole number of shares or options.
 - If the strategy contains a list of trade symbols you are only permitted to trade those symbols.
 - If the strategy does not contain a list of trade symbols, you will need to select them yourself.
+
+Action→signal mapping (for reference — use whichever action matches your
+intent; the signal framing is how downstream review interprets it):
+  BUY  → open_long, open_short (via long puts), add_to_long, add_to_short
+  SELL → close_long, close_short, open_short
+         (a bearish thesis opened via long puts is BUY, not SELL —
+          SELL is for closing existing longs or opening shorts)
+  HOLD → maintain
+  NOOP → stand_down
 """
 
 
@@ -95,13 +110,25 @@ def _format_portfolio(ledger: Ledger) -> str:
 
 
 def _map_action(action_str: str) -> IntentAction:
+    """Parse the LLM's action string into an IntentAction.
+
+    Unknown / garbled / empty strings default to NOOP, not HOLD. A
+    bot that can't make itself understood shouldn't be inferred as
+    "deliberately maintaining a position"; it should be treated as
+    stand-down. This is the safer posture for the memory + self-
+    critique review path — NOOP correctly flags "no actionable
+    state this tick", whereas a silent HOLD would misrepresent
+    confused output as deliberate holding.
+    """
+
     mapping = {
         "buy": IntentAction.BUY,
         "sell": IntentAction.SELL,
         "close": IntentAction.CLOSE,
         "hold": IntentAction.HOLD,
+        "noop": IntentAction.NOOP,
     }
-    return mapping.get(action_str.lower(), IntentAction.HOLD)
+    return mapping.get(action_str.lower(), IntentAction.NOOP)
 
 
 def _build_ta_context(
@@ -357,7 +384,11 @@ class StrategyBot:
         self._append_memory_line(decision, prices, ledger)
 
         action = _map_action(decision.action)
-        if action == IntentAction.HOLD:
+        # HOLD = maintain (position exists, kept deliberately);
+        # NOOP = stand_down (no position, no signal, nothing to do).
+        # Both produce no TradeIntent — the distinction is preserved
+        # in memory + recent_decisions above, not in the trade pipeline.
+        if action in (IntentAction.HOLD, IntentAction.NOOP):
             return None
 
         return TradeIntent(
