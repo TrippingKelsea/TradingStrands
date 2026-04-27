@@ -30,6 +30,7 @@ from trading_strands.coordinator.types import (
     TradeIntent,
     intent_to_side,
 )
+from trading_strands.emf.emitter import emit_metric, timed_metric
 from trading_strands.ledger.models import Fill, Ledger
 from trading_strands.risk.manager import RiskManager
 
@@ -54,6 +55,30 @@ class ExecutionResult(BaseModel):
 class BrokerUnavailableError(Exception):
     """Raised when the broker factory can't produce a broker for an org
     (e.g., the org has no Alpaca credentials configured)."""
+
+
+def _classify_rejection(reason: str) -> str:
+    """Map a free-form rejection reason to a bounded dimension value.
+
+    CloudWatch has a per-metric dimension-value cap; emitting the raw
+    risk-manager string would blow past it the first time a new phrase
+    shows up. Bucket the known shapes, default to 'other'.
+    """
+
+    r = reason.lower()
+    if "halt" in r:
+        return "halted"
+    if "broker unavailable" in r or "no creds" in r:
+        return "broker_unavailable"
+    if "drawdown" in r:
+        return "drawdown"
+    if "daily loss" in r:
+        return "daily_loss_cap"
+    if "position size" in r:
+        return "position_size"
+    if "total exposure" in r or "exposure" in r:
+        return "total_exposure"
+    return "other"
 
 
 class TradeCoordinator:
@@ -121,6 +146,19 @@ class TradeCoordinator:
         """Process a trade intent through the full pipeline.
 
         Intent → per-org broker → risk check → broker execution → ledger update.
+
+        EMF observability (docs/SPEC/observability.md §"Broker Agent"):
+          - broker.intent.received.count on entry (dim: action)
+          - broker.intent.approved.count or broker.intent.rejected.count
+            at the terminal branch (rejection dim: rejection_reason
+            bucketed by _classify_rejection to bound cardinality)
+          - broker.alpaca.latency_ms around the broker.submit_order call
+          - broker.alpaca.error.count on broker failure
+
+        Dimensions skip source_strategy (bot_id) at this layer — the
+        spec flags it as a cardinality concern, and the agent.decision.*
+        metrics already carry bot_id dimension. Add it only if the
+        intent-level breakdown proves useful.
         """
         if intent.bot_id not in self.ledgers:
             msg = f"unknown bot: {intent.bot_id}"
@@ -130,7 +168,9 @@ class TradeCoordinator:
         # here. The bot's decide() returns None for these cases so
         # the normal path never hits this branch — it's defensive
         # against a directly-constructed HOLD/NOOP intent (test
-        # helpers, future callers) reaching the broker.
+        # helpers, future callers) reaching the broker. These aren't
+        # "received intents" from the broker's perspective — they're
+        # no-ops, so we don't emit broker.intent.received.count.
         if intent.action in (IntentAction.HOLD, IntentAction.NOOP):
             return ExecutionResult(
                 intent=intent,
@@ -139,6 +179,15 @@ class TradeCoordinator:
                     intent=intent,
                 ),
             )
+
+        base_dims = {
+            "org_id": intent.org_id,
+            "action": intent.action.value,
+        }
+        emit_metric(
+            "broker.intent.received.count", 1, unit="Count",
+            dimensions=base_dims,
+        )
 
         # Per-org / system-wide halt gate. Checked BEFORE broker resolution
         # because "halted" is categorically different from "no creds" —
@@ -157,12 +206,20 @@ class TradeCoordinator:
                     self._halt_store.get_effective_reason(intent.org_id)
                     or "desk halted"
                 )
+                full_reason = f"halted: {reason}"
+                emit_metric(
+                    "broker.intent.rejected.count", 1, unit="Count",
+                    dimensions={
+                        **base_dims,
+                        "rejection_reason": _classify_rejection(full_reason),
+                    },
+                )
                 return ExecutionResult(
                     intent=intent,
                     risk_decision=RiskDecision(
                         verdict=RiskVerdict.REJECTED,
                         intent=intent,
-                        reason=f"halted: {reason}",
+                        reason=full_reason,
                     ),
                 )
 
@@ -172,6 +229,13 @@ class TradeCoordinator:
         try:
             broker = self.broker_for(intent.org_id)
         except BrokerUnavailableError as exc:
+            emit_metric(
+                "broker.intent.rejected.count", 1, unit="Count",
+                dimensions={
+                    **base_dims,
+                    "rejection_reason": _classify_rejection(str(exc)),
+                },
+            )
             return ExecutionResult(
                 intent=intent,
                 risk_decision=RiskDecision(
@@ -189,17 +253,52 @@ class TradeCoordinator:
         # Risk check
         risk_decision = self.risk_manager.evaluate(intent, ledger, market_prices)
         if not risk_decision.approved:
+            emit_metric(
+                "broker.intent.rejected.count", 1, unit="Count",
+                dimensions={
+                    **base_dims,
+                    "rejection_reason": _classify_rejection(
+                        risk_decision.reason or "",
+                    ),
+                },
+            )
             return ExecutionResult(
                 intent=intent,
                 risk_decision=risk_decision,
             )
 
-        # Convert intent to order and submit
+        # Convert intent to order and submit. Broker latency + error
+        # are emitted here; the EMF spec wants broker.alpaca.* metrics
+        # on every broker call so we can tell "Alpaca is slow" from
+        # "decide() is slow" from "risk check is slow".
         order = self._intent_to_order(intent)
-        order_result = await broker.submit_order(order)
+        try:
+            with timed_metric("broker.alpaca.latency_ms", base_dims):
+                order_result = await broker.submit_order(order)
+        except Exception as exc:
+            emit_metric(
+                "broker.alpaca.error.count", 1, unit="Count",
+                dimensions={
+                    **base_dims,
+                    "error_code": type(exc).__name__,
+                },
+            )
+            emit_metric(
+                "broker.intent.rejected.count", 1, unit="Count",
+                dimensions={
+                    **base_dims,
+                    "rejection_reason": "broker_error",
+                },
+            )
+            raise
 
         # Record fill in ledger
         self._record_fill(intent, order_result, ledger)
+
+        emit_metric(
+            "broker.intent.approved.count", 1, unit="Count",
+            dimensions=base_dims,
+        )
 
         return ExecutionResult(
             intent=intent,

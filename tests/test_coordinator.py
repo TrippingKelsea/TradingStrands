@@ -409,3 +409,118 @@ class TestHaltEnforcement:
         ))
         assert result.approved
         assert len(broker.submitted_orders) == 1
+
+
+class TestRejectionClassifier:
+    """_classify_rejection caps dimension-value cardinality for EMF.
+    Free-form reason strings from the risk manager / halt store would
+    blow past CloudWatch's per-metric dimension-value limit."""
+
+    def test_drawdown(self) -> None:
+        from trading_strands.coordinator.coordinator import _classify_rejection
+        assert _classify_rejection(
+            "drawdown 20% exceeds limit 15%",
+        ) == "drawdown"
+
+    def test_daily_loss(self) -> None:
+        from trading_strands.coordinator.coordinator import _classify_rejection
+        assert _classify_rejection(
+            "daily loss 6% exceeds limit 5%",
+        ) == "daily_loss_cap"
+
+    def test_halt(self) -> None:
+        from trading_strands.coordinator.coordinator import _classify_rejection
+        assert _classify_rejection(
+            "halted: operator paused org",
+        ) == "halted"
+
+    def test_broker_unavailable(self) -> None:
+        from trading_strands.coordinator.coordinator import _classify_rejection
+        assert _classify_rejection(
+            "broker unavailable for org abc: no creds",
+        ) == "broker_unavailable"
+
+    def test_unknown_falls_to_other(self) -> None:
+        from trading_strands.coordinator.coordinator import _classify_rejection
+        assert _classify_rejection("something weird") == "other"
+
+
+class TestCoordinatorEMFMetrics:
+    """EMF metrics per docs/SPEC/observability.md §"Broker Agent".
+
+    Capture stdout and count metric names — we don't want to pin the
+    exact JSON shape (the emitter's shape is its own contract), just
+    that the names + approved/rejected terminal branches are reached.
+    """
+
+    def _metric_lines(self, out: str) -> list[dict]:
+        import json
+        lines = []
+        for ln in out.splitlines():
+            ln = ln.strip()
+            if not ln.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(ln)
+            except json.JSONDecodeError:
+                continue
+            if "_aws" in parsed:
+                lines.append(parsed)
+        return lines
+
+    def _metric_names(self, out: str) -> list[str]:
+        names = []
+        for rec in self._metric_lines(out):
+            for m in rec["_aws"]["CloudWatchMetrics"]:
+                for metric in m["Metrics"]:
+                    names.append(metric["Name"])
+        return names
+
+    @pytest.mark.anyio
+    async def test_approved_flow_emits_received_and_approved(
+        self, coordinator: TradeCoordinator, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        await coordinator.execute(_intent())
+        out = capsys.readouterr().out
+        names = self._metric_names(out)
+        assert "broker.intent.received.count" in names
+        assert "broker.intent.approved.count" in names
+        assert "broker.alpaca.latency_ms" in names
+        assert "broker.intent.rejected.count" not in names
+
+    @pytest.mark.anyio
+    async def test_risk_rejection_emits_rejected_with_classified_reason(
+        self, coordinator: TradeCoordinator, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        coordinator.risk_manager._config.max_position_pct = Decimal("0.01")
+        await coordinator.execute(_intent(quantity="50"))
+        out = capsys.readouterr().out
+        names = self._metric_names(out)
+        assert "broker.intent.received.count" in names
+        assert "broker.intent.rejected.count" in names
+        assert "broker.intent.approved.count" not in names
+        # Dimension value must be a bucket, not the raw reason string.
+        records = self._metric_lines(out)
+        rejected = [
+            r for r in records
+            if any(
+                m["Name"] == "broker.intent.rejected.count"
+                for cwm in r["_aws"]["CloudWatchMetrics"]
+                for m in cwm["Metrics"]
+            )
+        ]
+        assert rejected
+        assert rejected[0].get("rejection_reason") == "position_size"
+
+    @pytest.mark.anyio
+    async def test_hold_and_noop_emit_no_intent_metrics(
+        self, coordinator: TradeCoordinator, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """HOLD/NOOP short-circuit — they aren't 'intents received' at
+        the broker layer; only BUY/SELL/CLOSE are."""
+
+        await coordinator.execute(_intent(action=IntentAction.HOLD))
+        await coordinator.execute(_intent(action=IntentAction.NOOP))
+        out = capsys.readouterr().out
+        names = self._metric_names(out)
+        assert "broker.intent.received.count" not in names
