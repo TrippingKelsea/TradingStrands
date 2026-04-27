@@ -678,6 +678,12 @@
       kind: 'tool_call',
       description: 'Alpaca news endpoint. Opt-in per strategy with a daily quota.',
     },
+    {
+      name: 'filings',
+      label: 'SEC filings',
+      kind: 'tool_call',
+      description: 'List + read recent 8-K / Form 4 / 10-Q / 10-K from cache. Watcher Lambda populates the cache every 15 min.',
+    },
   ];
 
   let _editedStrategy = null;

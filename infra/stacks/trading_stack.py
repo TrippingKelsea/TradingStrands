@@ -144,6 +144,35 @@ class TradingStrandsStack(cdk.Stack):
             ],
         )
 
+        # SEC filings bucket — populated by the EDGAR watcher Lambda,
+        # read-only for the filings tool. Per SPEC/tools.md §5.6:
+        # Glacier Instant Retrieval at 30 days, delete at 90 days.
+        # Cross-org-shared (filings are public data; per-org caching
+        # would be waste).
+        filings_bucket = s3.Bucket(
+            self,
+            "FilingsBucket",
+            bucket_name=f"trading-strands-filings-{self.account}",
+            versioned=False,   # filings don't change; versioning noise
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+            auto_delete_objects=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="filings-glacier-then-delete",
+                    prefix="",
+                    transitions=[
+                        s3.Transition(
+                            storage_class=s3.StorageClass.GLACIER_INSTANT_RETRIEVAL,
+                            transition_after=cdk.Duration.days(30),
+                        ),
+                    ],
+                    expiration=cdk.Duration.days(90),
+                ),
+            ],
+        )
+
         # Secrets Manager secret (seeded manually by operator)
         alpaca_secret = secretsmanager.Secret(
             self,
@@ -250,6 +279,9 @@ class TradingStrandsStack(cdk.Stack):
         )
         # Agent memory bucket — read/write scoped to this one bucket.
         agent_memory_bucket.grant_read_write(trading_task_role)
+        # Filings bucket read-only — the filings tool reads bodies;
+        # EDGAR watcher is the only writer.
+        filings_bucket.grant_read(trading_task_role)
 
         trading_task_def = ecs.FargateTaskDefinition(
             self,
@@ -273,6 +305,7 @@ class TradingStrandsStack(cdk.Stack):
                 "SECRETS_MANAGER_SECRET_NAME": alpaca_secret.secret_name,
                 "ALPACA_PAPER": "true",
                 "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                "FILINGS_BUCKET": filings_bucket.bucket_name,
             },
             logging=ecs.LogDrivers.aws_logs(
                 stream_prefix="trading",
@@ -1178,6 +1211,56 @@ class TradingStrandsStack(cdk.Stack):
             schedule=events.Schedule.rate(cdk.Duration.minutes(5)),
             targets=[
                 events_targets.LambdaFunction(ta_computer_fn),
+            ],
+        )
+
+        # -- EDGAR watcher (sole writer to filings cache) -------------------
+        #
+        # SEC EDGAR rate-limits hard. Filings tool never hits EDGAR
+        # directly; this watcher is the single writer, paced well
+        # below SEC's 10 req/s ceiling. User-Agent must identify the
+        # service per SEC guidance — env var so ops can change the
+        # contact email without a redeploy.
+        edgar_watcher_fn = lambda_.DockerImageFunction(
+            self,
+            "EdgarWatcherFunction",
+            function_name="trading-strands-edgar-watcher",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.edgar_watcher.watcher.handler",
+                ],
+            ),
+            memory_size=512,
+            # A run over N tickers each with a few filings can take
+            # a few minutes at the paced rate. 5-min ceiling is
+            # enough for tens of tickers; bump if the ticker count
+            # outgrows it.
+            timeout=cdk.Duration.minutes(5),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "FILINGS_BUCKET": filings_bucket.bucket_name,
+                # Operator can override per environment. Default
+                # identifies TradingStrands as the UA so SEC's ops
+                # can reach us if we misbehave.
+                "EDGAR_USER_AGENT": "TradingStrands ops@trading-strands.local",
+            },
+        )
+        cdk.Tags.of(edgar_watcher_fn).add("Component", "edgar-watcher")
+        table.grant_read_write_data(edgar_watcher_fn)
+        filings_bucket.grant_read_write(edgar_watcher_fn)
+
+        events.Rule(
+            self,
+            "EdgarWatcherSchedule",
+            description=(
+                "Every 15 min — walk watched tickers, pull any new "
+                "8-K/Form 4 filings into the cache."
+            ),
+            schedule=events.Schedule.rate(cdk.Duration.minutes(15)),
+            targets=[
+                events_targets.LambdaFunction(edgar_watcher_fn),
             ],
         )
 

@@ -32,9 +32,22 @@ def _make_news_factory() -> ToolFactory:
     return factory
 
 
+def _make_filings_factory() -> ToolFactory:
+    """Filings factory — returns a list of two @tools (list + read).
+    bind_tools_for_strategy just passes the factory result straight
+    to Strands's tools= kwarg; a list-of-tools is acceptable there."""
+
+    def factory(ctx: ToolContext) -> Any:
+        from trading_strands.tools.filings import make_filings_tools
+        return make_filings_tools(ctx, daily_quota=50)
+
+    return factory
+
+
 def build_default_registry() -> ToolRegistry:
     """Return a ToolRegistry pre-populated with the ship-time tools."""
 
     reg = ToolRegistry()
     reg.register("news", _make_news_factory())
+    reg.register("filings", _make_filings_factory())
     return reg
