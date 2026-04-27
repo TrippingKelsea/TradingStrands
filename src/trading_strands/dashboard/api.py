@@ -431,16 +431,16 @@ async def tokens_today(request: Request) -> dict[str, Any]:
     # Scan for the per-agent rows (pk begins with TOKEN#{org_id}#...#{date},
     # where the middle segment is the agent_id).
     table = _get_table()
-    resp = table.scan(
-        FilterExpression="begins_with(pk, :p) AND #d = :d",
-        ExpressionAttributeNames={"#d": "date"},
-        ExpressionAttributeValues={
-            ":p": f"TOKEN#{org_id}#",
-            ":d": date,
-        },
+    from boto3.dynamodb.conditions import Attr as _Attr
+
+    from trading_strands.ddb import scan_all as _scan_all
+    items = _scan_all(
+        table,
+        _Attr("pk").begins_with(f"TOKEN#{org_id}#")
+        & _Attr("date").eq(date),
     )
     per_agent: list[dict[str, Any]] = []
-    for item in resp.get("Items", []):
+    for item in items:
         # Skip the org-summary row (which has no agent_id).
         if not item.get("agent_id"):
             continue
@@ -541,11 +541,10 @@ async def snapshot(request: Request) -> dict[str, Any]:
 async def events(request: Request) -> list[dict[str, Any]]:
     _ = _get_principal(request)
     table = _get_table()
-    resp = table.scan(
-        FilterExpression="begins_with(pk, :prefix)",
-        ExpressionAttributeValues={":prefix": "EVENT#"},
-    )
-    items = resp.get("Items", [])
+    from boto3.dynamodb.conditions import Attr as _Attr
+
+    from trading_strands.ddb import scan_all as _scan_all
+    items = _scan_all(table, _Attr("pk").begins_with("EVENT#"))
     items.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
     return [dict(item) for item in items[:50]]
 
@@ -2186,11 +2185,12 @@ async def telemetry(request: Request) -> dict[str, Any]:
         result["trading_service"] = {"status": "error", "error": str(exc)}
 
     try:
-        strategies = table.scan(
-            FilterExpression="begins_with(pk, :prefix)",
-            ExpressionAttributeValues={":prefix": "STRATEGY#"},
-            Select="ALL_ATTRIBUTES",
-        ).get("Items", [])
+        from boto3.dynamodb.conditions import Attr as _Attr
+
+        from trading_strands.ddb import scan_all as _scan_all
+        strategies = _scan_all(
+            table, _Attr("pk").begins_with("STRATEGY#"),
+        )
         counts: dict[str, int] = {"active": 0, "paused": 0, "stopped": 0}
         for s in strategies:
             st = s.get("status", "unknown")
@@ -2200,12 +2200,13 @@ async def telemetry(request: Request) -> dict[str, Any]:
         result["strategies"] = {"status": "error", "error": str(exc)}
 
     try:
-        events_resp = table.scan(
-            FilterExpression="begins_with(pk, :prefix)",
-            ExpressionAttributeValues={":prefix": "EVENT#"},
-            Select="COUNT",
+        from boto3.dynamodb.conditions import Attr as _Attr2
+
+        from trading_strands.ddb import scan_all as _scan_all2
+        events_items = _scan_all2(
+            table, _Attr2("pk").begins_with("EVENT#"),
         )
-        result["events"] = {"recent_count": events_resp.get("Count", 0)}
+        result["events"] = {"recent_count": len(events_items)}
     except Exception as exc:
         result["events"] = {"status": "error", "error": str(exc)}
 

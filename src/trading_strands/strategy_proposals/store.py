@@ -26,6 +26,8 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from pydantic import BaseModel, ConfigDict
 
+from trading_strands.ddb import scan_all
+
 
 class ProposalStatus(StrEnum):
     PENDING = "pending"
@@ -105,13 +107,11 @@ class StrategyProposalsStore:
         because the pk includes the timestamp, and callers only know
         the proposal_id."""
 
-        resp = self._table.scan(
-            FilterExpression=(
-                Attr("pk").begins_with(_prefix_for_strategy(strategy_id))
-                & Attr("proposal_id").eq(proposal_id)
-            ),
+        items = scan_all(
+            self._table,
+            Attr("pk").begins_with(_prefix_for_strategy(strategy_id))
+            & Attr("proposal_id").eq(proposal_id),
         )
-        items = resp.get("Items", [])
         if not items:
             raise ProposalNotFoundError(proposal_id)
         return str(items[0]["pk"])
@@ -136,16 +136,15 @@ class StrategyProposalsStore:
         """Newest-first. Optional `status` filter; default returns
         all statuses so the UI can show the full history."""
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(
-                _prefix_for_strategy(strategy_id),
-            ),
+        items = scan_all(
+            self._table,
+            Attr("pk").begins_with(_prefix_for_strategy(strategy_id)),
         )
         entries = [
             StrategyProposal.model_validate(
                 {k: v for k, v in item.items() if k != "pk"},
             )
-            for item in resp.get("Items", [])
+            for item in items
         ]
         if status is not None:
             entries = [e for e in entries if e.status is status]

@@ -23,6 +23,8 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from pydantic import BaseModel, ConfigDict
 
+from trading_strands.ddb import scan_all
+
 PK_PREFIX = "FILING_INDEX#"
 
 # Mirror S3 90d lifecycle — a row whose S3 body was Glacier-deleted
@@ -104,10 +106,7 @@ class FilingsIndexStore:
         form type (if given) and filing_date within days_back."""
 
         prefix = f"{PK_PREFIX}{ticker.upper()}#"
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(prefix),
-        )
-        items = resp.get("Items", [])
+        items = scan_all(self._table, Attr("pk").begins_with(prefix))
         # Filter by date window on filing_date (YYYY-MM-DD sortable).
         cutoff_epoch = int(time.time()) - days_back * 86400
         cutoff_lt = time.gmtime(cutoff_epoch)

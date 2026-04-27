@@ -8,6 +8,9 @@ import uuid
 from decimal import Decimal
 from typing import Any
 
+from boto3.dynamodb.conditions import Attr
+
+from trading_strands.ddb import scan_all
 from trading_strands.ledger.models import Fill, Ledger
 
 DEFAULT_EVENT_RETENTION_DAYS = 90
@@ -109,11 +112,11 @@ class LedgerStore:
         acceptable. If this becomes a hotspot we'd add a GSI on bot_id,
         but premature for current scale."""
 
-        resp = self._table.scan(
-            FilterExpression="begins_with(pk, :p)",
-            ExpressionAttributeValues={":p": f"LEDGER_EVENT#{bot_id}#"},
+        raw = scan_all(
+            self._table,
+            Attr("pk").begins_with(f"LEDGER_EVENT#{bot_id}#"),
         )
-        items = [dict(i) for i in resp.get("Items", [])]
+        items = [dict(i) for i in raw]
         # Sort by (ts, pk) so ties within the same second are deterministic.
         items.sort(
             key=lambda x: (int(x.get("ts", 0)), str(x.get("pk", ""))),

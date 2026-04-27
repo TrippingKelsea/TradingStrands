@@ -19,6 +19,7 @@ from trading_strands.alpaca_secrets.store import (
     secret_name_for,
 )
 from trading_strands.authz.model import Role
+from trading_strands.ddb import scan_all
 from trading_strands.tenancy.models import Org, OrgType, User
 from trading_strands.tenancy.store import TenancyStore
 
@@ -117,11 +118,9 @@ def delete_legacy_strategies(table: Any) -> int:
         superwoman account, muddying the clean-slate property.
     """
 
-    resp = table.scan(
-        FilterExpression=Attr("pk").begins_with("STRATEGY#"),
-    )
+    items = scan_all(table, Attr("pk").begins_with("STRATEGY#"))
     deleted = 0
-    for item in resp.get("Items", []):
+    for item in items:
         if "org_id" not in item or "author_user_id" not in item:
             table.delete_item(Key={"pk": item["pk"]})
             deleted += 1

@@ -18,6 +18,8 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from pydantic import BaseModel, ConfigDict
 
+from trading_strands.ddb import scan_all
+
 # SPEC §8.2 — cap skill bodies so a rogue edit doesn't blow up the
 # system prompt. 32 KB is generous for a prompt fragment; a skill
 # longer than that should probably be two skills.
@@ -126,10 +128,7 @@ class SkillsStore:
         the expected scale (tens of skills per org)."""
 
         prefix = f"{PK_PREFIX}{org_id}#"
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(prefix),
-        )
-        items = resp.get("Items", [])
+        items = scan_all(self._table, Attr("pk").begins_with(prefix))
         # Sort by name for stable output.
         items.sort(key=lambda x: str(x.get("skill_name", "")))
         return [

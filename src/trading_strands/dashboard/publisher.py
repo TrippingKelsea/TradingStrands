@@ -9,7 +9,9 @@ from typing import Any
 
 import boto3
 import structlog
+from boto3.dynamodb.conditions import Attr
 
+from trading_strands.ddb import scan_all
 from trading_strands.ledger.models import Ledger
 from trading_strands.risk.manager import RiskManager
 
@@ -150,11 +152,8 @@ class StatePublisher:
 
     def get_strategies(self) -> list[dict[str, Any]]:
         """Scan for all strategy items."""
-        resp = self._table.scan(
-            FilterExpression="begins_with(pk, :prefix)",
-            ExpressionAttributeValues={":prefix": "STRATEGY#"},
-        )
-        return [dict(item) for item in resp.get("Items", [])]
+        items = scan_all(self._table, Attr("pk").begins_with("STRATEGY#"))
+        return [dict(item) for item in items]
 
     def get_strategy(self, strategy_id: str) -> dict[str, Any] | None:
         """Get a single strategy by ID."""

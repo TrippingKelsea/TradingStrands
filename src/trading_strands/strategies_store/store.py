@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading_strands.authz.model import Action, Resource, ResourceType
 from trading_strands.authz.policy import can
+from trading_strands.ddb import scan_all
 from trading_strands.tools.base import StrategyToolConfig
 
 
@@ -81,31 +82,6 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _scan_all(table: Any, filter_expression: Any) -> list[dict[str, Any]]:
-    """Exhaustively scan a table with a filter, following LastEvaluatedKey.
-
-    Single-PK tables grow past 1 MB fast when they mix many prefix
-    families (STRATEGY#, ORG#, MARKETDATA#, CALENDAR#, …). DDB scan
-    returns at most ~1 MB of pre-filter items per call, so a one-shot
-    scan can drop matches silently when the matches happen to live
-    outside the first page of read.
-
-    Observed symptom: list_all returned 1 of 2 ACTIVE strategies,
-    which made reconcile_all skip provisioning a per-bot Fargate
-    service for the second strategy. Pagination closes that gap.
-    """
-
-    items: list[dict[str, Any]] = []
-    kwargs: dict[str, Any] = {"FilterExpression": filter_expression}
-    while True:
-        resp = table.scan(**kwargs)
-        items.extend(resp.get("Items", []))
-        last = resp.get("LastEvaluatedKey")
-        if not last:
-            return items
-        kwargs["ExclusiveStartKey"] = last
-
-
 class StrategyStore:
     """Persistence for strategies. Stateless; inject a table handle."""
 
@@ -170,7 +146,7 @@ class StrategyStore:
         org_id is applied server-side; cross-org data physically cannot
         be returned from this method."""
 
-        items = _scan_all(
+        items = scan_all(
             self._table,
             Attr("pk").begins_with("STRATEGY#") & Attr("org_id").eq(org_id),
         )
@@ -184,7 +160,7 @@ class StrategyStore:
         + the SYSADMIN_CAN_READ_ORG_DATA deploy flag should use this; the
         store does not enforce that — the caller does."""
 
-        items = _scan_all(
+        items = scan_all(
             self._table, Attr("pk").begins_with("STRATEGY#"),
         )
         return [
@@ -233,7 +209,7 @@ class StrategyStore:
     def delete(self, strategy_id: str) -> None:
         self._table.delete_item(Key={"pk": f"STRATEGY#{strategy_id}"})
         # Best-effort cleanup of ACLs for this strategy.
-        items = _scan_all(
+        items = scan_all(
             self._table,
             Attr("pk").begins_with(f"STRATEGYACL#{strategy_id}#"),
         )
@@ -265,7 +241,7 @@ class StrategyStore:
     def acl_users(self, strategy_id: str) -> frozenset[str]:
         """Return the set of co-author user_ids for this strategy."""
 
-        items = _scan_all(
+        items = scan_all(
             self._table,
             Attr("pk").begins_with(f"STRATEGYACL#{strategy_id}#"),
         )

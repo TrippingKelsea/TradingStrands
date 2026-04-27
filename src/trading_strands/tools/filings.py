@@ -104,11 +104,13 @@ def _find_filing_body_key(
 
     from boto3.dynamodb.conditions import Attr
 
-    resp = table.scan(
-        FilterExpression=Attr("pk").begins_with("FILING_INDEX#")
+    from trading_strands.ddb import scan_all
+
+    items = scan_all(
+        table,
+        Attr("pk").begins_with("FILING_INDEX#")
         & Attr("accession").eq(accession),
     )
-    items = resp.get("Items", [])
     if not items:
         return None, None
     item = items[0]

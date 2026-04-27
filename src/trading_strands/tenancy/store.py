@@ -19,6 +19,7 @@ from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 
 from trading_strands.authz.model import Role
+from trading_strands.ddb import scan_all
 from trading_strands.tenancy.models import Membership, Org, OrgType, User
 
 
@@ -34,28 +35,6 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
-def _scan_all(table: Any, filter_expression: Any) -> list[dict[str, Any]]:
-    """Exhaustively scan with pagination.
-
-    DDB scan returns at most ~1 MB of pre-filter items per call; a one-
-    shot scan can silently drop matches when they live outside the
-    first page. This shared table mixes many prefixes (USER#, ORG#,
-    USERORG#, MARKETDATA#, STRATEGY#, …) with MARKETDATA# dominating
-    the volume, so a filter on any lighter prefix easily misses rows.
-
-    Observed symptom: memberships_for_user returned [] for a real
-    member, which cascaded into 403s on every org-scoped endpoint.
-    """
-
-    items: list[dict[str, Any]] = []
-    kwargs: dict[str, Any] = {"FilterExpression": filter_expression}
-    while True:
-        resp = table.scan(**kwargs)
-        items.extend(resp.get("Items", []))
-        last = resp.get("LastEvaluatedKey")
-        if not last:
-            return items
-        kwargs["ExclusiveStartKey"] = last
 
 
 class EmailAlreadyInUseError(Exception):
@@ -100,7 +79,7 @@ class TenancyStore:
         """Scan all orgs. Scan is acceptable here — the number of orgs is
         small (< 1000) and this is only called by sysadmin meta-views."""
 
-        items = _scan_all(self._table, Attr("pk").begins_with("ORG#"))
+        items = scan_all(self._table, Attr("pk").begins_with("ORG#"))
         return [
             Org.model_validate({k: v for k, v in item.items() if k != "pk"})
             for item in items
@@ -195,7 +174,7 @@ class TenancyStore:
             return None
 
     def list_users(self) -> list[User]:
-        items = _scan_all(self._table, Attr("pk").begins_with("USER#"))
+        items = scan_all(self._table, Attr("pk").begins_with("USER#"))
         return [
             User.model_validate({k: v for k, v in item.items() if k != "pk"})
             for item in items
@@ -270,7 +249,7 @@ class TenancyStore:
         or it silently drops rows (see _scan_all docstring).
         """
 
-        items = _scan_all(
+        items = scan_all(
             self._table, Attr("pk").begins_with(f"USERORG#{user_id}#"),
         )
         return [_to_membership(item) for item in items]
@@ -278,7 +257,7 @@ class TenancyStore:
     def memberships_for_org(self, org_id: str) -> list[Membership]:
         """List all users in an org with their roles."""
 
-        items = _scan_all(
+        items = scan_all(
             self._table, Attr("pk").begins_with(f"ORGUSER#{org_id}#"),
         )
         return [_to_membership(item) for item in items]

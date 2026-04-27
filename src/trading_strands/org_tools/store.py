@@ -19,6 +19,8 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from pydantic import BaseModel, ConfigDict
 
+from trading_strands.ddb import scan_all
+
 PK_PREFIX = "ORG_TOOL#"
 
 
@@ -77,10 +79,7 @@ class OrgToolsStore:
 
     def list_for_org(self, org_id: str) -> list[OrgToolConfig]:
         prefix = f"{PK_PREFIX}{org_id}#"
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(prefix),
-        )
-        items = resp.get("Items", [])
+        items = scan_all(self._table, Attr("pk").begins_with(prefix))
         items.sort(key=lambda x: str(x.get("tool_name", "")))
         return [
             OrgToolConfig(

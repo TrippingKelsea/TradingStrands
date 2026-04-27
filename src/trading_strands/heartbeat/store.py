@@ -31,6 +31,8 @@ from typing import Any
 
 from boto3.dynamodb.conditions import Attr
 
+from trading_strands.ddb import scan_all
+
 HEARTBEAT_PK_PREFIX = "HEARTBEAT#"
 
 # Dormant entries clean themselves up after a week — a stopped
@@ -113,10 +115,9 @@ class HeartbeatStore:
         """Every recorded heartbeat. Filters on pk prefix so siblings
         in the shared table don't leak in."""
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(HEARTBEAT_PK_PREFIX),
+        items = scan_all(
+            self._table, Attr("pk").begins_with(HEARTBEAT_PK_PREFIX),
         )
-        items = resp.get("Items", [])
         return [
             Heartbeat(
                 agent_type=str(item.get("agent_type", "")),

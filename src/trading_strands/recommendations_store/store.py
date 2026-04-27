@@ -25,6 +25,8 @@ from typing import Any
 from boto3.dynamodb.conditions import Attr
 from pydantic import BaseModel, ConfigDict
 
+from trading_strands.ddb import scan_all
+
 _TTL_SECONDS = 90 * 24 * 3600
 
 
@@ -105,10 +107,7 @@ class RecommendationsStore:
         is cheap. If that changes, switch to a GSI on (org_id,
         created_at)."""
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(_prefix(org_id)),
-        )
-        items = resp.get("Items", [])
+        items = scan_all(self._table, Attr("pk").begins_with(_prefix(org_id)))
         entries = [
             RecommendationEntry.model_validate(
                 {k: v for k, v in item.items() if k != "pk" and k != "ttl"},

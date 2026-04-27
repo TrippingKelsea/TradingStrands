@@ -224,10 +224,12 @@ class HaltStore:
 
         from boto3.dynamodb.conditions import Attr
 
-        resp = self._table.scan(
-            FilterExpression=Attr("pk").begins_with(HALT_EVENT_PK_PREFIX),
+        from trading_strands.ddb import scan_all
+
+        items = scan_all(
+            self._table,
+            Attr("pk").begins_with(HALT_EVENT_PK_PREFIX),
         )
-        items = resp.get("Items", [])
         items.sort(key=lambda x: int(x.get("ts", 0)), reverse=True)
         return [
             HaltEvent(
