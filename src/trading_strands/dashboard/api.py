@@ -1355,6 +1355,96 @@ async def get_strategy_lessons(
     }
 
 
+@app.get("/api/strategies/{strategy_id}/memory")
+async def get_strategy_memory(
+    request: Request, strategy_id: str,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
+    """Return agent memory markdown over a date range, newest-first.
+
+    Backs the thought log on the detail page's Overview tab. Defaults
+    to today UTC when no range is given. `start` / `end` are inclusive
+    YYYY-MM-DD. The range is capped at 31 days to bound S3 reads.
+
+    Each day's content is the raw daily file (the append-only record
+    of what the bot did), not the compressed sibling — the compressed
+    file is optimized for downstream LLM reading, the operator wants
+    the raw trace. Missing days return empty strings; the UI renders
+    that as a "no memory for this day" placeholder.
+
+    Privacy boundary: READ on the strategy.
+    """
+
+    import datetime
+
+    principal = _get_principal(request)
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.READ, resource_for(strat, acl))
+
+    bucket = os.environ.get("AGENT_MEMORY_BUCKET")
+    if not bucket:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent memory not configured (AGENT_MEMORY_BUCKET unset).",
+        )
+
+    today = datetime.datetime.now(datetime.UTC).date()
+    try:
+        end_date = (
+            datetime.date.fromisoformat(end) if end else today
+        )
+        start_date = (
+            datetime.date.fromisoformat(start) if start else end_date
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid date format (use YYYY-MM-DD): {exc}",
+        ) from exc
+
+    if start_date > end_date:
+        raise HTTPException(
+            status_code=400,
+            detail="start must be <= end",
+        )
+    span_days = (end_date - start_date).days + 1
+    if span_days > 31:
+        raise HTTPException(
+            status_code=400,
+            detail="range exceeds 31-day cap",
+        )
+
+    from trading_strands.agent_memory.store import AgentMemoryStore
+
+    memory = AgentMemoryStore(
+        s3_client=boto3.client("s3"),
+        bucket=bucket,
+        org_id=strat.org_id,
+        agent_type="strategy",
+        agent_id=f"strategy-{strategy_id}",
+    )
+
+    days: list[dict[str, Any]] = []
+    cur = end_date
+    while cur >= start_date:
+        iso = cur.isoformat()
+        days.append({"date": iso, "content": memory.read_day(iso)})
+        cur -= datetime.timedelta(days=1)
+    return {
+        "strategy_id": strategy_id,
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "days": days,
+    }
+
+
 @app.get("/api/strategies/{strategy_id}/prompt-snapshot")
 async def get_strategy_prompt_snapshot(
     request: Request, strategy_id: str,

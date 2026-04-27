@@ -3510,3 +3510,172 @@ def test_prompt_snapshot_forbidden_for_other_org() -> None:
             f"/api/strategies/{foreign.strategy_id}/prompt-snapshot",
         )
         assert resp.status_code == 403
+
+
+# ── /api/strategies/{sid}/memory ──────────────────────────────────────
+
+
+def _seed_agent_memory(
+    bucket: str, org_id: str, bot_id: str, date: str, body: str,
+) -> None:
+    """Write a per-day memory file at the canonical agent-memory prefix."""
+
+    s3 = boto3.client("s3", region_name="us-west-2")
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{org_id}/strategy/{bot_id}/{date}.md",
+        Body=body.encode("utf-8"),
+    )
+
+
+def test_memory_endpoint_returns_day_range_newest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: a 3-day range returns all three days newest-first;
+    missing days render as empty strings."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+        bot_id = f"strategy-{strat.strategy_id}"
+        bucket = "test-agent-memory"
+        s3 = boto3.client("s3", region_name="us-west-2")
+        s3.create_bucket(
+            Bucket=bucket,
+            CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+        )
+        _seed_agent_memory(bucket, oid, bot_id, "2026-04-25", "- day 1 lines")
+        # 2026-04-26 intentionally absent — UI placeholder.
+        _seed_agent_memory(bucket, oid, bot_id, "2026-04-27", "- day 3 lines")
+
+        monkeypatch.setenv("AGENT_MEMORY_BUCKET", bucket)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(
+            f"/api/strategies/{strat.strategy_id}/memory"
+            "?start=2026-04-25&end=2026-04-27",
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [d["date"] for d in body["days"]] == [
+            "2026-04-27", "2026-04-26", "2026-04-25",
+        ]
+        assert body["days"][0]["content"] == "- day 3 lines"
+        assert body["days"][1]["content"] == ""
+        assert body["days"][2]["content"] == "- day 1 lines"
+
+
+def test_memory_endpoint_defaults_to_today_when_no_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No start/end params → single-day range for today UTC."""
+
+    import datetime
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+
+        bucket = "test-agent-memory"
+        boto3.client("s3", region_name="us-west-2").create_bucket(
+            Bucket=bucket,
+            CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+        )
+        monkeypatch.setenv("AGENT_MEMORY_BUCKET", bucket)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(f"/api/strategies/{strat.strategy_id}/memory")
+        assert resp.status_code == 200
+        today = datetime.datetime.now(datetime.UTC).date().isoformat()
+        body = resp.json()
+        assert body["start"] == today
+        assert body["end"] == today
+        assert [d["date"] for d in body["days"]] == [today]
+
+
+def test_memory_endpoint_rejects_range_over_31_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bound S3 read volume — no accidental 365-day scans from a
+    typo in the query string."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+        monkeypatch.setenv("AGENT_MEMORY_BUCKET", "irrelevant")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(
+            f"/api/strategies/{strat.strategy_id}/memory"
+            "?start=2026-01-01&end=2026-06-01",
+        )
+        assert resp.status_code == 400
+        assert "31" in resp.json()["detail"]
+
+
+def test_memory_endpoint_503_when_bucket_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+        monkeypatch.delenv("AGENT_MEMORY_BUCKET", raising=False)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(f"/api/strategies/{strat.strategy_id}/memory")
+        assert resp.status_code == 503
+
+
+def test_memory_endpoint_forbidden_for_other_org(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+
+        foreign = StrategyStore(table).create(
+            org_id=org_b.org_id, author_user_id="someone",
+            name="s", markdown="# m",
+        )
+        monkeypatch.setenv("AGENT_MEMORY_BUCKET", "irrelevant")
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, org_a.org_id),
+        )
+        resp = client.get(
+            f"/api/strategies/{foreign.strategy_id}/memory",
+        )
+        assert resp.status_code == 403
