@@ -1,7 +1,7 @@
 # TradingStrands — Design Specification
 
-**Status:** Draft v0.3
-**Last updated:** 2026-04-26
+**Status:** Draft v0.4
+**Last updated:** 2026-04-27
 
 This is the authoritative design document for TradingStrands. If the code and the spec disagree, the spec is either wrong or out of date — in which case update it.
 
@@ -26,6 +26,7 @@ Each leaf doc declares its own status at the top:
 | [agent_communication.md](./SPEC/agent_communication.md) | AgentCore-native A2A for inter-agent calls, identity + provenance, trade-intent message flow | **Target (v1)** |
 | [deployment.md](./SPEC/deployment.md) | Fargate-for-streaming / Lambda-for-event matrix, per-bot IAM, BotProvisioner + Deprovisioner, blue-green, scale dispatcher, per-org mode switches | **Partially implemented** |
 | [observability.md](./SPEC/observability.md) | CloudWatch EMF metrics, dashboard graph widgets, health check contract, token telemetry, heartbeats | **Target (v1)** |
+| [tools.md](./SPEC/tools.md) | Strategy-agent tools (news, calendar, TA, SEC filings, social) and skills (org-authored prompt fragments), per-org credentials, per-strategy quotas, context-injection vs tool-call split, org gate (not force) on tool availability, adversarial-data framing | **Target (v1)** |
 
 ---
 
