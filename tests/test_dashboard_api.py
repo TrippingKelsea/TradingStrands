@@ -2953,6 +2953,112 @@ def test_create_strategy_with_tools_and_skills() -> None:
         assert body["skills"] == ["morning_prep"]
 
 
+# ── /api/metrics/query ─────────────────────────────────────────────────
+
+
+def test_metrics_query_returns_datapoints() -> None:
+    """Happy path: allowlisted metric + valid stat returns ts/value list."""
+
+    import datetime
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        cw_mock = MagicMock()
+        now = datetime.datetime(2026, 4, 26, 12, 0, 0)
+        cw_mock.get_metric_data.return_value = {
+            "MetricDataResults": [{
+                "Id": "m1",
+                "Label": "agent.decision.latency_ms",
+                "Timestamps": [
+                    now, now + datetime.timedelta(minutes=1),
+                ],
+                "Values": [150.0, 175.0],
+            }],
+        }
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=cw_mock,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.post("/api/metrics/query", json={
+                "metric_name": "agent.decision.latency_ms",
+                "dimensions": {"agent_type": "strategy"},
+                "stat": "Average",
+                "period_seconds": 60,
+                "lookback_seconds": 3600,
+            })
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["datapoints"]) == 2
+        assert body["datapoints"][0]["value"] == 150.0
+
+
+def test_metrics_query_rejects_non_allowlisted_metric() -> None:
+    """Block arbitrary metric queries — the endpoint is a narrow proxy,
+    not a general CloudWatch client."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/metrics/query", json={
+            "metric_name": "AWS/EC2.CPUUtilization",
+        })
+        assert resp.status_code == 400
+        assert "not allowlisted" in resp.json()["detail"]
+
+
+def test_metrics_query_rejects_bad_stat() -> None:
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.post("/api/metrics/query", json={
+            "metric_name": "agent.decision.count",
+            "stat": "NotARealStat",
+        })
+        assert resp.status_code == 400
+
+
+def test_metrics_query_cw_failure_returns_503() -> None:
+    """CloudWatch call failing is 503, not 500 — consistent with the
+    alarms endpoint, signals 'try again later' to the client."""
+
+    with mock_aws():
+        table = _make_table()
+        uid, oid = _make_user(table)
+
+        cw_mock = MagicMock()
+        cw_mock.get_metric_data.side_effect = RuntimeError("boom")
+        with patch(
+            "trading_strands.dashboard.api._get_cloudwatch_client",
+            return_value=cw_mock,
+        ):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.post("/api/metrics/query", json={
+                "metric_name": "agent.decision.count",
+            })
+        assert resp.status_code == 503
+
+
+def test_metrics_query_requires_auth() -> None:
+    from trading_strands.dashboard.api import app
+    client = TestClient(app)
+    resp = client.post("/api/metrics/query", json={
+        "metric_name": "agent.decision.count",
+    })
+    assert resp.status_code in (401, 403)
+
+
 def test_update_strategy_can_modify_tools_and_skills() -> None:
     with mock_aws():
         from trading_strands.strategies_store.store import StrategyStore

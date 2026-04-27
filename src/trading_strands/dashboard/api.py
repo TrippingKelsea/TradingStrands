@@ -1416,6 +1416,135 @@ def _get_cloudwatch_client() -> Any:
     return _cloudwatch_client_cache
 
 
+# ── Generic metric query ──────────────────────────────────────────────
+#
+# `/api/metrics/query` wraps CloudWatch GetMetricData behind a single
+# endpoint so the dashboard can render arbitrary EMF-backed panels
+# (decision latency, broker intent throughput, token cost, …) without
+# a bespoke handler per panel. The endpoint is allowlist-gated on
+# metric name + namespace so the UI can't accidentally pull account-
+# wide metrics or another team's namespace. Dimension values are
+# passed through verbatim — callers are already authenticated and
+# dimension filtering is the client's job.
+
+
+class MetricsQueryRequest(BaseModel):
+    namespace: str = "TradingStrands"
+    metric_name: str
+    # {name: value} equality filters. Empty dict = any dimensions.
+    dimensions: dict[str, str] = {}
+    # 60/300/3600. Default 60s for fine-grained dashboards.
+    period_seconds: int = 60
+    # Lookback. Default 1h. Cap is 14d — CloudWatch GetMetricData
+    # supports longer but the UI widgets we have don't.
+    lookback_seconds: int = 3600
+    # Average is default for latency; Sum for counts.
+    stat: str = "Average"
+
+
+# Names the dashboard is allowed to query. Bounded so a browser
+# bug / malicious script can't turn this into an arbitrary CW proxy.
+_ALLOWED_METRICS: frozenset[tuple[str, str]] = frozenset({
+    ("TradingStrands", "agent.decision.latency_ms"),
+    ("TradingStrands", "agent.decision.count"),
+    ("TradingStrands", "agent.error.count"),
+    ("TradingStrands", "agent.heartbeat.age_s"),
+    ("TradingStrands", "broker.intent.received.count"),
+    ("TradingStrands", "broker.intent.approved.count"),
+    ("TradingStrands", "broker.intent.rejected.count"),
+    ("TradingStrands", "broker.alpaca.latency_ms"),
+    ("TradingStrands", "broker.alpaca.error.count"),
+})
+
+_ALLOWED_STATS: frozenset[str] = frozenset({
+    "Average", "Sum", "Minimum", "Maximum", "SampleCount",
+    "p50", "p90", "p95", "p99",
+})
+
+
+@app.post("/api/metrics/query")
+async def metrics_query(
+    request: Request, body: MetricsQueryRequest,
+) -> dict[str, Any]:
+    """Query a CloudWatch metric for a timeseries.
+
+    Returns `{datapoints: [{ts, value}], unit}`. Empty `datapoints`
+    means "no data in the window", which is distinct from an error
+    (the call succeeded, nothing was emitted). The UI renders the
+    two cases differently.
+    """
+
+    _ = _get_principal(request)
+
+    key = (body.namespace, body.metric_name)
+    if key not in _ALLOWED_METRICS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"metric not allowlisted: {body.namespace}/{body.metric_name}"
+            ),
+        )
+    if body.stat not in _ALLOWED_STATS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"stat not allowed: {body.stat}",
+        )
+    if body.period_seconds < 60 or body.period_seconds > 86400:
+        raise HTTPException(status_code=400, detail="period out of range")
+    if body.lookback_seconds < 60 or body.lookback_seconds > 14 * 86400:
+        raise HTTPException(status_code=400, detail="lookback out of range")
+
+    import time as _time
+
+    end = int(_time.time())
+    start = end - body.lookback_seconds
+    dims = [
+        {"Name": k, "Value": v} for k, v in body.dimensions.items()
+    ]
+    cw = _get_cloudwatch_client()
+    try:
+        resp = cw.get_metric_data(
+            MetricDataQueries=[{
+                "Id": "m1",
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": body.namespace,
+                        "MetricName": body.metric_name,
+                        "Dimensions": dims,
+                    },
+                    "Period": body.period_seconds,
+                    "Stat": body.stat,
+                },
+                "ReturnData": True,
+            }],
+            StartTime=start,
+            EndTime=end,
+            ScanBy="TimestampAscending",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"cloudwatch unavailable: {exc}",
+        ) from exc
+
+    results = resp.get("MetricDataResults", []) or []
+    if not results:
+        return {"datapoints": [], "unit": ""}
+    r = results[0]
+    timestamps = r.get("Timestamps", []) or []
+    values = r.get("Values", []) or []
+    datapoints = [
+        # CloudWatch returns a datetime; coerce to epoch so the UI
+        # doesn't need to parse tz strings.
+        {"ts": int(ts.timestamp()), "value": float(v)}
+        for ts, v in zip(timestamps, values, strict=False)
+    ]
+    return {
+        "datapoints": datapoints,
+        "unit": r.get("Label", body.metric_name),
+    }
+
+
 @app.get("/api/supervisor/alarms")
 async def supervisor_alarms(request: Request) -> dict[str, Any]:
     """Return the state of the stack's CloudWatch alarms.
