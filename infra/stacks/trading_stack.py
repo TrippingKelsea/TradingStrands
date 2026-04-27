@@ -58,6 +58,18 @@ from aws_cdk import (
 )
 from constructs import Construct
 
+# Lambda entrypoint override. The shared Dockerfile's ENTRYPOINT is
+# "uv run python -m trading_strands.app" — correct for ECS (the trading
+# service, market-data subscriber, dashboard) but wrong for Lambda:
+# uv tries to re-sync the venv on every cold start, which the Lambda
+# runtime forbids (read-only filesystem outside /tmp). Instead, each
+# Lambda invokes the AWS Lambda Runtime Interface Client directly via
+# the venv's pre-installed Python; the existing `cmd=[handler.path]`
+# values then work as the RIC's handler argument.
+_LAMBDA_ENTRYPOINT: list[str] = [
+    "/app/.venv/bin/python", "-m", "awslambdaric",
+]
+
 
 class TradingStrandsStack(cdk.Stack):
     def __init__(
@@ -675,6 +687,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.self_critique.lambda_handler.handler"],
             ),
             memory_size=1024,
@@ -713,6 +726,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.memory_compactor.lambda_handler.handler"],
             ),
             memory_size=1024,
@@ -764,6 +778,7 @@ class TradingStrandsStack(cdk.Stack):
                 code=lambda_.DockerImageCode.from_ecr(
                     repository=repository,
                     tag_or_digest="latest",
+                    entrypoint=_LAMBDA_ENTRYPOINT,
                     cmd=[handler_path],
                 ),
                 memory_size=1024,
@@ -842,6 +857,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.auditor_agent.lambda_handler.handler",
                 ],
@@ -905,6 +921,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.org_fanout.fanout.handler"],
             ),
             memory_size=256,
@@ -954,6 +971,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=["trading_strands.provisioner.bot_provisioner.handler"],
             ),
             memory_size=256,
@@ -1075,6 +1093,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.supervisor.strategy_supervisor.handler",
                 ],
@@ -1144,6 +1163,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.supervisor.reconcile_all.handler",
                 ],
@@ -1172,6 +1192,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.platform_supervisor.supervisor.handler",
                 ],
@@ -1226,6 +1247,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.calendar_fetcher.fetcher.handler",
                 ],
@@ -1263,6 +1285,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.ta_computer.computer.handler",
                 ],
@@ -1307,6 +1330,7 @@ class TradingStrandsStack(cdk.Stack):
             code=lambda_.DockerImageCode.from_ecr(
                 repository=repository,
                 tag_or_digest="latest",
+                entrypoint=_LAMBDA_ENTRYPOINT,
                 cmd=[
                     "trading_strands.edgar_watcher.watcher.handler",
                 ],

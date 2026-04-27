@@ -47,6 +47,13 @@ dependencies = [
     "python-multipart>=0.0.9",
     # Password strength scoring (used on change-password / reset-password flows)
     "zxcvbn>=4.4.28",
+    # AWS Lambda Runtime Interface Client. ECS uses the image's uv-run
+    # ENTRYPOINT; Lambda overrides the entrypoint to `python -m
+    # awslambdaric` so the Runtime API is speaking the protocol Lambda
+    # expects. Without this, every Lambda re-executed the trading app's
+    # Typer CLI on each invocation, which failed to write the venv and
+    # crash-looped.
+    "awslambdaric>=2.1",
 ]
 
 [project.optional-dependencies]
