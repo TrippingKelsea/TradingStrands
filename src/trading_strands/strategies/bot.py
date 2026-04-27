@@ -287,6 +287,13 @@ class StrategyBot:
         self._ta_enabled = ta_enabled
         self._recent_decisions: list[str] = []
         self._max_history = 10
+        # Health payload state (docs/SPEC/observability.md §"Health
+        # checks"). last_decision_at is set after every successful
+        # decide(). _error_ts tracks the timestamps of the last hour
+        # of errors so the supervisor can see a degrading trend
+        # without needing CloudWatch.
+        self._last_decision_at: int = 0
+        self._error_ts: list[int] = []
 
         # Base system-prompt framing. Skills (if any) get composed
         # into this at construction time — per SPEC §8.4 they appear
@@ -352,11 +359,24 @@ class StrategyBot:
         # failures must never interrupt the trade path — swallow them
         # via contextlib.suppress. Bedrock observability already gives
         # us a louder signal if decisions start failing.
+        #
+        # Payload (docs/SPEC/observability.md §"Health checks"):
+        # current_activity captures where in the loop we are so a
+        # stuck bot reveals *what* it's stuck on, not just that it
+        # stopped beating. errors_last_hour is a rolling count over
+        # the last 3600s, pruned inline on each beat.
         if self._heartbeat_store is not None:
             import contextlib as _contextlib
+            import time as _time
+            cutoff = int(_time.time()) - 3600
+            self._error_ts = [t for t in self._error_ts if t > cutoff]
             with _contextlib.suppress(Exception):
                 self._heartbeat_store.beat(
                     agent_type="strategy", agent_id=self.bot_id,
+                    status="healthy",
+                    current_activity="reasoning",
+                    last_decision_at=self._last_decision_at,
+                    errors_last_hour=len(self._error_ts),
                 )
 
         prompt = _DECISION_PROMPT_TEMPLATE.format(
@@ -380,12 +400,17 @@ class StrategyBot:
                     structured_output_model=BotDecision,
                 )
         except Exception:
+            import time as _time
+            self._error_ts.append(int(_time.time()))
             emit_metric(
                 "agent.error.count", 1, unit="Count",
                 dimensions={**dims, "error_type": "llm_invoke"},
             )
             await logger.aexception("bot.llm.error", bot_id=self.bot_id)
             return None
+
+        import time as _time2
+        self._last_decision_at = int(_time2.time())
 
         # Record token usage for the cost dashboard. No-op when
         # token_store is None (tests / local dev).

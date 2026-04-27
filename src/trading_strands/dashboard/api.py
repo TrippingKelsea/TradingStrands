@@ -1498,6 +1498,16 @@ async def supervisor_agents(request: Request) -> dict[str, Any]:
                 "agent_id": a.agent_id,
                 "last_beat_ts": a.last_beat_ts,
                 "status": a.status.value,
+                # Extended health-check payload per
+                # docs/SPEC/observability.md §"Health checks". Present
+                # for every agent; zero/empty when the agent hasn't
+                # upgraded its beat() call yet (v0 bots).
+                "reported_status": a.reported_status,
+                "current_activity": a.current_activity,
+                "last_decision_at": a.last_decision_at,
+                "memory_file_cursor": a.memory_file_cursor,
+                "queue_depth": a.queue_depth,
+                "errors_last_hour": a.errors_last_hour,
             }
             for a in report.agents
         ],

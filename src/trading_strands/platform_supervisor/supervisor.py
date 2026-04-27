@@ -49,6 +49,15 @@ class AgentHealth:
     agent_id: str
     last_beat_ts: int
     status: AgentHealthStatus
+    # Extended payload fields (docs/SPEC/observability.md §"Health
+    # checks"). Defaulted so v0 bots that don't emit these yet still
+    # produce a valid AgentHealth row.
+    reported_status: str = "healthy"
+    current_activity: str = ""
+    last_decision_at: int = 0
+    memory_file_cursor: int = 0
+    queue_depth: int = 0
+    errors_last_hour: int = 0
 
 
 @dataclass
@@ -120,6 +129,12 @@ def check_health(
             agent_id=b.agent_id,
             last_beat_ts=b.last_beat_ts,
             status=status,
+            reported_status=b.status,
+            current_activity=b.current_activity,
+            last_decision_at=b.last_decision_at,
+            memory_file_cursor=b.memory_file_cursor,
+            queue_depth=b.queue_depth,
+            errors_last_hour=b.errors_last_hour,
         ))
     agents.sort(key=lambda a: (a.agent_type, a.agent_id))
 
