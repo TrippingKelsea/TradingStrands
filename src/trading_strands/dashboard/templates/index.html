@@ -163,6 +163,40 @@
   </div>
 </div>
 
+<!-- Reviews Tab — self-critique lessons + review-agent recommendations -->
+<div class="tab-content" id="tab-reviews">
+  <div style="font-size:0.75rem;color:var(--dim);margin-bottom:8px;">
+    Self-critique lessons and periodic review-agent output for the active org.
+    Read-only — edit the strategy prompt if you want behavior to change.
+  </div>
+  <div class="grid" style="gap:12px;">
+    <div class="panel">
+      <h2>Risk review</h2>
+      <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
+        Fleet-level concentration, drawdown, correlation.
+      </div>
+      <pre id="reviews-risk"
+           style="white-space:pre-wrap;max-height:320px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading…</pre>
+    </div>
+    <div class="panel">
+      <h2>Compliance review</h2>
+      <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
+        Strategy drift vs stated mandate.
+      </div>
+      <pre id="reviews-compliance"
+           style="white-space:pre-wrap;max-height:320px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading…</pre>
+    </div>
+    <div class="panel">
+      <h2>Auditor review</h2>
+      <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
+        Ledger vs broker reconciliation. Has halt authority.
+      </div>
+      <pre id="reviews-auditor"
+           style="white-space:pre-wrap;max-height:320px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading…</pre>
+    </div>
+  </div>
+</div>
+
 <!-- Telemetry Tab -->
 <div class="tab-content" id="tab-telemetry">
   <div id="telemetry-content">
@@ -760,6 +794,58 @@
   }
 
   window.loadAgents = loadAgents;
+
+  // ── Reviews ────────────────────────────────────────────────────────────
+
+  async function loadReviews() {
+    const types = ['risk', 'compliance', 'auditor'];
+
+    // Resolve the active org. Session gets re-fetched here rather than
+    // reading a globals bag — cheap HEAD-ish call (already cached by
+    // the browser in most cases) and keeps this tab decoupled from
+    // the header's init order.
+    let orgId = null;
+    try {
+      const sresp = await fetch('/api/session');
+      if (sresp.ok) {
+        const s = await sresp.json();
+        orgId = s.active_org_id;
+      }
+    } catch(e) { /* fall through */ }
+
+    if (!orgId) {
+      types.forEach(t => {
+        const el = $('reviews-' + t);
+        if (el) el.textContent = 'No active org — pick one from the header to see reviews.';
+      });
+      return;
+    }
+
+    await Promise.all(types.map(async t => {
+      const el = $('reviews-' + t);
+      if (!el) return;
+      el.textContent = 'Loading…';
+      try {
+        const r = await fetch('/api/orgs/' + orgId + '/recommendations/' + t);
+        if (r.status === 503) {
+          el.textContent = 'Agent memory bucket not configured.';
+        } else if (r.status === 403) {
+          el.textContent = 'Not authorized for this org.';
+        } else if (!r.ok) {
+          el.textContent = 'Failed to load (' + r.status + ').';
+        } else {
+          const body = await r.json();
+          el.textContent = body.recommendations && body.recommendations.trim()
+            ? body.recommendations
+            : 'No ' + t + ' reviews yet. The agent writes one per run.';
+        }
+      } catch(e) {
+        el.textContent = 'Failed to load.';
+      }
+    }));
+  }
+
+  window.loadReviews = loadReviews;
 
   // ── Telemetry ─────────────────────────────────────────────────────────
 

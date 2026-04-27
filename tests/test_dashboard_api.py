@@ -1585,3 +1585,194 @@ def test_service_state_requires_auth() -> None:
         client = TestClient(app)
         resp = client.get("/api/strategies/abc/service")
         assert resp.status_code == 401
+
+
+# ── Org-level review-agent recommendations ─────────────────────────
+
+
+def _put_recs_in_s3(
+    bucket: str, org_id: str, agent_type: str, content: str,
+) -> None:
+    """Seed a recommendations.md under the review-agent's prefix.
+
+    The review agents (Risk/Compliance/Auditor) use agent_id == org_id
+    by convention — one memory bucket per (org, agent_type)."""
+
+    import contextlib as _contextlib
+    s3 = boto3.client("s3", region_name="us-west-2")
+    with _contextlib.suppress(s3.exceptions.BucketAlreadyOwnedByYou):
+        s3.create_bucket(
+            Bucket=bucket,
+            CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+        )
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{org_id}/{agent_type}/{org_id}/recommendations.md",
+        Body=content.encode("utf-8"),
+    )
+
+
+def test_org_recommendations_returns_risk_file_for_member() -> None:
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("Ops")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+            _put_recs_in_s3(
+                "test-agent-memory", org.org_id, "risk",
+                "## 2026-04-26 — risk review\n\nNVDA concentration 40%.",
+            )
+
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org.org_id,
+            ))
+            resp = client.get(
+                f"/api/orgs/{org.org_id}/recommendations/risk",
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert "NVDA concentration" in body["recommendations"]
+            assert body["agent_type"] == "risk"
+            assert body["org_id"] == org.org_id
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_org_recommendations_empty_when_agent_has_not_run() -> None:
+    """Fresh org, no review cycle has run yet. Return 200 with an
+    empty string rather than 404 — the UI renders an empty panel,
+    not an error."""
+
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("Ops")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+            # Bucket exists but no file.
+            boto3.client("s3", region_name="us-west-2").create_bucket(
+                Bucket="test-agent-memory",
+                CreateBucketConfiguration={"LocationConstraint": "us-west-2"},
+            )
+
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org.org_id,
+            ))
+            resp = client.get(
+                f"/api/orgs/{org.org_id}/recommendations/compliance",
+            )
+            assert resp.status_code == 200
+            assert resp.json()["recommendations"] == ""
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_org_recommendations_forbidden_for_non_member() -> None:
+    """Cross-org reads must 403 — recommendations are org-sensitive."""
+
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            bob = tenancy.create_user(email="bob@x.com")
+            org_a = tenancy.create_org("A")
+            org_b = tenancy.create_org("B")
+            tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+            tenancy.add_membership(bob.user_id, org_b.org_id, Role.OPERATOR)
+
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org_a.org_id,
+            ))
+            resp = client.get(
+                f"/api/orgs/{org_b.org_id}/recommendations/risk",
+            )
+            assert resp.status_code == 403
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_org_recommendations_rejects_unknown_agent_type() -> None:
+    """Only risk, compliance, auditor are valid. A typo'd path must
+    not trick the dashboard into reading arbitrary S3 keys — this is
+    the injection surface for 'recommendations.md but under a
+    different prefix'."""
+
+    os.environ["AGENT_MEMORY_BUCKET"] = "test-agent-memory"
+    try:
+        with mock_aws():
+            from trading_strands.authz.model import Role
+            from trading_strands.tenancy.store import TenancyStore
+
+            table = _make_table()
+            tenancy = TenancyStore(table)
+            alice = tenancy.create_user(email="alice@x.com")
+            org = tenancy.create_org("Ops")
+            tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(
+                alice.user_id, org.org_id,
+            ))
+            resp = client.get(
+                f"/api/orgs/{org.org_id}/recommendations/strategy",
+            )
+            assert resp.status_code == 400
+            # And something obviously hostile like a path traversal.
+            resp = client.get(
+                f"/api/orgs/{org.org_id}/recommendations/..%2Fsomething",
+            )
+            assert resp.status_code in (400, 404)
+    finally:
+        del os.environ["AGENT_MEMORY_BUCKET"]
+
+
+def test_org_recommendations_503_when_bucket_unconfigured() -> None:
+    os.environ.pop("AGENT_MEMORY_BUCKET", None)
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org = tenancy.create_org("Ops")
+        tenancy.add_membership(alice.user_id, org.org_id, Role.OPERATOR)
+
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(
+            alice.user_id, org.org_id,
+        ))
+        resp = client.get(
+            f"/api/orgs/{org.org_id}/recommendations/risk",
+        )
+        assert resp.status_code == 503
+
+
+def test_org_recommendations_requires_auth() -> None:
+    with mock_aws():
+        _make_table()
+        from trading_strands.dashboard.api import app
+        client = TestClient(app)
+        resp = client.get("/api/orgs/abc/recommendations/risk")
+        assert resp.status_code == 401

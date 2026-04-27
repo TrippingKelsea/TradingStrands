@@ -814,6 +814,68 @@ async def get_strategy_service(
     }
 
 
+# Whitelist of review-agent types the dashboard will read recommendations
+# for. Set-membership check also neutralizes path-traversal attempts like
+# "..%2Fsomething" — any value not in this set returns 400 without ever
+# touching S3.
+_ALLOWED_RECOMMENDATION_AGENT_TYPES = frozenset({
+    "risk", "compliance", "auditor",
+})
+
+
+@app.get("/api/orgs/{org_id}/recommendations/{agent_type}")
+async def get_org_recommendations(
+    request: Request, org_id: str, agent_type: str,
+) -> dict[str, Any]:
+    """Return recommendations.md for a review agent scoped to an org.
+
+    Authz: READ on the Org resource — any member of the org passes.
+    Non-members 403 regardless of what the bucket would have returned.
+    """
+
+    if agent_type not in _ALLOWED_RECOMMENDATION_AGENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "agent_type must be one of: "
+                f"{sorted(_ALLOWED_RECOMMENDATION_AGENT_TYPES)}"
+            ),
+        )
+
+    principal = _get_principal(request)
+    _require(
+        principal, Action.READ,
+        Resource(type=ResourceType.ORG, org_id=org_id),
+    )
+
+    bucket = os.environ.get("AGENT_MEMORY_BUCKET")
+    if not bucket:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Agent memory not configured (AGENT_MEMORY_BUCKET unset). "
+                "Review-agent recommendations unavailable."
+            ),
+        )
+
+    from trading_strands.agent_memory.store import AgentMemoryStore
+
+    # Review agents use agent_id == org_id by convention — one memory
+    # bucket per (org, agent_type). See each agent's lambda_handler.
+    memory = AgentMemoryStore(
+        s3_client=boto3.client("s3"),
+        bucket=bucket,
+        org_id=org_id,
+        agent_type=agent_type,
+        agent_id=org_id,
+    )
+    return {
+        "org_id": org_id,
+        "agent_type": agent_type,
+        "recommendations": memory.read_recommendations(),
+    }
+
+
 @app.get("/api/strategies/{strategy_id}/lessons")
 async def get_strategy_lessons(
     request: Request, strategy_id: str,
