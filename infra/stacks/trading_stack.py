@@ -627,15 +627,12 @@ class TradingStrandsStack(cdk.Stack):
         # All three share the same Lambda shape: per-org invocation, reads
         # DDB, reads+writes the agent-memory bucket, calls Bedrock, appends
         # a recommendation. Factored into a helper so the three stay in
-        # lockstep — if the Lambda env or IAM drifts across them, the
-        # skeleton is the wrong place.
+        # lockstep.
         #
-        # Schedules are created disabled; a fan-out Lambda that enumerates
-        # orgs is the final piece (same pattern as BotProvisioner for
-        # Self-Critique). For v0 with a single org, operators invoke
-        # manually:
-        #   aws lambda invoke --function-name trading-strands-risk-agent \
-        #       --payload '{"org_id":"<org>"}' /tmp/out.json
+        # An org-fanout Lambda (defined further down) is wired as the
+        # target of each schedule, passing the review-agent's function
+        # name as payload. All three schedules remain enabled=False on
+        # first deploy; flip them individually once confident.
         def _build_review_agent(
             construct_id: str,
             function_name: str,
@@ -645,7 +642,7 @@ class TradingStrandsStack(cdk.Stack):
             schedule_id: str,
             schedule_description: str,
             schedule_cron: events.Schedule,
-        ) -> lambda_.DockerImageFunction:
+        ) -> tuple[lambda_.DockerImageFunction, events.Rule]:
             fn = lambda_.DockerImageFunction(
                 self,
                 construct_id,
@@ -673,18 +670,16 @@ class TradingStrandsStack(cdk.Stack):
                 ],
                 resources=["*"],
             ))
-            # Rule created disabled; target attached when the org-fan-out
-            # Lambda lands.
-            events.Rule(
+            rule = events.Rule(
                 self,
                 schedule_id,
                 description=schedule_description,
                 schedule=schedule_cron,
                 enabled=False,
             )
-            return fn
+            return fn, rule
 
-        _build_review_agent(
+        risk_agent_fn, risk_rule = _build_review_agent(
             construct_id="RiskAgentFunction",
             function_name="trading-strands-risk-agent",
             handler_path="trading_strands.risk_agent.lambda_handler.handler",
@@ -692,15 +687,14 @@ class TradingStrandsStack(cdk.Stack):
             component_tag="risk-agent",
             schedule_id="RiskAgentWeeklySchedule",
             schedule_description=(
-                "Sunday 10:00 UTC — per-org Risk Agent reviewer. "
-                "Target attached when org-fan-out Lambda lands."
+                "Sunday 10:00 UTC — per-org Risk Agent reviewer."
             ),
             schedule_cron=events.Schedule.cron(
                 minute="0", hour="10", week_day="SUN",
             ),
         )
 
-        _build_review_agent(
+        compliance_agent_fn, compliance_rule = _build_review_agent(
             construct_id="ComplianceAgentFunction",
             function_name="trading-strands-compliance-agent",
             handler_path=(
@@ -767,9 +761,8 @@ class TradingStrandsStack(cdk.Stack):
         ))
 
         # Daily-ish cadence lines up with the spec's "periodic pulls"
-        # language. Disabled on first deploy; same fan-out-Lambda story
-        # as Risk/Compliance before it's wired in.
-        events.Rule(
+        # language. Disabled on first deploy.
+        auditor_rule = events.Rule(
             self,
             "AuditorAgentDailySchedule",
             description=(
@@ -781,6 +774,59 @@ class TradingStrandsStack(cdk.Stack):
             ),
             enabled=False,
         )
+
+        # -- Org-fanout Lambda (review-agent scheduler target) ---------------
+        #
+        # One Lambda, invoked by each review-agent schedule with the target
+        # review-agent's function name in the payload. Walks TenancyStore,
+        # async-invokes the target once per org.
+        #
+        # Shared target rather than three parallel fanout Lambdas because
+        # the enumeration code is identical and we'd rather have one place
+        # to audit IAM/logs for "which agents run against which orgs".
+        org_fanout_fn = lambda_.DockerImageFunction(
+            self,
+            "OrgFanoutFunction",
+            function_name="trading-strands-org-fanout",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=["trading_strands.org_fanout.fanout.handler"],
+            ),
+            memory_size=256,
+            timeout=cdk.Duration.minutes(2),
+            environment={"DYNAMODB_TABLE": table.table_name},
+        )
+        cdk.Tags.of(org_fanout_fn).add("Component", "org-fanout")
+        table.grant_read_data(org_fanout_fn)
+        # Invoke authority scoped to exactly the three review agents.
+        # Nothing else this Lambda can ever invoke, regardless of payload.
+        for review_fn in (
+            risk_agent_fn, compliance_agent_fn, auditor_agent_fn,
+        ):
+            review_fn.grant_invoke(org_fanout_fn)
+
+        # Attach the fanout to each review-agent rule with the per-rule
+        # target function in the payload. `from_object` serializes the
+        # dict as the event body the Lambda handler reads.
+        risk_rule.add_target(events_targets.LambdaFunction(
+            org_fanout_fn,
+            event=events.RuleTargetInput.from_object({
+                "target_function": risk_agent_fn.function_name,
+            }),
+        ))
+        compliance_rule.add_target(events_targets.LambdaFunction(
+            org_fanout_fn,
+            event=events.RuleTargetInput.from_object({
+                "target_function": compliance_agent_fn.function_name,
+            }),
+        ))
+        auditor_rule.add_target(events_targets.LambdaFunction(
+            org_fanout_fn,
+            event=events.RuleTargetInput.from_object({
+                "target_function": auditor_agent_fn.function_name,
+            }),
+        ))
 
         # -- BotProvisioner (weekend fan-out) --------------------------------
         #
