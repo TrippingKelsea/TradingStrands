@@ -1445,6 +1445,143 @@ async def get_strategy_memory(
     }
 
 
+@app.get("/api/strategies/{strategy_id}/tool-calls")
+async def get_strategy_tool_calls(
+    request: Request, strategy_id: str,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Return recent tool-call events for this strategy, newest-first.
+
+    Backs the tool-call feed on the Overview tab. Queries CloudWatch
+    Logs Insights over the trading log group for EMF records whose
+    `tool.call.count` metric was emitted by this bot. Range defaults
+    to today UTC when no start/end is given and is capped at 31 days.
+
+    Returns `{calls: [{ts, tool, outcome, symbol}, ...]}`. Each tool
+    call is one emitted EMF record — the same events feed the
+    Phase-1 broker/cost dashboards, just scoped to one strategy.
+
+    Privacy boundary: READ on the strategy. The log group is shared
+    across bots; authz is enforced by filtering the query on
+    strategy_id = <this bot>.
+    """
+
+    import datetime
+
+    principal = _get_principal(request)
+    store = StrategyStore(_get_table())
+    try:
+        strat = store.get(strategy_id)
+    except StrategyNotFoundError:
+        raise HTTPException(status_code=404, detail="Strategy not found") from None
+
+    acl = store.acl_users(strategy_id)
+    _require(principal, Action.READ, resource_for(strat, acl))
+
+    today = datetime.datetime.now(datetime.UTC).date()
+    try:
+        end_date = datetime.date.fromisoformat(end) if end else today
+        start_date = datetime.date.fromisoformat(start) if start else end_date
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid date format (use YYYY-MM-DD): {exc}",
+        ) from exc
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="start must be <= end")
+    if (end_date - start_date).days + 1 > 31:
+        raise HTTPException(
+            status_code=400, detail="range exceeds 31-day cap",
+        )
+    clamped_limit = max(1, min(int(limit), 1000))
+
+    start_ts = int(
+        datetime.datetime.combine(
+            start_date, datetime.time.min, tzinfo=datetime.UTC,
+        ).timestamp(),
+    )
+    end_ts = int(
+        datetime.datetime.combine(
+            end_date, datetime.time.max, tzinfo=datetime.UTC,
+        ).timestamp(),
+    )
+
+    log_group = os.environ.get(
+        "TRADING_LOG_GROUP", "/ecs/trading-strands/trading",
+    )
+    bot_id = f"strategy-{strategy_id}"
+    # Insights escape rule: strategy_id is safe (hex id), but quote it
+    # with double quotes in the filter so a future rename doesn't break
+    # the parser.
+    query = (
+        f"fields @timestamp, tool, outcome, symbol, strategy_id\n"
+        f"| filter ispresent(`tool.call.count`)"
+        f" and strategy_id = \"{bot_id}\"\n"
+        f"| sort @timestamp desc\n"
+        f"| limit {clamped_limit}"
+    )
+
+    logs_client = boto3.client("logs")
+    try:
+        start_resp = logs_client.start_query(
+            logGroupName=log_group,
+            startTime=start_ts,
+            endTime=end_ts,
+            queryString=query,
+            limit=clamped_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"cloudwatch logs unavailable: {exc}",
+        ) from exc
+
+    query_id = start_resp["queryId"]
+    import time as _time
+    deadline = _time.time() + 15.0  # ceiling so the dashboard never hangs
+    while True:
+        r = logs_client.get_query_results(queryId=query_id)
+        status = r.get("status")
+        if status in ("Complete", "Failed", "Cancelled", "Timeout"):
+            break
+        if _time.time() > deadline:
+            raise HTTPException(
+                status_code=504,
+                detail="cloudwatch query timed out; narrow the range",
+            )
+        await asyncio.sleep(0.5)
+
+    if status != "Complete":
+        raise HTTPException(
+            status_code=502,
+            detail=f"cloudwatch query ended in status={status}",
+        )
+
+    calls: list[dict[str, Any]] = []
+    for row in r.get("results", []) or []:
+        entry: dict[str, Any] = {}
+        for field in row:
+            name = field.get("field", "")
+            val = field.get("value", "")
+            if name == "@timestamp":
+                entry["ts"] = val
+            elif name in ("tool", "outcome", "symbol"):
+                entry[name] = val
+        # Drop partial records Insights occasionally emits with only
+        # @ptr populated — they have no operator value.
+        if "tool" in entry:
+            calls.append(entry)
+
+    return {
+        "strategy_id": strategy_id,
+        "start": start_date.isoformat(),
+        "end": end_date.isoformat(),
+        "calls": calls,
+    }
+
+
 @app.get("/api/strategies/{strategy_id}/prompt-snapshot")
 async def get_strategy_prompt_snapshot(
     request: Request, strategy_id: str,

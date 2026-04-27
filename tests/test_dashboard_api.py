@@ -3679,3 +3679,149 @@ def test_memory_endpoint_forbidden_for_other_org(
             f"/api/strategies/{foreign.strategy_id}/memory",
         )
         assert resp.status_code == 403
+
+
+# ── /api/strategies/{sid}/tool-calls ──────────────────────────────────
+
+
+def _make_logs_mock_complete(results: list[list[dict[str, str]]]) -> MagicMock:
+    """Stand-in for boto3.client('logs'). start_query returns a queryId;
+    the first get_query_results returns status=Complete with the given
+    rows. Keeps tests deterministic — no polling loop latency."""
+
+    mock = MagicMock()
+    mock.start_query.return_value = {"queryId": "q-test"}
+    mock.get_query_results.return_value = {
+        "status": "Complete",
+        "results": results,
+    }
+    return mock
+
+
+def test_tool_calls_returns_rows_for_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: Insights returns two rows, the endpoint returns them
+    in a flattened shape (ts, tool, outcome, symbol)."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+
+        rows = [
+            [
+                {"field": "@timestamp", "value": "2026-04-27 19:51:33.542"},
+                {"field": "tool", "value": "news"},
+                {"field": "outcome", "value": "cache_hit"},
+                {"field": "symbol", "value": "AAPL"},
+            ],
+            [
+                {"field": "@timestamp", "value": "2026-04-27 18:30:00.000"},
+                {"field": "tool", "value": "filings"},
+                {"field": "outcome", "value": "quota_exceeded"},
+                {"field": "symbol", "value": "AAPL"},
+            ],
+        ]
+        logs_mock = _make_logs_mock_complete(rows)
+        with patch("boto3.client", side_effect=lambda name, **kw:
+                   logs_mock if name == "logs" else MagicMock()):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.get(
+                f"/api/strategies/{strat.strategy_id}/tool-calls",
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["calls"]) == 2
+        assert body["calls"][0]["tool"] == "news"
+        assert body["calls"][0]["outcome"] == "cache_hit"
+        assert body["calls"][1]["outcome"] == "quota_exceeded"
+        # Query was scoped to this bot via strategy_id filter.
+        q = logs_mock.start_query.call_args.kwargs["queryString"]
+        assert f"strategy-{strat.strategy_id}" in q
+
+
+def test_tool_calls_drops_rows_without_tool_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Insights occasionally emits partial rows (just @ptr) — those
+    carry no operator value and must be filtered out."""
+
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+
+        rows = [
+            [
+                {"field": "@timestamp", "value": "2026-04-27 19:51:33"},
+                {"field": "tool", "value": "news"},
+            ],
+            # Partial — no tool field.
+            [{"field": "@ptr", "value": "abc"}],
+        ]
+        logs_mock = _make_logs_mock_complete(rows)
+        with patch("boto3.client", side_effect=lambda name, **kw:
+                   logs_mock if name == "logs" else MagicMock()):
+            from trading_strands.dashboard.api import app
+            client = TestClient(app, cookies=_session_cookie(uid, oid))
+            resp = client.get(
+                f"/api/strategies/{strat.strategy_id}/tool-calls",
+            )
+        assert resp.status_code == 200
+        assert len(resp.json()["calls"]) == 1
+
+
+def test_tool_calls_rejects_range_over_31_days() -> None:
+    with mock_aws():
+        from trading_strands.strategies_store.store import StrategyStore
+
+        table = _make_table()
+        uid, oid = _make_user(table, role_name="operator")
+        strat = StrategyStore(table).create(
+            org_id=oid, author_user_id=uid, name="s", markdown="# m",
+        )
+        from trading_strands.dashboard.api import app
+        client = TestClient(app, cookies=_session_cookie(uid, oid))
+        resp = client.get(
+            f"/api/strategies/{strat.strategy_id}/tool-calls"
+            "?start=2026-01-01&end=2026-06-01",
+        )
+        assert resp.status_code == 400
+
+
+def test_tool_calls_forbidden_for_other_org() -> None:
+    with mock_aws():
+        from trading_strands.authz.model import Role
+        from trading_strands.strategies_store.store import StrategyStore
+        from trading_strands.tenancy.store import TenancyStore
+
+        table = _make_table()
+        tenancy = TenancyStore(table)
+        alice = tenancy.create_user(email="alice@x.com")
+        org_a = tenancy.create_org("A")
+        org_b = tenancy.create_org("B")
+        tenancy.add_membership(alice.user_id, org_a.org_id, Role.OPERATOR)
+
+        foreign = StrategyStore(table).create(
+            org_id=org_b.org_id, author_user_id="someone",
+            name="s", markdown="# m",
+        )
+        from trading_strands.dashboard.api import app
+        client = TestClient(
+            app, cookies=_session_cookie(alice.user_id, org_a.org_id),
+        )
+        resp = client.get(
+            f"/api/strategies/{foreign.strategy_id}/tool-calls",
+        )
+        assert resp.status_code == 403
