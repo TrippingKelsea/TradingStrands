@@ -93,26 +93,81 @@ def fan_out_self_critique(
     return results
 
 
+def fan_out_memory_compactor(
+    *,
+    lambda_client: Any,
+    function_name: str,
+    bots: list[tuple[str, str]],
+) -> list[InvocationResult]:
+    """Invoke the Memory Compactor Lambda once per bot, asynchronously.
+
+    Same fan-out pattern as self-critique, but the per-bot payload
+    shape matches the compactor handler's event schema (org_id +
+    agent_type + agent_id). The compactor defaults `date` to
+    yesterday UTC internally, so we don't stamp it here — a single
+    EventBridge schedule can drive every bot's prior-day compaction.
+    """
+
+    results: list[InvocationResult] = []
+    for org_id, bot_id in bots:
+        # bot_id is `strategy-<strategy_id>`; the compactor's agent_id
+        # is the bot_id verbatim so the S3 path (org/agent_type/agent_id)
+        # matches what the StrategyBot wrote during the day.
+        payload = json.dumps({
+            "org_id": org_id,
+            "agent_type": "strategy",
+            "agent_id": bot_id,
+        }).encode("utf-8")
+        try:
+            lambda_client.invoke(
+                FunctionName=function_name,
+                InvocationType="Event",
+                Payload=payload,
+            )
+        except Exception as exc:
+            results.append(InvocationResult(
+                org_id=org_id, bot_id=bot_id, ok=False, error=str(exc),
+            ))
+            continue
+        results.append(InvocationResult(org_id=org_id, bot_id=bot_id, ok=True))
+    return results
+
+
 def _run(
     *,
     table: Any,
     lambda_client: Any,
-    self_critique_function_name: str,
+    function_name: str,
+    target: str = "self_critique",
 ) -> dict[str, Any]:
     """Do the work. Split out from `handler` so tests can inject fakes
-    without mocking boto3 at module level."""
+    without mocking boto3 at module level.
+
+    `target` selects which fan-out shape is used: "self_critique" or
+    "memory_compactor". Both enumerate the same active-bots list;
+    they differ only in the Lambda payload schema (see the fan-out
+    helpers).
+    """
 
     store = StrategyStore(table)
     bots = enumerate_active_bots(store)
-    results = fan_out_self_critique(
-        lambda_client=lambda_client,
-        function_name=self_critique_function_name,
-        bots=bots,
-    )
+    if target == "memory_compactor":
+        results = fan_out_memory_compactor(
+            lambda_client=lambda_client,
+            function_name=function_name,
+            bots=bots,
+        )
+    else:
+        results = fan_out_self_critique(
+            lambda_client=lambda_client,
+            function_name=function_name,
+            bots=bots,
+        )
     succeeded = sum(1 for r in results if r.ok)
     failed = sum(1 for r in results if not r.ok)
     summary: dict[str, Any] = {
         "ok": failed == 0,
+        "target": target,
         "total": len(results),
         "succeeded": succeeded,
         "failed": failed,
@@ -122,19 +177,22 @@ def _run(
         ],
     }
     logger.info(
-        "bot_provisioner.complete total=%d succeeded=%d failed=%d",
-        len(results), succeeded, failed,
+        "bot_provisioner.complete target=%s total=%d succeeded=%d failed=%d",
+        target, len(results), succeeded, failed,
     )
     return summary
 
 
-def handler(_event: dict[str, Any], _context: Any) -> dict[str, Any]:
-    """Lambda entry point. EventBridge passes no meaningful payload on a
-    scheduled invocation — we enumerate from DDB ourselves.
+def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
+    """Lambda entry point. EventBridge may pass `{"target": "..."}`
+    in the event to pick the fan-out shape. Defaults to self_critique
+    so existing weekend schedules continue to work unchanged.
 
     Env vars:
-        DYNAMODB_TABLE             — strategies table
-        SELF_CRITIQUE_FUNCTION_NAME — Self-Critique Lambda name
+        DYNAMODB_TABLE                 — strategies table
+        SELF_CRITIQUE_FUNCTION_NAME    — Self-Critique Lambda name
+        MEMORY_COMPACTOR_FUNCTION_NAME — Memory Compactor Lambda name (required
+                                         when target=memory_compactor)
     """
 
     import boto3
@@ -142,9 +200,15 @@ def handler(_event: dict[str, Any], _context: Any) -> dict[str, Any]:
     ddb = boto3.resource("dynamodb")
     lambda_client = boto3.client("lambda")
     table_name = os.environ["DYNAMODB_TABLE"]
-    fn_name = os.environ["SELF_CRITIQUE_FUNCTION_NAME"]
+
+    target = str(event.get("target") or "self_critique")
+    if target == "memory_compactor":
+        fn_name = os.environ["MEMORY_COMPACTOR_FUNCTION_NAME"]
+    else:
+        fn_name = os.environ["SELF_CRITIQUE_FUNCTION_NAME"]
     return _run(
         table=ddb.Table(table_name),
         lambda_client=lambda_client,
-        self_critique_function_name=fn_name,
+        function_name=fn_name,
+        target=target,
     )

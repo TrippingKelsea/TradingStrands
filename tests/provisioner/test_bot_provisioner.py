@@ -9,6 +9,7 @@ failures don't block the rest of the fleet.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import boto3
@@ -104,8 +105,11 @@ class FakeLambdaClient:
         import json
         payload = json.loads(Payload)
         self.calls.append((FunctionName, payload))
-        if payload["bot_id"] in self._fail_bots:
-            raise RuntimeError(f"boom: {payload['bot_id']}")
+        # self-critique uses `bot_id`, memory_compactor uses `agent_id`.
+        # Accept either for failure injection.
+        who = payload.get("bot_id") or payload.get("agent_id", "")
+        if who in self._fail_bots:
+            raise RuntimeError(f"boom: {who}")
         # Lambda returns an HTTP-style response envelope.
         return {"StatusCode": 202}  # async invoke = 202
 
@@ -208,7 +212,7 @@ def test_handler_enumerates_and_invokes() -> None:
         result = bot_provisioner._run(
             table=table,
             lambda_client=client,
-            self_critique_function_name="self-critique",
+            function_name="self-critique",
         )
 
         assert result["ok"] is True
@@ -217,4 +221,58 @@ def test_handler_enumerates_and_invokes() -> None:
         assert result["failed"] == 0
         assert client.calls == [
             ("self-critique", {"org_id": "o1", "bot_id": f"strategy-{active.strategy_id}"}),
+        ]
+
+
+def test_run_target_memory_compactor_fans_out_compactor_payload() -> None:
+    """target=memory_compactor switches the fan-out payload shape so
+    the same provisioner can drive both the weekend self-critique and
+    the nightly memory compactor. Compactor payload is
+    (org_id, agent_type=strategy, agent_id=<bot_id>) per the compactor
+    Lambda's event contract."""
+
+    from unittest.mock import patch
+
+    import boto3
+    from moto import mock_aws
+
+    from trading_strands.provisioner import bot_provisioner as bp
+    from trading_strands.strategies_store.store import StrategyStore
+
+    with mock_aws(), patch.dict(
+        os.environ,
+        {
+            "DYNAMODB_TABLE": "t",
+            "SELF_CRITIQUE_FUNCTION_NAME": "sc",
+            "MEMORY_COMPACTOR_FUNCTION_NAME": "mc",
+        },
+    ):
+        ddb = boto3.resource("dynamodb", region_name="us-west-2")
+        ddb.create_table(
+            TableName="t",
+            KeySchema=[{"AttributeName": "pk", "KeyType": "HASH"}],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+        table = ddb.Table("t")
+        store = StrategyStore(table)
+        strat = store.create(
+            org_id="o1", author_user_id="u1",
+            name="active", markdown="rules",
+        )
+        client = FakeLambdaClient()
+        result = bp._run(
+            table=table, lambda_client=client,
+            function_name="mc", target="memory_compactor",
+        )
+        assert result["ok"] is True
+        assert result["target"] == "memory_compactor"
+        assert client.calls == [
+            ("mc", {
+                "org_id": "o1",
+                "agent_type": "strategy",
+                "agent_id": f"strategy-{strat.strategy_id}",
+            }),
         ]

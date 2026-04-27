@@ -699,6 +699,43 @@ class TradingStrandsStack(cdk.Stack):
             resources=["*"],
         ))
 
+        # -- Memory Compactor Lambda (end-of-day batch) -----------------------
+        #
+        # Per docs/SPEC/agent_memory.md §"Batch compaction (end-of-day)":
+        # reads each Strategy Agent's raw YYYY-MM-DD.md, writes a
+        # compressed sibling. One invocation per active strategy,
+        # fanned out by the existing BotProvisioner with
+        # target=memory_compactor. Idempotent — safe to re-run.
+        memory_compactor_fn = lambda_.DockerImageFunction(
+            self,
+            "MemoryCompactorFunction",
+            function_name="trading-strands-memory-compactor",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=["trading_strands.memory_compactor.lambda_handler.handler"],
+            ),
+            memory_size=1024,
+            timeout=cdk.Duration.minutes(5),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "AGENT_MEMORY_BUCKET": agent_memory_bucket.bucket_name,
+                # Sonnet by default — compaction is reflective, cheaper
+                # than Opus, and the contract lets operators override per
+                # deploy if they want a sharper summary.
+                "COMPACTOR_MODEL_ID": "us.anthropic.claude-sonnet-4-6",
+            },
+        )
+        cdk.Tags.of(memory_compactor_fn).add("Component", "memory-compactor")
+        agent_memory_bucket.grant_read_write(memory_compactor_fn)
+        memory_compactor_fn.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+            ],
+            resources=["*"],
+        ))
+
         # -- Periodic review agents (Risk / Compliance / Auditor) ------------
         #
         # All three share the same Lambda shape: per-org invocation, reads
@@ -924,11 +961,15 @@ class TradingStrandsStack(cdk.Stack):
             environment={
                 "DYNAMODB_TABLE": table.table_name,
                 "SELF_CRITIQUE_FUNCTION_NAME": self_critique_fn.function_name,
+                "MEMORY_COMPACTOR_FUNCTION_NAME": (
+                    memory_compactor_fn.function_name
+                ),
             },
         )
         cdk.Tags.of(bot_provisioner_fn).add("Component", "bot-provisioner")
         table.grant_read_data(bot_provisioner_fn)
         self_critique_fn.grant_invoke(bot_provisioner_fn)
+        memory_compactor_fn.grant_invoke(bot_provisioner_fn)
 
         # EventBridge schedule: Saturday 10:00 UTC = 6am ET. Markets are
         # closed on Saturday; strategies have finished their week; the
@@ -951,6 +992,31 @@ class TradingStrandsStack(cdk.Stack):
         )
         weekend_rule.add_target(
             events_targets.LambdaFunction(bot_provisioner_fn),
+        )
+
+        # Daily memory compactor schedule: 02:00 UTC = 22:00 ET prior
+        # day — after market close, before the next trading session.
+        # BotProvisioner fans out one invocation per active bot with
+        # the default `date` (yesterday UTC) to the compactor Lambda.
+        # Disabled on first deploy; flip on after we've seen a clean
+        # manual run.
+        compactor_rule = events.Rule(
+            self,
+            "MemoryCompactorDailySchedule",
+            description=(
+                "Daily 02:00 UTC — BotProvisioner fans out memory "
+                "compaction to each active Strategy Agent."
+            ),
+            schedule=events.Schedule.cron(minute="0", hour="2"),
+            enabled=False,
+        )
+        compactor_rule.add_target(
+            events_targets.LambdaFunction(
+                bot_provisioner_fn,
+                event=events.RuleTargetInput.from_object({
+                    "target": "memory_compactor",
+                }),
+            ),
         )
 
         # -- StrategySupervisor (per-bot Fargate lifecycle) ------------------
