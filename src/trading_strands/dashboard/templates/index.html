@@ -27,6 +27,11 @@
   .telem-row .telem-key { color: var(--dim); }
   .telem-row .telem-val { font-weight: bold; }
   .telem-full { grid-column: 1 / -1; }
+
+  /* Detail page sub-tabs */
+  .tab-strip .tab-btn { padding: 6px 14px; background: transparent; color: var(--dim); border: none; border-bottom: 2px solid transparent; cursor: pointer; font-family: inherit; font-size: 0.85rem; }
+  .tab-strip .tab-btn:hover { color: var(--text); }
+  .tab-strip .tab-btn.active { color: var(--blue); border-bottom-color: var(--blue); }
 {% endblock %}
 
 {% block content %}
@@ -87,6 +92,122 @@
   <div id="strategies-list">
     <div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading strategies...</div>
   </div>
+
+  <!-- Strategy detail view — the default click-through from a strategy card.
+       Three tabs: Overview (thought log + tool calls + positions),
+       Prompt (last rendered system + user prompt), Self-critique
+       (lessons + proposals). Edit form is reachable from here via
+       the Edit button, but is no longer the default drop-target. -->
+  <div id="strategy-detail" style="display:none;">
+    <div style="margin-bottom:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn" onclick="closeStrategyDetail()">&larr; Back to strategies</button>
+      <button class="btn" onclick="openEditFromDetail()">Edit strategy</button>
+      <span id="detail-status" style="margin-left:8px;font-size:0.8rem;color:var(--dim);"></span>
+    </div>
+
+    <div class="panel" id="detail-header-panel" style="margin-bottom:12px;">
+      <h2 style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <span id="detail-strat-name">…</span>
+        <span id="detail-strat-status" class="badge">…</span>
+        <span id="detail-strat-service" class="badge badge-unknown" style="font-size:0.7rem;">service: …</span>
+      </h2>
+      <div id="detail-strat-meta" style="font-size:0.75rem;color:var(--dim);margin-top:4px;"></div>
+    </div>
+
+    <div class="tab-strip" id="detail-tab-strip" style="display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid var(--border);">
+      <button class="tab-btn active" data-detail-tab="overview" onclick="switchDetailTab('overview')">Overview</button>
+      <button class="tab-btn" data-detail-tab="prompt" onclick="switchDetailTab('prompt')">Prompt</button>
+      <button class="tab-btn" data-detail-tab="critique" onclick="switchDetailTab('critique')">Self-critique</button>
+    </div>
+
+    <!-- Overview tab -->
+    <div class="detail-tab-content" data-detail-tab="overview">
+      <div class="panel" style="margin-bottom:12px;">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <label style="font-size:0.75rem;color:var(--dim);">Range:</label>
+          <input type="date" id="detail-range-start" style="padding:3px 6px;">
+          <span style="font-size:0.75rem;color:var(--dim);">→</span>
+          <input type="date" id="detail-range-end" style="padding:3px 6px;">
+          <button class="btn" onclick="reloadOverviewRange()" style="padding:3px 10px;">Apply</button>
+          <button class="btn" onclick="setRangeToday()" style="padding:3px 10px;">Today</button>
+          <span style="flex:1;"></span>
+          <button class="btn" onclick="reloadOverviewRange()" style="padding:3px 10px;">Refresh</button>
+        </div>
+      </div>
+
+      <div class="grid" style="gap:12px;grid-template-columns:2fr 1fr;">
+        <div class="panel">
+          <h2>Thought log</h2>
+          <div style="font-size:0.7rem;color:var(--dim);margin-bottom:6px;">
+            Raw agent memory, newest day first.
+            <code style="font-size:0.65rem;">[MARKETDATA#...]</code> /
+            <code style="font-size:0.65rem;">[LEDGER#...]</code> pointers
+            reference the data backing each claim.
+          </div>
+          <pre id="detail-memory"
+               style="white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading&hellip;</pre>
+        </div>
+        <div>
+          <div class="panel" style="margin-bottom:12px;">
+            <h2>Ledger</h2>
+            <div id="detail-ledger"
+                 style="font-size:0.78rem;">Loading&hellip;</div>
+          </div>
+          <div class="panel">
+            <h2>Tool calls</h2>
+            <div style="font-size:0.7rem;color:var(--dim);margin-bottom:6px;">
+              Scoped to this bot, newest first.
+            </div>
+            <div id="detail-tool-calls" style="font-size:0.75rem;max-height:420px;overflow:auto;">Loading&hellip;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Prompt tab -->
+    <div class="detail-tab-content" data-detail-tab="prompt" style="display:none;">
+      <div class="panel" style="margin-bottom:12px;">
+        <div style="font-size:0.7rem;color:var(--dim);">
+          Last-rendered prompt the LLM received (tick <span id="detail-prompt-tick">?</span>,
+          <span id="detail-prompt-rendered-at">—</span>). This is a live
+          snapshot overwritten each tick; the memory file is the
+          historical record.
+        </div>
+      </div>
+      <div class="panel" style="margin-bottom:12px;">
+        <h2>System prompt</h2>
+        <pre id="detail-prompt-system"
+             style="white-space:pre-wrap;max-height:360px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading&hellip;</pre>
+      </div>
+      <div class="panel">
+        <h2>User prompt</h2>
+        <pre id="detail-prompt-user"
+             style="white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading&hellip;</pre>
+      </div>
+    </div>
+
+    <!-- Self-critique tab -->
+    <div class="detail-tab-content" data-detail-tab="critique" style="display:none;">
+      <div class="panel" style="margin-bottom:12px;">
+        <h2>Lessons</h2>
+        <div style="font-size:0.7rem;color:var(--dim);margin-bottom:6px;">
+          Written by the weekend self-critique agent. Edit the strategy
+          prompt if you want behavior to change.
+        </div>
+        <pre id="detail-critique-lessons"
+             style="white-space:pre-wrap;max-height:360px;overflow:auto;background:var(--surface);padding:10px;border-radius:4px;font-size:0.78rem;margin:0;">Loading&hellip;</pre>
+      </div>
+      <div class="panel">
+        <h2>Proposals</h2>
+        <div style="font-size:0.7rem;color:var(--dim);margin-bottom:6px;">
+          Prompt edits the critique agent has proposed. Review and
+          apply/reject — never auto-applied.
+        </div>
+        <div id="detail-critique-proposals" style="font-size:0.78rem;">Loading&hellip;</div>
+      </div>
+    </div>
+  </div>
+
   <div id="strategy-edit" style="display:none;">
     <div style="margin-bottom:8px;">
       <button class="btn" onclick="closeEditStrategy()">&larr; Back to strategies</button>
@@ -615,7 +736,7 @@
           </div>
           <div class="strat-meta">Capital: $${s.capital} | Created: ${new Date(s.created_at * 1000).toLocaleDateString()}</div>
           <div class="strat-symbols">${symsLabel}</div>`;
-        card.addEventListener('click', () => openEditStrategy(s.strategy_id));
+        card.addEventListener('click', () => openStrategyDetail(s.strategy_id));
         container.appendChild(card);
       });
 
@@ -755,6 +876,341 @@
     selectEl.onchange = updateDesc;
     updateDesc();
   }
+
+  // ── Strategy detail view ─────────────────────────────────────────────
+  //
+  // Three-tab view (Overview / Prompt / Self-critique) that opens when an
+  // operator clicks a strategy card. Edit form is reachable via the Edit
+  // button on the detail header — it's no longer the default click target.
+
+  let _detailStrategy = null;
+
+  function _todayISO() {
+    const d = new Date();
+    return d.toISOString().slice(0, 10);
+  }
+
+  function _fmtTs(unix) {
+    if (!unix) return '—';
+    return new Date(unix * 1000).toLocaleString();
+  }
+
+  function switchDetailTab(name) {
+    document.querySelectorAll('#detail-tab-strip .tab-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.detailTab === name);
+    });
+    document.querySelectorAll('.detail-tab-content').forEach(el => {
+      el.style.display = (el.dataset.detailTab === name) ? '' : 'none';
+    });
+    if (name === 'prompt' && _detailStrategy) {
+      loadPromptTab(_detailStrategy);
+    } else if (name === 'critique' && _detailStrategy) {
+      loadCritiqueTab(_detailStrategy);
+    }
+  }
+  window.switchDetailTab = switchDetailTab;
+
+  function setRangeToday() {
+    const t = _todayISO();
+    $('detail-range-start').value = t;
+    $('detail-range-end').value = t;
+    reloadOverviewRange();
+  }
+  window.setRangeToday = setRangeToday;
+
+  async function openStrategyDetail(sid) {
+    const list = $('strategies-list');
+    const detail = $('strategy-detail');
+    const edit = $('strategy-edit');
+    list.style.display = 'none';
+    edit.style.display = 'none';
+    detail.style.display = 'block';
+
+    $('detail-status').textContent = 'Loading…';
+    try {
+      const resp = await fetch('/api/strategies/' + sid);
+      if (!resp.ok) {
+        $('detail-status').textContent = 'Strategy not found';
+        return;
+      }
+      const s = await resp.json();
+      _detailStrategy = s;
+      $('detail-strat-name').textContent = s.name || sid;
+      const statusEl = $('detail-strat-status');
+      statusEl.textContent = s.status;
+      statusEl.className = 'badge ' + (
+        s.status === 'active' ? 'badge-active' :
+        s.status === 'paused' ? 'badge-paused' :
+        'badge-stopped'
+      );
+      const syms = (s.symbols || []);
+      $('detail-strat-meta').textContent =
+        'Capital: $' + s.capital +
+        ' • Model: ' + (s.model_id || '(default)') +
+        ' • Symbols: ' + (syms.length ? syms.join(', ') : 'dynamic') +
+        ' • Created: ' + new Date(s.created_at * 1000).toLocaleDateString();
+
+      // Default range: today. Operator can widen via the date inputs.
+      const t = _todayISO();
+      $('detail-range-start').value = t;
+      $('detail-range-end').value = t;
+
+      // Always start on the Overview tab.
+      switchDetailTab('overview');
+      reloadOverviewRange();
+      fetchServiceStateForDetail(sid);
+      $('detail-status').textContent = '';
+    } catch(e) {
+      $('detail-status').textContent = 'Failed to load strategy';
+    }
+  }
+  window.openStrategyDetail = openStrategyDetail;
+
+  function closeStrategyDetail() {
+    $('strategy-detail').style.display = 'none';
+    $('strategies-list').style.display = 'block';
+    _detailStrategy = null;
+  }
+  window.closeStrategyDetail = closeStrategyDetail;
+
+  function openEditFromDetail() {
+    if (!_detailStrategy) return;
+    // Detail → edit transition: leaves the detail view up but mounts
+    // the edit form on top via the existing openEditStrategy, which
+    // hides the list. Closing the edit returns to the list, which is
+    // the existing behavior; the operator can re-open the detail.
+    $('strategy-detail').style.display = 'none';
+    openEditStrategy(_detailStrategy.strategy_id);
+  }
+  window.openEditFromDetail = openEditFromDetail;
+
+  async function reloadOverviewRange() {
+    if (!_detailStrategy) return;
+    const sid = _detailStrategy.strategy_id;
+    const start = $('detail-range-start').value || _todayISO();
+    const end = $('detail-range-end').value || _todayISO();
+    loadMemoryRange(sid, start, end);
+    loadToolCalls(sid, start, end);
+    loadLedgerSummary(sid);
+  }
+  window.reloadOverviewRange = reloadOverviewRange;
+
+  async function loadMemoryRange(sid, start, end) {
+    const el = $('detail-memory');
+    el.textContent = 'Loading…';
+    try {
+      const resp = await fetch(
+        '/api/strategies/' + sid + '/memory?start=' + start + '&end=' + end,
+      );
+      if (!resp.ok) {
+        el.textContent = 'Failed to load memory (' + resp.status + ').';
+        return;
+      }
+      const body = await resp.json();
+      const nonEmpty = (body.days || []).filter(d => (d.content || '').trim());
+      if (!nonEmpty.length) {
+        el.textContent = 'No memory for this range.';
+        return;
+      }
+      el.textContent = nonEmpty.map(d =>
+        '# ' + d.date + '\n\n' + d.content.trim() + '\n'
+      ).join('\n──────────────────────\n\n');
+    } catch(e) {
+      el.textContent = 'Memory fetch failed.';
+    }
+  }
+
+  async function loadToolCalls(sid, start, end) {
+    const el = $('detail-tool-calls');
+    el.textContent = 'Loading…';
+    try {
+      const resp = await fetch(
+        '/api/strategies/' + sid + '/tool-calls?start=' + start + '&end=' + end,
+      );
+      if (!resp.ok) {
+        el.textContent = 'Tool-call feed unavailable (' + resp.status + ').';
+        return;
+      }
+      const body = await resp.json();
+      const calls = body.calls || [];
+      if (!calls.length) {
+        el.textContent = 'No tool calls in this range.';
+        return;
+      }
+      el.innerHTML = calls.map(c => {
+        const outcomeColor = c.outcome === 'ok' ? 'var(--green)' :
+          c.outcome === 'cache_hit' ? 'var(--blue)' :
+          c.outcome === 'quota_exceeded' ? 'var(--yellow)' :
+          'var(--red)';
+        return '<div style="display:flex;gap:6px;padding:3px 0;border-bottom:1px solid var(--border);font-size:0.72rem;">'
+          + '<span style="color:var(--dim);min-width:108px;">' + (c.ts || '') + '</span>'
+          + '<span style="font-weight:bold;min-width:60px;">' + (c.tool || '') + '</span>'
+          + '<span style="color:var(--dim);min-width:48px;">' + (c.symbol || '') + '</span>'
+          + '<span style="color:' + outcomeColor + ';">' + (c.outcome || '') + '</span>'
+          + '</div>';
+      }).join('');
+    } catch(e) {
+      el.textContent = 'Tool-call fetch failed.';
+    }
+  }
+
+  async function loadLedgerSummary(sid) {
+    const el = $('detail-ledger');
+    el.textContent = 'Loading…';
+    try {
+      const resp = await fetch('/api/snapshot');
+      if (!resp.ok) {
+        el.textContent = 'Ledger snapshot unavailable.';
+        return;
+      }
+      const snap = await resp.json();
+      const botId = 'strategy-' + sid;
+      const ledgers = snap.ledgers || {};
+      const l = ledgers[botId];
+      if (!l) {
+        el.textContent = 'No ledger snapshot for this bot yet.';
+        return;
+      }
+      const positions = (l.open_positions || []);
+      const posHtml = positions.length
+        ? positions.map(p =>
+            '<div class="telem-row"><span class="telem-key">' + p.symbol + '</span>'
+            + '<span class="telem-val">' + p.quantity + ' @ $' + p.burdened_cost_basis + '</span></div>'
+          ).join('')
+        : '<div style="color:var(--dim);font-size:0.72rem;">No open positions.</div>';
+      el.innerHTML =
+        '<div class="telem-row"><span class="telem-key">Equity</span><span class="telem-val">$' + (l.equity || '?') + '</span></div>'
+        + '<div class="telem-row"><span class="telem-key">Realized PnL</span><span class="telem-val">$' + (l.realized_pnl || '0') + '</span></div>'
+        + '<div class="telem-row"><span class="telem-key">Drawdown</span><span class="telem-val">' + (l.drawdown_pct ? (parseFloat(l.drawdown_pct) * 100).toFixed(2) + '%' : '0%') + '</span></div>'
+        + '<div style="margin-top:6px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">Positions</div>'
+        + posHtml;
+    } catch(e) {
+      el.textContent = 'Ledger fetch failed.';
+    }
+  }
+
+  async function fetchServiceStateForDetail(sid) {
+    const badge = $('detail-strat-service');
+    try {
+      const resp = await fetch('/api/strategies/' + sid + '/service');
+      if (!resp.ok) {
+        badge.textContent = 'service: ?';
+        return;
+      }
+      const body = await resp.json();
+      const svc = body.status || body.service_status || 'unknown';
+      badge.textContent = 'service: ' + svc;
+      badge.className = 'badge ' + (
+        svc === 'running' || svc === 'ACTIVE' ? 'badge-active' :
+        svc === 'MISSING' || svc === 'stopped' ? 'badge-stopped' :
+        'badge-unknown'
+      );
+    } catch(e) {
+      badge.textContent = 'service: ?';
+    }
+  }
+
+  async function loadPromptTab(s) {
+    const sysEl = $('detail-prompt-system');
+    const userEl = $('detail-prompt-user');
+    const tickEl = $('detail-prompt-tick');
+    const renderedEl = $('detail-prompt-rendered-at');
+    sysEl.textContent = 'Loading…';
+    userEl.textContent = 'Loading…';
+    try {
+      const resp = await fetch('/api/strategies/' + s.strategy_id + '/prompt-snapshot');
+      if (resp.status === 404) {
+        sysEl.textContent = 'No prompt snapshot yet. The bot hasn\'t completed a decide tick since it started.';
+        userEl.textContent = '';
+        tickEl.textContent = '?';
+        renderedEl.textContent = '—';
+        return;
+      }
+      if (!resp.ok) {
+        sysEl.textContent = 'Failed (' + resp.status + ')';
+        userEl.textContent = '';
+        return;
+      }
+      const snap = await resp.json();
+      sysEl.textContent = snap.system_prompt || '';
+      userEl.textContent = snap.user_prompt || '';
+      tickEl.textContent = snap.tick;
+      renderedEl.textContent = _fmtTs(snap.rendered_at);
+    } catch(e) {
+      sysEl.textContent = 'Prompt fetch failed.';
+      userEl.textContent = '';
+    }
+  }
+
+  async function loadCritiqueTab(s) {
+    const lessonsEl = $('detail-critique-lessons');
+    const propsEl = $('detail-critique-proposals');
+    lessonsEl.textContent = 'Loading…';
+    propsEl.textContent = 'Loading…';
+
+    // Lessons
+    try {
+      const lr = await fetch('/api/strategies/' + s.strategy_id + '/lessons');
+      if (lr.status === 503) {
+        lessonsEl.textContent = 'Agent memory bucket not configured — lessons unavailable.';
+      } else if (!lr.ok) {
+        lessonsEl.textContent = 'Failed to load lessons (' + lr.status + ').';
+      } else {
+        const lj = await lr.json();
+        lessonsEl.textContent = (lj.lessons || '').trim()
+          || 'No lessons yet. The critique agent writes one entry per Saturday.';
+      }
+    } catch(e) {
+      lessonsEl.textContent = 'Lessons fetch failed.';
+    }
+
+    // Proposals
+    try {
+      const pr = await fetch('/api/strategies/' + s.strategy_id + '/proposals');
+      if (!pr.ok) {
+        propsEl.textContent = 'Failed to load proposals (' + pr.status + ').';
+        return;
+      }
+      const proposals = await pr.json();
+      if (!proposals.length) {
+        propsEl.innerHTML = '<div style="color:var(--dim);font-size:0.72rem;">No proposals yet.</div>';
+        return;
+      }
+      propsEl.innerHTML = proposals.map(p => {
+        const pendingControls = p.status === 'pending'
+          ? '<button class="btn" onclick="applyProposal(\'' + s.strategy_id + '\',\'' + p.proposal_id + '\')" style="padding:2px 8px;font-size:0.7rem;">Apply</button>'
+            + ' <button class="btn" onclick="rejectProposal(\'' + s.strategy_id + '\',\'' + p.proposal_id + '\')" style="padding:2px 8px;font-size:0.7rem;">Reject</button>'
+          : '';
+        return '<div style="border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:8px;">'
+          + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;">'
+          + '<span class="badge ' + (p.status === 'pending' ? 'badge-paused' : p.status === 'applied' ? 'badge-active' : 'badge-stopped') + '">' + p.status + '</span>'
+          + '<span style="color:var(--dim);font-size:0.7rem;">' + _fmtTs(p.created_at) + '</span>'
+          + '<span style="flex:1;"></span>'
+          + pendingControls
+          + '</div>'
+          + '<div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">' + (p.rationale || '') + '</div>'
+          + '<pre style="white-space:pre-wrap;background:var(--surface);padding:6px;font-size:0.72rem;margin:0;">' + (p.proposed_markdown || '') + '</pre>'
+          + '</div>';
+      }).join('');
+    } catch(e) {
+      propsEl.textContent = 'Proposals fetch failed.';
+    }
+  }
+
+  async function applyProposal(sid, pid) {
+    if (!confirm('Apply this proposal? Strategy markdown will be overwritten.')) return;
+    const resp = await fetch('/api/strategies/' + sid + '/proposals/' + pid + '/apply', {method: 'POST'});
+    if (!resp.ok) { alert('Apply failed: ' + resp.status); return; }
+    if (_detailStrategy) loadCritiqueTab(_detailStrategy);
+  }
+  window.applyProposal = applyProposal;
+
+  async function rejectProposal(sid, pid) {
+    const resp = await fetch('/api/strategies/' + sid + '/proposals/' + pid + '/reject', {method: 'POST'});
+    if (!resp.ok) { alert('Reject failed: ' + resp.status); return; }
+    if (_detailStrategy) loadCritiqueTab(_detailStrategy);
+  }
+  window.rejectProposal = rejectProposal;
 
   async function openEditStrategy(sid) {
     const list = $('strategies-list');
