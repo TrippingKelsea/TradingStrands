@@ -275,6 +275,7 @@ def _register_strategy(
     tools_table: Any | None = None,
     tools_secrets_client: Any | None = None,
     model_id: str = "",
+    prompt_snapshot_store: Any | None = None,
 ) -> None:
     """Create a strategy bot and register it with the orchestrator.
 
@@ -418,6 +419,7 @@ def _register_strategy(
         ta_enabled=ta_enabled,
         skills=loaded_skills or None,
         strategy_name=strategy_name,
+        prompt_snapshot_store=prompt_snapshot_store,
     )
 
     orchestrator.register_bot(
@@ -480,6 +482,7 @@ async def run(
     tools_secrets_client: Any | None = None
     s3_client: Any | None = None
     memory_bucket: str | None = None
+    prompt_snapshot_store: Any | None = None
     table_name = os.environ.get("DYNAMODB_TABLE")
     if table_name:
         publisher = StatePublisher(table_name)
@@ -493,10 +496,14 @@ async def run(
         ledger_store = LedgerStore(tbl)
         from trading_strands.calendar_store.store import CalendarStore as _CS
         from trading_strands.heartbeat.store import HeartbeatStore as _HB
+        from trading_strands.prompt_snapshots.store import (
+            PromptSnapshotStore as _PS,
+        )
         from trading_strands.ta_snapshot.store import TASnapshotStore as _TS
         heartbeat_store = _HB(tbl)
         calendar_store = _CS(tbl)
         ta_store = _TS(tbl)
+        prompt_snapshot_store = _PS(tbl)
         tools_secrets_client = _boto3.client("secretsmanager")
         await logger.ainfo("publisher.enabled", table=table_name)
         await logger.ainfo("marketdata_store.enabled", table=table_name)
@@ -624,6 +631,7 @@ async def run(
             skills_config=cfg.skills,
             strategy_name=cfg.name,
             model_id=cfg.model_id,
+            prompt_snapshot_store=prompt_snapshot_store,
         )
         await logger.ainfo(
             "system.start.single_bot",
@@ -659,6 +667,7 @@ async def run(
             skills_config=[],
             strategy_name=Path(strategy_path).stem,
             model_id="",
+            prompt_snapshot_store=prompt_snapshot_store,
         )
         await logger.ainfo(
             "system.start.local",
@@ -705,6 +714,7 @@ async def run(
                 skills_config=strat.get("skills", []),
                 strategy_name=str(strat.get("name", "")),
                 model_id=str(strat.get("model_id", "") or ""),
+                prompt_snapshot_store=prompt_snapshot_store,
             )
             await logger.ainfo(
                 "system.strategy.loaded",
@@ -790,6 +800,7 @@ async def run(
                                     skills_config=strat.get("skills", []),
                                     strategy_name=str(strat.get("name", "")),
                                     model_id=str(strat.get("model_id", "") or ""),
+                                    prompt_snapshot_store=prompt_snapshot_store,
                                 )
                                 await logger.ainfo(
                                     "system.strategy.hot_loaded",

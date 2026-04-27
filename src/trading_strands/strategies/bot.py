@@ -264,6 +264,7 @@ class StrategyBot:
         ta_enabled: bool = False,
         skills: list[Any] | None = None,
         strategy_name: str = "",
+        prompt_snapshot_store: Any | None = None,
     ) -> None:
         self.bot_id = bot_id
         self.org_id = org_id
@@ -331,6 +332,12 @@ class StrategyBot:
         else:
             system_prompt = base_prompt
 
+        # Stashed for the Prompt tab on the detail page — the rendered
+        # system prompt is what the LLM actually sees each tick.
+        self._system_prompt = system_prompt
+        self._prompt_snapshot_store = prompt_snapshot_store
+        self._tick_counter = 0
+
         # Tools are bound by the caller (app.py) via
         # tools.base.bind_tools_for_strategy. We pass them straight
         # through to the Strands Agent — None/empty means the agent
@@ -387,6 +394,23 @@ class StrategyBot:
             portfolio_state=_format_portfolio(ledger),
             recent_decisions=self._format_recent() or "No recent decisions.",
         )
+
+        # Persist the last-rendered prompt for the detail page's Prompt
+        # tab. Writes happen BEFORE the LLM call so the snapshot is
+        # available even on LLM failure (makes debugging "why didn't
+        # this tick decide?" tractable). Best-effort — a snapshot-
+        # write failure must never interrupt the trade path.
+        self._tick_counter += 1
+        if self._prompt_snapshot_store is not None:
+            import contextlib as _contextlib
+            with _contextlib.suppress(Exception):
+                self._prompt_snapshot_store.write(
+                    bot_id=self.bot_id,
+                    org_id=self.org_id,
+                    system_prompt=self._system_prompt,
+                    user_prompt=prompt,
+                    tick=self._tick_counter,
+                )
 
         dims = {
             "agent_id": self.bot_id,
