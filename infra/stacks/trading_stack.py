@@ -152,6 +152,22 @@ class TradingStrandsStack(cdk.Stack):
             description="Alpaca API credentials - seed manually after stack deploy",
         )
 
+        # Platform-level calendar API key — shared across every org
+        # (see docs/SPEC/tools.md §5.5; calendar data is global).
+        # Seeded manually after stack deploy with:
+        #   aws secretsmanager put-secret-value \
+        #       --secret-id trading-strands/calendar \
+        #       --secret-string '{"FINNHUB_API_KEY":"..."}'
+        calendar_secret = secretsmanager.Secret(
+            self,
+            "CalendarSecret",
+            secret_name="trading-strands/calendar",
+            description=(
+                "Platform-level calendar API key (Finnhub) - "
+                "seed manually after stack deploy"
+            ),
+        )
+
         # Cognito client secret — created here so ECS can reference it on
         # first deploy; CI overwrites the value after stack deploy.
         cognito_client_secret = secretsmanager.Secret(
@@ -1074,6 +1090,94 @@ class TradingStrandsStack(cdk.Stack):
             schedule=events.Schedule.rate(cdk.Duration.minutes(1)),
             targets=[
                 events_targets.LambdaFunction(platform_supervisor_fn),
+            ],
+        )
+
+        # -- Calendar + TA scheduled fetchers --------------------------------
+        #
+        # Two Lambdas that populate the context-injection caches the
+        # strategy bots read at decide time (see docs/SPEC/tools.md
+        # §3.1 and §3.2). Neither is operator-invokable; both run on
+        # fixed cron schedules.
+        #
+        # Calendar: 08:00 UTC daily — after Asia close, well before US
+        # market open, so today's calendar is ready when American
+        # strategies first tick.
+        # TA: every 5 min. Simple rate() schedule; the computer
+        # silently skips symbols with no bars, so running off-hours
+        # costs just a DDB scan.
+
+        calendar_fetcher_fn = lambda_.DockerImageFunction(
+            self,
+            "CalendarFetcherFunction",
+            function_name="trading-strands-calendar-fetcher",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.calendar_fetcher.fetcher.handler",
+                ],
+            ),
+            memory_size=256,
+            timeout=cdk.Duration.minutes(2),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+                "CALENDAR_SECRET_NAME": calendar_secret.secret_name,
+            },
+        )
+        cdk.Tags.of(calendar_fetcher_fn).add(
+            "Component", "calendar-fetcher",
+        )
+        table.grant_read_write_data(calendar_fetcher_fn)
+        calendar_secret.grant_read(calendar_fetcher_fn)
+
+        events.Rule(
+            self,
+            "CalendarFetcherSchedule",
+            description=(
+                "Daily 08:00 UTC — fetch earnings + economic calendar "
+                "for today from Finnhub, write to CALENDAR#{date}."
+            ),
+            schedule=events.Schedule.cron(minute="0", hour="8"),
+            targets=[
+                events_targets.LambdaFunction(calendar_fetcher_fn),
+            ],
+        )
+
+        ta_computer_fn = lambda_.DockerImageFunction(
+            self,
+            "TAComputerFunction",
+            function_name="trading-strands-ta-computer",
+            code=lambda_.DockerImageCode.from_ecr(
+                repository=repository,
+                tag_or_digest="latest",
+                cmd=[
+                    "trading_strands.ta_computer.computer.handler",
+                ],
+            ),
+            # TA Lambda has to hold a few hundred bars per symbol in
+            # memory at once; 512 MB gives plenty of headroom for
+            # the current symbol counts (a few dozen) with room to
+            # grow.
+            memory_size=512,
+            timeout=cdk.Duration.minutes(2),
+            environment={
+                "DYNAMODB_TABLE": table.table_name,
+            },
+        )
+        cdk.Tags.of(ta_computer_fn).add("Component", "ta-computer")
+        table.grant_read_write_data(ta_computer_fn)
+
+        events.Rule(
+            self,
+            "TAComputerSchedule",
+            description=(
+                "Every 5 min — recompute TA snapshots for every symbol "
+                "any active strategy watches."
+            ),
+            schedule=events.Schedule.rate(cdk.Duration.minutes(5)),
+            targets=[
+                events_targets.LambdaFunction(ta_computer_fn),
             ],
         )
 

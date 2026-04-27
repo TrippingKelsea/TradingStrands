@@ -56,8 +56,8 @@ Each entry declares: data shape, delivery (context vs tool), external dependency
 - **Delivery**: context injection
 - **Source**: Finnhub calendar API (or Alpha Vantage as fallback)
 - **Cached**: `CALENDAR#{date}` row in DDB, fetched once per day by a scheduled Lambda
-- **Org credential**: `trading-strands/org/{org_id}/calendar` Secrets Manager entry (API key)
-- **Cost**: flat per-org-per-day (one API call), shared across all strategies in the org
+- **Credential**: **platform-level** `trading-strands/calendar` Secrets Manager entry (API key). Calendar data is global — AAPL's earnings date is the same regardless of which org is watching — so per-org keys would be redundant. This is a deliberate deviation from §5.1's per-org-everything default: see §5.6.
+- **Cost**: flat platform-wide (one API call per day), shared across every org.
 - **What the LLM sees**: a short block in the decision prompt listing today's and tomorrow's relevant events for the strategy's symbols + macro (Fed, CPI, NFP)
 
 ### 3.2 TA snapshot
@@ -169,7 +169,24 @@ The org-level control is a **gate**, not a force-on:
 
 Rationale: a strategy's prompt is its contract. The orgadmin can't silently change what tools a strategy has access to without the strategy's author acknowledging it. The gate direction is one-way: the org can take a tool away from a strategy, never add one.
 
-### 5.5 SEC filings S3 cache
+### 5.5 Platform-level credentials (exception to per-org default)
+
+Most external credentials are per-org (§5.1). Two kinds are
+platform-level instead:
+
+- **Calendar data** (§3.1) — global by construction; running one
+  fetch per org would multiply cost with no data difference. Key
+  at `trading-strands/calendar`.
+- **SEC EDGAR** (§3.4) — no key required; SEC expects only a
+  User-Agent header identifying the fetcher. The watcher Lambda
+  sends a TradingStrands-identifying UA.
+
+When adding a new tool, the default remains per-org. Only move
+something to platform-level when the data is structurally global
+AND the economic cost of per-org fetches is non-trivial. Document
+the reasoning in this section when the exception is made.
+
+### 5.6 SEC filings S3 cache
 
 Separate from the agent-memory bucket:
 
@@ -377,7 +394,7 @@ Tool-call rate and error counts surface as a small panel on the existing Monitor
 ## 12. Invariants (summary)
 
 1. **Tools read only.** Trade intents flow through the trade pipeline; tools never submit orders.
-2. **Keys are per-org.** All external API credentials live at the org level. A tool with a missing key fails closed at strategy start.
+2. **Keys are per-org by default.** External API credentials live at the org level unless the data is structurally global AND per-org fetches would duplicate cost (the platform-level exception, §5.5). Per-org keys fail closed at strategy start when missing.
 3. **Quota is hard-stop.** `QuotaExceeded` is preferred over stale-data soft-degrade.
 4. **Cache before external call.** For rate-limited sources, the cache is authoritative; scheduled fetchers are the only writers.
 5. **Adversarial-data tools carry explicit framing.** The social-sentiment tool's docstring names the adversarial surface so the LLM's reasoning takes it into account.
