@@ -22,7 +22,12 @@ import structlog
 from pydantic import BaseModel, ConfigDict
 
 from trading_strands.alpaca_secrets.store import secret_name_for
+from trading_strands.tool_quota.store import QuotaExceeded
 from trading_strands.tools.base import ToolContext
+from trading_strands.tools.observability import (
+    emit_tool_outcome,
+    tool_call_timer,
+)
 
 logger = structlog.get_logger()
 
@@ -160,6 +165,11 @@ def _run_news_fetch(
     Cache-first. Quota reserved BEFORE the external call so failed
     calls still cost — matches the "hard stop + incremented ahead"
     policy from SPEC/tools.md §7.2.
+
+    Emits one `tool.call.count` metric per invocation (outcome =
+    cache_hit | quota_exceeded | success | error) and a
+    `tool.call.latency_ms` for the external-call path. See
+    docs/SPEC/tools.md §10 for the observability contract.
     """
 
     sym = symbol.upper()
@@ -167,19 +177,47 @@ def _run_news_fetch(
     cached = cache.get(sym)
     if cached is not None:
         ctx.quota_store.record_cache_hit(ctx.strategy_id, "news")
+        emit_tool_outcome(
+            "news", "cache_hit",
+            strategy_id=ctx.strategy_id, org_id=ctx.org_id, symbol=sym,
+        )
         return cached
 
-    # Reserve quota first. Raises QuotaExceeded if over limit.
-    ctx.quota_store.reserve(ctx.strategy_id, "news", limit=daily_quota)
+    # Reserve quota first. Raises QuotaExceeded if over limit — emit
+    # the outcome metric before re-raising so the alarm path sees it.
+    try:
+        ctx.quota_store.reserve(ctx.strategy_id, "news", limit=daily_quota)
+    except QuotaExceeded:
+        emit_tool_outcome(
+            "news", "quota_exceeded",
+            strategy_id=ctx.strategy_id, org_id=ctx.org_id, symbol=sym,
+        )
+        raise
 
     # External fetch. Errors propagate — the reserve already landed.
     start_ts = int(time.time()) - hours_back * 3600
-    raw = client.fetch(symbols=(sym,), start_ts=start_ts)
+    try:
+        with tool_call_timer(
+            "news",
+            strategy_id=ctx.strategy_id, org_id=ctx.org_id, symbol=sym,
+        ):
+            raw = client.fetch(symbols=(sym,), start_ts=start_ts)
+    except Exception:
+        emit_tool_outcome(
+            "news", "error",
+            strategy_id=ctx.strategy_id, org_id=ctx.org_id, symbol=sym,
+        )
+        raise
+
     items = [_to_news_item(r) for r in raw]
 
     # Cache even empty results — a quiet symbol shouldn't hammer
     # the API every tick just because there's nothing to show.
     cache.put(sym, items)
+    emit_tool_outcome(
+        "news", "success",
+        strategy_id=ctx.strategy_id, org_id=ctx.org_id, symbol=sym,
+    )
     return items
 
 

@@ -1280,6 +1280,40 @@ class TradingStrandsStack(cdk.Stack):
         )
         cdk.Tags.of(missing_agents_alarm).add("Component", "halt-alarms")
 
+        # Tool quota-exceeded alarm. Fires when any tool call is
+        # rejected for quota — either a strategy hit its daily cap
+        # (expected, but worth noticing in aggregate) or a bug
+        # mis-incremented the counter. 10-minute period is lenient
+        # enough to not alarm on a single strategy burning through
+        # its quota; 3-evaluation period catches sustained breaches.
+        tool_quota_alarm = cloudwatch.Alarm(
+            self,
+            "ToolQuotaExceededAlarm",
+            alarm_name="trading-strands-tool-quota-exceeded",
+            alarm_description=(
+                "Tool calls are being rejected on quota — check "
+                "strategy daily_quota config and tool cache "
+                "effectiveness. Dimensions identify which tool."
+            ),
+            metric=cloudwatch.Metric(
+                namespace="TradingStrands",
+                metric_name="tool.call.count",
+                dimensions_map={"outcome": "quota_exceeded"},
+                period=cdk.Duration.minutes(10),
+                statistic="Sum",
+            ),
+            threshold=5,
+            evaluation_periods=3,
+            datapoints_to_alarm=2,
+            comparison_operator=cloudwatch.ComparisonOperator
+                .GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            # Metric is emitted from the tool path; absence during a
+            # quiet period means nothing's rejecting — not breaching.
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            actions_enabled=False,
+        )
+        cdk.Tags.of(tool_quota_alarm).add("Component", "tool-alarms")
+
         # -- Outputs ----------------------------------------------------------
 
         dashboard_url = (

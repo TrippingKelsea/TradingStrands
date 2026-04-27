@@ -289,3 +289,94 @@ def test_symbol_uppercased_before_cache_lookup() -> None:
         assert result and result[0].id == "x"
         # Served from cache — no external call.
         assert client.calls == []
+
+
+# ── Observability emissions ────────────────────────────────────────
+
+
+def test_success_path_emits_success_outcome(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+    with mock_aws():
+        table = _table()
+        client = _StubNewsClient(items=[{
+            "id": "x", "headline": "h", "summary": "s",
+            "url": "u", "source": "a", "symbols": ["AAPL"],
+        }])
+        _run_news_fetch(
+            symbol="AAPL", hours_back=24,
+            ctx=_ctx(table), cache=NewsCache(table),
+            client=client, daily_quota=10,
+        )
+    out = capsys.readouterr().out
+    records = [json.loads(line) for line in out.splitlines() if line.strip()]
+    outcomes = [r.get("outcome") for r in records if "outcome" in r]
+    assert "success" in outcomes
+
+
+def test_cache_hit_emits_cache_hit_outcome(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+    with mock_aws():
+        table = _table()
+        cache = NewsCache(table)
+        cache.put("AAPL", [NewsItem(
+            id="1", headline="h", summary="s", url="u",
+            source="a", created_at=int(time.time()), symbols=["AAPL"],
+        )])
+        _run_news_fetch(
+            symbol="AAPL", hours_back=24,
+            ctx=_ctx(table), cache=cache,
+            client=_StubNewsClient(), daily_quota=10,
+        )
+    out = capsys.readouterr().out
+    records = [json.loads(line) for line in out.splitlines() if line.strip()]
+    outcomes = [r.get("outcome") for r in records if "outcome" in r]
+    assert outcomes == ["cache_hit"]
+
+
+def test_quota_exceeded_emits_quota_outcome(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Quota breach is the alarm-critical outcome — must emit before
+    the exception propagates so the EMF metric lands even when the
+    caller sees the raise."""
+
+    import json
+    with mock_aws():
+        table = _table()
+        ctx = _ctx(table)
+        # Exhaust.
+        for _ in range(3):
+            ctx.quota_store.reserve("strat-1", "news", limit=3)
+        with pytest.raises(QuotaExceeded):
+            _run_news_fetch(
+                symbol="AAPL", hours_back=24,
+                ctx=ctx, cache=NewsCache(table),
+                client=_StubNewsClient(), daily_quota=3,
+            )
+    out = capsys.readouterr().out
+    records = [json.loads(line) for line in out.splitlines() if line.strip()]
+    outcomes = [r.get("outcome") for r in records if "outcome" in r]
+    assert "quota_exceeded" in outcomes
+
+
+def test_external_failure_emits_error_outcome(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import json
+    with mock_aws():
+        table = _table()
+        with pytest.raises(RuntimeError):
+            _run_news_fetch(
+                symbol="AAPL", hours_back=24,
+                ctx=_ctx(table), cache=NewsCache(table),
+                client=_StubNewsClient(raise_exc=RuntimeError("502")),
+                daily_quota=10,
+            )
+    out = capsys.readouterr().out
+    records = [json.loads(line) for line in out.splitlines() if line.strip()]
+    outcomes = [r.get("outcome") for r in records if "outcome" in r]
+    assert "error" in outcomes
