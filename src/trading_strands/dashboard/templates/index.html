@@ -2481,51 +2481,87 @@
     try {
       const resp = await fetch('/api/admin/orgs');
       if (resp.status === 403) {
-        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Operator role required.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--red);font-size:0.85rem;'},
+          'Operator role required.',
+        ));
         return;
       }
       const orgs = await resp.json();
       _orgsCache = orgs;
 
-      // Populate the org dropdown in user creation form
+      // Populate the org dropdown in user creation form. select.value
+      // is unaffected by text content escaping (options are real DOM
+      // nodes with textContent), but route through el() for uniformity.
       const select = $('new-user-org');
-      select.innerHTML = '<option value="">None</option>';
-      orgs.forEach(o => {
-        const opt = document.createElement('option');
-        opt.value = o.org_id;
-        opt.textContent = o.name;
-        select.appendChild(opt);
-      });
+      mount(select,
+        el('option', {value: ''}, 'None'),
+        ...orgs.map(o => el('option', {value: o.org_id}, o.name || '')),
+      );
 
       if (orgs.length === 0) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No organizations yet.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;'},
+          'No organizations yet.',
+        ));
         return;
       }
 
-      let html = '<table><thead><tr><th>Name</th><th>Type</th><th>Org ID</th><th>Alpaca</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-      orgs.forEach(o => {
-        const typeLabel = o.org_type === 'system' ? 'SYSTEM' : 'customer';
-        const typeClass = o.org_type === 'system' ? 'badge-active' : 'badge-paused';
-        html += `<tr>
-          <td style="font-weight:bold;color:var(--blue);">${o.name}</td>
-          <td><span class="badge ${typeClass}">${typeLabel}</span></td>
-          <td style="color:var(--dim);font-size:0.75rem;">${o.org_id}</td>
-          <td id="alpaca-status-${o.org_id}" style="font-size:0.75rem;color:var(--dim);">loading…</td>
-          <td style="color:var(--dim);font-size:0.75rem;">${o.created_at ? new Date(o.created_at * 1000).toLocaleDateString() : '-'}</td>
-          <td>
-            <div class="strat-actions">
-              <button onclick="openAlpacaModal('${o.org_id}','${o.name.replace(/'/g, "\\'")}')">Set Alpaca Keys</button>
-              <button class="danger" onclick="deleteOrg('${o.org_id}','${o.name}')">Delete</button>
-            </div>
-          </td>
-        </tr>`;
-      });
-      html += '</tbody></table>';
-      container.innerHTML = html;
+      // Org name is orgadmin-authored and previously interpolated into
+      // onclick strings with manual quote escaping — removed; closures
+      // capture the org object directly.
+      mount(container, el('table', {},
+        el('thead', {}, el('tr', {},
+          el('th', {}, 'Name'),
+          el('th', {}, 'Type'),
+          el('th', {}, 'Org ID'),
+          el('th', {}, 'Alpaca'),
+          el('th', {}, 'Created'),
+          el('th', {}, 'Actions'),
+        )),
+        el('tbody', {},
+          orgs.map(o => {
+            const typeLabel = o.org_type === 'system' ? 'SYSTEM' : 'customer';
+            const typeClass = o.org_type === 'system' ? 'badge-active' : 'badge-paused';
+            return el('tr', {},
+              el('td',
+                {style: 'font-weight:bold;color:var(--blue);'},
+                o.name || ''),
+              el('td', {}, el('span', {class: 'badge ' + typeClass}, typeLabel)),
+              el('td',
+                {style: 'color:var(--dim);font-size:0.75rem;'},
+                o.org_id || ''),
+              el('td', {
+                id: 'alpaca-status-' + o.org_id,
+                style: 'font-size:0.75rem;color:var(--dim);',
+              }, 'loading…'),
+              el('td',
+                {style: 'color:var(--dim);font-size:0.75rem;'},
+                o.created_at
+                  ? new Date(o.created_at * 1000).toLocaleDateString()
+                  : '-'),
+              el('td', {},
+                el('div', {class: 'strat-actions'},
+                  el('button', {
+                    onClick: () => openAlpacaModal(o.org_id, o.name),
+                  }, 'Set Alpaca Keys'),
+                  el('button', {
+                    class: 'danger',
+                    onClick: () => deleteOrg(o.org_id, o.name),
+                  }, 'Delete'),
+                ),
+              ),
+            );
+          }),
+        ),
+      ));
       // Fetch Alpaca status for each org asynchronously.
       orgs.forEach(o => { loadAlpacaStatus(o.org_id); });
     } catch(e) {
-      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load orgs.</div>';
+      mount(container, el('div',
+        {style: 'color:var(--red);font-size:0.85rem;'},
+        'Failed to load orgs.',
+      ));
     }
   }
 
@@ -2573,57 +2609,106 @@
 
   async function loadUsers() {
     const container = $('users-list');
-    container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:8px 0;">Loading users...</div>';
+    mount(container, el('div',
+      {style: 'color:var(--dim);font-size:0.85rem;padding:8px 0;'},
+      'Loading users...',
+    ));
 
     try {
       const resp = await fetch('/api/admin/users');
       if (resp.status === 403) {
-        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:8px 0;">You must be an orgadmin or sysadmin to view this page.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--red);font-size:0.85rem;padding:8px 0;'},
+          'You must be an orgadmin or sysadmin to view this page.',
+        ));
         return;
       }
       const users = await resp.json();
 
       if (users.length === 0) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:8px 0;">No users found.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;padding:8px 0;'},
+          'No users found.',
+        ));
         return;
       }
 
-      let html = '<table><thead><tr><th>Email</th><th>Memberships</th><th>Sysadmin</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
-      users.forEach(u => {
-        const statusClass = u.enabled ? (u.status === 'CONFIRMED' ? 'badge-active' : 'badge-paused') : 'badge-stopped';
-        const statusLabel = u.enabled ? u.status : 'DISABLED';
-        const memberships = (u.memberships || []);
-        const membershipsHtml = memberships.length === 0
-          ? '<span style="color:var(--dim);font-style:italic">none</span>'
-          : memberships.map(m =>
-              `<div style="font-size:0.72rem;margin-bottom:2px;">
-                <span style="color:var(--dim);">${orgName(m.org_id)}</span>:
-                <span class="badge ${m.role === 'orgadmin' ? 'badge-active' : 'badge-paused'}">${m.role}</span>
-              </div>`).join('');
-        const sysadminBadge = u.sysadmin
-          ? '<span class="badge badge-active">YES</span>'
-          : '<span class="badge badge-paused" style="opacity:0.5;">no</span>';
-        const created = u.created_at ? new Date(u.created_at * 1000).toLocaleDateString() : '-';
-        html += `<tr>
-          <td>${u.email}</td>
-          <td>${membershipsHtml}</td>
-          <td>${sysadminBadge}</td>
-          <td><span class="badge ${statusClass}">${statusLabel}</span></td>
-          <td style="color:var(--dim);font-size:0.75rem;">${created}</td>
-          <td>
-            <div class="strat-actions">
-              <button onclick="openPasswordModal('${u.user_id}','${u.email}')">Reset Password</button>
-              <button onclick="${u.enabled ? `disableUser('${u.user_id}')` : `enableUser('${u.user_id}')`}">${u.enabled ? 'Disable' : 'Enable'}</button>
-              <button onclick="toggleSysadmin('${u.user_id}','${u.email}',${u.sysadmin})">${u.sysadmin ? 'Revoke Sysadmin' : 'Grant Sysadmin'}</button>
-              <button class="danger" onclick="deleteUser('${u.user_id}','${u.email}')">Delete</button>
-            </div>
-          </td>
-        </tr>`;
-      });
-      html += '</tbody></table>';
-      container.innerHTML = html;
+      // u.email is user-typed; the membership org name is
+      // orgadmin-typed. Both route through text nodes.
+      mount(container, el('table', {},
+        el('thead', {}, el('tr', {},
+          el('th', {}, 'Email'),
+          el('th', {}, 'Memberships'),
+          el('th', {}, 'Sysadmin'),
+          el('th', {}, 'Status'),
+          el('th', {}, 'Created'),
+          el('th', {}, 'Actions'),
+        )),
+        el('tbody', {},
+          users.map(u => {
+            const statusClass = u.enabled
+              ? (u.status === 'CONFIRMED' ? 'badge-active' : 'badge-paused')
+              : 'badge-stopped';
+            const statusLabel = u.enabled ? u.status : 'DISABLED';
+            const memberships = (u.memberships || []);
+            const membershipsChildren = memberships.length === 0
+              ? el('span',
+                  {style: 'color:var(--dim);font-style:italic;'},
+                  'none')
+              : memberships.map(m => el('div', {
+                  style: 'font-size:0.72rem;margin-bottom:2px;',
+                },
+                  el('span', {style: 'color:var(--dim);'}, orgName(m.org_id)),
+                  ': ',
+                  el('span', {
+                    class: 'badge ' + (m.role === 'orgadmin' ? 'badge-active' : 'badge-paused'),
+                  }, m.role || ''),
+                ));
+            const sysadminBadge = u.sysadmin
+              ? el('span', {class: 'badge badge-active'}, 'YES')
+              : el('span',
+                  {class: 'badge badge-paused', style: 'opacity:0.5;'},
+                  'no');
+            const created = u.created_at
+              ? new Date(u.created_at * 1000).toLocaleDateString()
+              : '-';
+            return el('tr', {},
+              el('td', {}, u.email || ''),
+              el('td', {}, membershipsChildren),
+              el('td', {}, sysadminBadge),
+              el('td', {},
+                el('span', {class: 'badge ' + statusClass}, statusLabel || '')),
+              el('td',
+                {style: 'color:var(--dim);font-size:0.75rem;'},
+                created),
+              el('td', {},
+                el('div', {class: 'strat-actions'},
+                  el('button', {
+                    onClick: () => openPasswordModal(u.user_id, u.email),
+                  }, 'Reset Password'),
+                  el('button', {
+                    onClick: u.enabled
+                      ? () => disableUser(u.user_id)
+                      : () => enableUser(u.user_id),
+                  }, u.enabled ? 'Disable' : 'Enable'),
+                  el('button', {
+                    onClick: () => toggleSysadmin(u.user_id, u.email, u.sysadmin),
+                  }, u.sysadmin ? 'Revoke Sysadmin' : 'Grant Sysadmin'),
+                  el('button', {
+                    class: 'danger',
+                    onClick: () => deleteUser(u.user_id, u.email),
+                  }, 'Delete'),
+                ),
+              ),
+            );
+          }),
+        ),
+      ));
     } catch(e) {
-      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:8px 0;">Failed to load users: ' + e.message + '</div>';
+      mount(container, el('div',
+        {style: 'color:var(--red);font-size:0.85rem;padding:8px 0;'},
+        'Failed to load users: ', String(e.message || e),
+      ));
     }
   }
   window.loadUsers = loadUsers;
@@ -2639,42 +2724,70 @@
       const session = await sresp.json();
       const oid = session.active_org_id;
       if (!oid) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No active org — pick one from the header.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;'},
+          'No active org — pick one from the header.',
+        ));
         return;
       }
       const r = await fetch('/api/orgs/' + oid + '/tools');
       if (!r.ok) {
-        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load org tools (' + r.status + ').</div>';
+        mount(container, el('div',
+          {style: 'color:var(--red);font-size:0.85rem;'},
+          'Failed to load org tools (', String(r.status), ').',
+        ));
         return;
       }
       const configs = await r.json();
       const cfgMap = {};
       configs.forEach(c => { cfgMap[c.tool_name] = c; });
 
-      let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
-      html += '<tr style="text-align:left;color:var(--dim);font-size:0.7rem;text-transform:uppercase;">';
-      html += '<th style="padding:4px;">Tool</th><th style="padding:4px;">Enabled</th><th style="padding:4px;">Last change</th></tr>';
-      _TOOL_INVENTORY.forEach(tool => {
-        const c = cfgMap[tool.name];
-        const enabled = !!(c && c.enabled);
-        const when = c && c.updated_at
-          ? new Date(c.updated_at * 1000).toLocaleString()
-          : 'never configured';
-        html += '<tr style="border-top:1px solid var(--border);">';
-        html += '<td style="padding:6px;"><strong>' + tool.label + '</strong><div style="font-size:0.7rem;color:var(--dim);">' + tool.description + '</div></td>';
-        html += '<td style="padding:6px;">';
-        html += '<label style="display:flex;align-items:center;gap:6px;">';
-        html += '<input type="checkbox"' + (enabled ? ' checked' : '') + ' onchange="toggleOrgTool(\'' + tool.name + '\', this.checked)">';
-        html += (enabled ? 'Enabled' : 'Disabled');
-        html += '</label>';
-        html += '</td>';
-        html += '<td style="padding:6px;font-size:0.7rem;color:var(--dim);">' + when + '</td>';
-        html += '</tr>';
-      });
-      html += '</table>';
-      container.innerHTML = html;
+      mount(container, el('table', {
+        style: 'width:100%;border-collapse:collapse;font-size:0.85rem;',
+      },
+        el('tr', {
+          style: 'text-align:left;color:var(--dim);font-size:0.7rem;text-transform:uppercase;',
+        },
+          el('th', {style: 'padding:4px;'}, 'Tool'),
+          el('th', {style: 'padding:4px;'}, 'Enabled'),
+          el('th', {style: 'padding:4px;'}, 'Last change'),
+        ),
+        _TOOL_INVENTORY.map(tool => {
+          const c = cfgMap[tool.name];
+          const enabled = !!(c && c.enabled);
+          const when = c && c.updated_at
+            ? new Date(c.updated_at * 1000).toLocaleString()
+            : 'never configured';
+          const cbAttrs = {
+            type: 'checkbox',
+            onChange: (ev) => toggleOrgTool(tool.name, ev.target.checked),
+          };
+          if (enabled) cbAttrs.checked = 'checked';
+          return el('tr', {style: 'border-top:1px solid var(--border);'},
+            el('td', {style: 'padding:6px;'},
+              el('strong', {}, tool.label),
+              el('div',
+                {style: 'font-size:0.7rem;color:var(--dim);'},
+                tool.description),
+            ),
+            el('td', {style: 'padding:6px;'},
+              el('label',
+                {style: 'display:flex;align-items:center;gap:6px;'},
+                el('input', cbAttrs),
+                enabled ? 'Enabled' : 'Disabled',
+              ),
+            ),
+            el('td',
+              {style: 'padding:6px;font-size:0.7rem;color:var(--dim);'},
+              when),
+          );
+        }),
+      ));
     } catch(e) {
-      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Network error.</div>';
+      mount(container, el('div',
+        {style: 'color:var(--red);font-size:0.85rem;'},
+        'Network error.',
+      ));
     }
   }
   window.loadAdminTools = loadAdminTools;
@@ -2712,40 +2825,78 @@
       const session = await sresp.json();
       const oid = session.active_org_id;
       if (!oid) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No active org.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;'},
+          'No active org.',
+        ));
         return;
       }
       const r = await fetch('/api/orgs/' + oid + '/skills');
       if (!r.ok) {
-        container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Failed to load skills.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--red);font-size:0.85rem;'},
+          'Failed to load skills.',
+        ));
         return;
       }
       const skills = await r.json();
       if (skills.length === 0) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No skills authored yet.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;'},
+          'No skills authored yet.',
+        ));
         return;
       }
 
-      let html = '<div style="display:flex;flex-direction:column;gap:6px;">';
-      skills.forEach(s => {
-        const updated = new Date(s.updated_at * 1000).toLocaleString();
-        html += '<div style="border:1px solid var(--border);border-radius:4px;padding:8px;">';
-        html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
-        html += '<strong>' + s.skill_name + '</strong>';
-        html += '<div style="font-size:0.7rem;color:var(--dim);">Updated ' + updated + '</div>';
-        html += '</div>';
-        html += '<textarea data-skill-body="' + s.skill_name + '" style="width:100%;min-height:120px;font-family:monospace;font-size:0.8rem;">' + (s.markdown || '').replace(/</g, '&lt;') + '</textarea>';
-        html += '<div style="display:flex;gap:8px;margin-top:6px;">';
-        html += '<button class="btn" onclick="saveSkill(\'' + s.skill_name + '\')">Save</button>';
-        html += '<button class="btn danger" onclick="deleteSkill(\'' + s.skill_name + '\')">Delete</button>';
-        html += '<span id="skill-status-' + s.skill_name + '" style="font-size:0.75rem;"></span>';
-        html += '</div>';
-        html += '</div>';
-      });
-      html += '</div>';
-      container.innerHTML = html;
+      // s.skill_name and s.markdown are orgadmin-authored. Previously
+      // the render did a partial .replace(/</g,'&lt;') on markdown,
+      // which is not a complete escape (> and & were unescaped). The
+      // textarea value-set path below uses value assignment, which
+      // does the right thing: browsers treat textarea value as text,
+      // not HTML.
+      mount(container, el('div',
+        {style: 'display:flex;flex-direction:column;gap:6px;'},
+        skills.map(s => {
+          const updated = new Date(s.updated_at * 1000).toLocaleString();
+          const textarea = el('textarea', {
+            'data-skill-body': s.skill_name,
+            style: 'width:100%;min-height:120px;font-family:monospace;font-size:0.8rem;',
+          });
+          textarea.value = s.markdown || '';  // correct text-assignment path
+          return el('div',
+            {style: 'border:1px solid var(--border);border-radius:4px;padding:8px;'},
+            el('div', {
+              style: 'display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;',
+            },
+              el('strong', {}, s.skill_name),
+              el('div',
+                {style: 'font-size:0.7rem;color:var(--dim);'},
+                'Updated ', updated),
+            ),
+            textarea,
+            el('div',
+              {style: 'display:flex;gap:8px;margin-top:6px;'},
+              el('button', {
+                class: 'btn',
+                onClick: () => saveSkill(s.skill_name),
+              }, 'Save'),
+              el('button', {
+                class: 'btn danger',
+                onClick: () => deleteSkill(s.skill_name),
+              }, 'Delete'),
+              el('span', {
+                id: 'skill-status-' + s.skill_name,
+                style: 'font-size:0.75rem;',
+              }),
+            ),
+          );
+        }),
+      ));
     } catch(e) {
-      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;">Network error.</div>';
+      mount(container, el('div',
+        {style: 'color:var(--red);font-size:0.85rem;'},
+        'Network error.',
+      ));
     }
   }
   window.loadAdminSkills = loadAdminSkills;
@@ -2839,7 +2990,12 @@
       });
       if (resp.ok) {
         const data = await resp.json();
-        status.innerHTML = 'Created! Temp password: <code style="background:var(--bg);padding:2px 6px;border-radius:3px;user-select:all;">' + data.temporary_password + '</code>';
+        mount(status,
+          'Created! Temp password: ',
+          el('code', {
+            style: 'background:var(--bg);padding:2px 6px;border-radius:3px;user-select:all;',
+          }, data.temporary_password || ''),
+        );
         status.style.color = 'var(--green)';
         $('new-user-email').value = '';
         loadUsers();
@@ -2949,18 +3105,23 @@
     try {
       const resp = await fetch('/api/admin/orgs/' + encodeURIComponent(orgId) + '/alpaca');
       if (!resp.ok) {
-        cell.innerHTML = '<span style="color:var(--red);">n/a</span>';
+        mount(cell, el('span', {style: 'color:var(--red);'}, 'n/a'));
         return;
       }
       const data = await resp.json();
       if (!data.configured) {
-        cell.innerHTML = '<span style="color:var(--red);">not configured</span>';
+        mount(cell, el('span',
+          {style: 'color:var(--red);'},
+          'not configured',
+        ));
       } else {
-        const mode = data.paper ? 'paper' : '<span style="color:var(--red);">LIVE</span>';
-        cell.innerHTML = '<span class="badge badge-active">' + mode + '</span>';
+        const modeChild = data.paper
+          ? 'paper'
+          : el('span', {style: 'color:var(--red);'}, 'LIVE');
+        mount(cell, el('span', {class: 'badge badge-active'}, modeChild));
       }
     } catch(e) {
-      cell.innerHTML = '<span style="color:var(--red);">error</span>';
+      mount(cell, el('span', {style: 'color:var(--red);'}, 'error'));
     }
   }
 
