@@ -438,6 +438,62 @@ Four defenses land together, each independently closing the bug class:
   used the same "one helper + AST guard" shape, chosen deliberately
   so the two hardening patterns are recognizable by future operators.
 
+## Security scanning (CodeQL + Semgrep + Socket)
+
+Three scanners run alongside the CI workflow. Each covers a
+different class of risk; all three land findings in the GitHub
+Security tab so triage lives in one place.
+
+- **CodeQL** (`.github/workflows/codeql.yml`) — GitHub-native
+  dataflow analysis. Catches flow-sensitive bugs: taint from an
+  HTTP request reaching `eval()`, untrusted data into `subprocess`,
+  etc. Python + GitHub Actions (for action-injection patterns in
+  workflow expressions). Uses the `security-and-quality` query
+  suite. Requires "Code scanning" on at the repo level —
+  enabled by default on public repos and on GitHub Advanced
+  Security tiers; free to add.
+- **Semgrep** (`.github/workflows/semgrep.yml`) — Pattern-based
+  AST matching. Runs in OSS mode (no account required); findings
+  upload as SARIF to the same Security tab. Rule packs:
+  `p/python`, `p/ci`, `p/javascript`, `p/secrets`,
+  `p/owasp-top-ten`, `p/default`. Complements CodeQL — Semgrep
+  catches idiomatic misuse (weak crypto defaults, missing auth
+  checks on known decorators, unsafe yaml.load) where CodeQL's
+  dataflow might not reach. Adding `SEMGREP_APP_TOKEN` as a repo
+  secret enables the semgrep.dev dashboard, but is not required
+  for local operation.
+- **Socket** (`.github/workflows/socket.yml`) — Supply-chain risk
+  scoring on dependency PRs. Evaluates new packages for known
+  red flags: install scripts, suspicious postinstall network
+  access, obfuscated code, typo-squats, young packages. Runs
+  only on PRs that touch `pyproject.toml` / `uv.lock` /
+  `infra/requirements.txt` / `package*.json` / `yarn.lock` —
+  supply-chain risk is decided at dep-introduction time, not on
+  every push. Operates report-only without `SOCKET_SECURITY_API_KEY`;
+  add it to enable org-policy gating.
+
+### When each fires
+
+| Scanner  | Push to master | PR open/update | Weekly | PR-only |
+|----------|---------------|----------------|--------|---------|
+| CodeQL   | ✓             | ✓              | ✓      |         |
+| Semgrep  | ✓             | ✓              | ✓      |         |
+| Socket   |               |                |        | ✓ (deps) |
+
+Dependabot PRs are skipped by Semgrep (they rarely flag new
+SAST issues and would clutter the PR review) but run through
+CodeQL + Socket because both have legitimate signal to add on
+dep changes.
+
+### Triage model
+
+A finding from any scanner lands in the same Security tab and
+follows the same workflow: read the finding, decide `fix /
+suppress-with-justification / dismiss`. Suppressions require a
+comment explaining why — the `p/secrets` rule pack in particular
+is noisy on test fixtures, and those suppressions should cite
+the test file path.
+
 ## Dependency updates (Dependabot)
 
 `.github/dependabot.yml` enables weekly dependency updates in two

@@ -1,0 +1,72 @@
+name: Semgrep
+
+# Pattern-based static analysis. Covers Python + JS (embedded in
+# Jinja templates) + secret-scanning rules. Complements CodeQL —
+# CodeQL uses dataflow analysis, Semgrep uses lightweight AST
+# patterns, so they catch different classes of bugs.
+#
+# OSS mode: no SEMGREP_APP_TOKEN required. Findings upload as SARIF
+# to the Security tab (same place CodeQL lands) so the review
+# surface stays in one place.
+#
+# To enable dashboarded findings on semgrep.dev, add a secret named
+# SEMGREP_APP_TOKEN (repo Settings → Secrets → Actions) and set the
+# env var — the action will then also push results there.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "31 8 * * 0"
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep scan
+    runs-on: ubuntu-latest
+    # Skip dependabot PRs — they churn rapidly and pure dep bumps
+    # rarely flag anything new in SAST. The scheduled run still
+    # catches regressions.
+    if: (github.actor != 'dependabot[bot]')
+    container:
+      image: returntocorp/semgrep
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run Semgrep (SARIF output)
+        env:
+          # Enables semgrep.dev dashboard when the token exists.
+          # Undefined without it, which is fine for OSS mode.
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          # Rule packs chosen to match this codebase's surface:
+          #   p/python          — pytest/requests/boto3 misuse
+          #   p/ci              — CI/shell injection in actions
+          #   p/javascript      — DOM XSS patterns in templates
+          #   p/secrets         — hardcoded tokens / keys
+          #   p/owasp-top-ten   — broad OWASP coverage
+          #   p/default         — Semgrep's curated baseline
+          semgrep scan \
+            --config p/python \
+            --config p/ci \
+            --config p/javascript \
+            --config p/secrets \
+            --config p/owasp-top-ten \
+            --config p/default \
+            --sarif --output semgrep.sarif \
+            --error
+
+      - name: Upload SARIF
+        # Always upload even if semgrep found issues (--error exits
+        # non-zero). GitHub's SARIF ingest still shows the findings
+        # in the Security tab so the reviewer can triage.
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep

@@ -1,0 +1,59 @@
+name: CodeQL
+
+# GitHub-native static analysis. Runs on every push to master, every
+# PR, and weekly so a vulnerability in an untouched module still
+# surfaces. Uploads findings to the Security tab (code scanning).
+#
+# Requires "Code scanning" enabled on the repo. If Advanced Security
+# isn't on yet the upload step will warn but the scan itself runs
+# fine — results are in the workflow artifact until you flip the
+# setting at Settings → Code security and analysis.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    # Sunday 08:23 UTC — off-peak for GitHub-hosted runners.
+    - cron: "23 8 * * 0"
+
+permissions:
+  # Required for upload-sarif to post findings.
+  security-events: write
+  # Required for private repos.
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # python covers src/ and scripts/; actions covers the workflow
+        # files themselves for action-injection / expression-injection
+        # patterns.
+        language: [python, actions]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # The default query suite is "security-extended" level; bump
+          # to "security-and-quality" so style-adjacent security-
+          # relevant findings (e.g. weak-crypto-default, cleartext-
+          # logging) also show up. These stay low-noise because CodeQL
+          # already ranks its alerts.
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Run CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
