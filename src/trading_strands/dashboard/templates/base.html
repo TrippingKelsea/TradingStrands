@@ -301,7 +301,12 @@
     $('total-equity').className = 'acct-value';
     $('total-rpnl').textContent = (totalRpnl >= 0 ? '+$' : '-$') + fmt(Math.abs(totalRpnl));
     $('total-rpnl').className = 'acct-value ' + pnlClass(totalRpnl);
-    $('active-strat-count').textContent = bots.length;
+    // Deliberately NOT using bots.length for the Strategies count. With
+    // per-bot Fargate services each bot writes its own pk=SNAPSHOT row,
+    // overwriting the others — Object.keys(snap.ledgers) flickers
+    // between 0/1/2 depending on which bot published most recently.
+    // Pull the authoritative count from /api/strategies instead.
+    refreshStrategyCount();
 
     // Update halt button state from snapshot
     // The snapshot's desk_halted flag reflects only the in-memory
@@ -311,6 +316,20 @@
     const halted = snap.risk && snap.risk.desk_halted;
     _deskHalted = halted;
     refreshHaltButton();
+  }
+
+  // /api/strategies is the source of truth for "how many strategies
+  // exist in this org". Filter to the ones actually expected to be
+  // running (status == 'active'); paused/stopped shouldn't show up in
+  // the header count even though they exist in storage.
+  async function refreshStrategyCount() {
+    try {
+      const resp = await fetch('/api/strategies');
+      if (!resp.ok) return;
+      const list = await resp.json();
+      const active = list.filter(s => s.status === 'active').length;
+      $('active-strat-count').textContent = active;
+    } catch(e) { /* ignore — keep prior value */ }
   }
 
   // Full halt state: system + per-org + permissions. Loaded on tick so
