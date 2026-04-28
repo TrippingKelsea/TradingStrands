@@ -45,6 +45,7 @@ from trading_strands.dashboard.principal import (
     SessionInvalidError,
     principal_from_session,
 )
+from trading_strands.dashboard.security_headers import SecurityHeadersMiddleware
 from trading_strands.strategies_store.store import (
     StrategyNotFoundError,
     StrategyStore,
@@ -54,8 +55,16 @@ from trading_strands.tenancy.store import NotFoundError, TenancyStore
 
 app = FastAPI(title="TradingStrands Dashboard")
 
+# Middleware order matters: Starlette's add_middleware builds a stack
+# where the LAST registered is the OUTERMOST. SecurityHeaders must be
+# on the outside so it still adds headers to early-exit responses
+# from AuthMiddleware (e.g. 307 → /login for an unauthenticated
+# request). Inner first, outer last.
 # Auth middleware — enforces login on all routes except /health, /login, /auth/*
 app.add_middleware(AuthMiddleware)
+# Security headers — outermost so every response carries CSP +
+# X-Frame-Options + X-Content-Type-Options + Referrer-Policy.
+app.add_middleware(SecurityHeadersMiddleware)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
