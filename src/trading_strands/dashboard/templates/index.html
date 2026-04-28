@@ -527,35 +527,76 @@
     let section = document.getElementById('strat-section-' + botId);
 
     if (!section) {
+      // First render for this botId. If the container only holds a
+      // placeholder div (no real section yet), wipe it so the first
+      // real section has a clean slot.
       if (container.querySelector('div[style]') && !container.querySelector('.strategy-section')) {
-        container.innerHTML = '';
+        clear(container);
       }
-      section = document.createElement('div');
-      section.id = 'strat-section-' + botId;
-      section.className = 'strategy-section';
-      section.innerHTML = `
-        <div class="strategy-section-header">
-          <span class="name">${botId}</span>
-          <span style="font-size:0.75rem;color:var(--dim)" id="strat-equity-${botId}">-</span>
-        </div>
-        <div class="strategy-section-body" style="padding:12px 16px">
-          <div class="grid" style="margin-bottom:0">
-            <div>
-              <div class="metric"><span class="label">Equity</span><span class="value" id="eq-${botId}">-</span></div>
-              <div class="metric"><span class="label">Realized PnL</span><span class="value" id="rpnl-${botId}">-</span></div>
-              <div class="metric"><span class="label">Drawdown</span><span class="value" id="dd-${botId}">-</span></div>
-              <div class="drawdown-bar"><div class="drawdown-fill" id="ddbar-${botId}" style="width:0%;background:var(--green)"></div></div>
-            </div>
-            <div>
-              <h2 style="font-size:0.75rem;color:var(--dim);margin-bottom:4px;">POSITIONS</h2>
-              <table>
-                <thead><tr><th>Symbol</th><th>Qty</th><th>Cost</th><th>Price</th><th>PnL</th></tr></thead>
-                <tbody id="pos-${botId}"></tbody>
-              </table>
-              <div id="nopos-${botId}" style="color:var(--dim);font-size:0.75rem;padding:4px 0;">No positions</div>
-            </div>
-          </div>
-        </div>`;
+      // botId is used as an id suffix; it's a hex-prefixed
+      // strategy-{hex} generated server-side so it's safe as an
+      // id component. The on-page text rendering still goes
+      // through el() so a future id-shape change doesn't require
+      // a companion escaping fix.
+      section = el('div',
+        {id: 'strat-section-' + botId, class: 'strategy-section'},
+        el('div', {class: 'strategy-section-header'},
+          el('span', {class: 'name'}, botId),
+          el('span', {
+            style: 'font-size:0.75rem;color:var(--dim);',
+            id: 'strat-equity-' + botId,
+          }, '-'),
+        ),
+        el('div', {
+          class: 'strategy-section-body',
+          style: 'padding:12px 16px;',
+        },
+          el('div', {class: 'grid', style: 'margin-bottom:0;'},
+            el('div', {},
+              el('div', {class: 'metric'},
+                el('span', {class: 'label'}, 'Equity'),
+                el('span', {class: 'value', id: 'eq-' + botId}, '-'),
+              ),
+              el('div', {class: 'metric'},
+                el('span', {class: 'label'}, 'Realized PnL'),
+                el('span', {class: 'value', id: 'rpnl-' + botId}, '-'),
+              ),
+              el('div', {class: 'metric'},
+                el('span', {class: 'label'}, 'Drawdown'),
+                el('span', {class: 'value', id: 'dd-' + botId}, '-'),
+              ),
+              el('div', {class: 'drawdown-bar'},
+                el('div', {
+                  class: 'drawdown-fill',
+                  id: 'ddbar-' + botId,
+                  style: 'width:0%;background:var(--green);',
+                }),
+              ),
+            ),
+            el('div', {},
+              el('h2',
+                {style: 'font-size:0.75rem;color:var(--dim);margin-bottom:4px;'},
+                'POSITIONS'),
+              el('table', {},
+                el('thead', {},
+                  el('tr', {},
+                    el('th', {}, 'Symbol'),
+                    el('th', {}, 'Qty'),
+                    el('th', {}, 'Cost'),
+                    el('th', {}, 'Price'),
+                    el('th', {}, 'PnL'),
+                  ),
+                ),
+                el('tbody', {id: 'pos-' + botId}),
+              ),
+              el('div', {
+                id: 'nopos-' + botId,
+                style: 'color:var(--dim);font-size:0.75rem;padding:4px 0;',
+              }, 'No positions'),
+            ),
+          ),
+        ),
+      );
       container.appendChild(section);
     }
 
@@ -587,14 +628,21 @@
 
     const positions = ledger.positions || [];
     if (tbody) {
-      tbody.innerHTML = '';
-      positions.forEach(p => {
+      // Each cell is a text node — p.symbol is user-authored and
+      // must not be parsed as HTML.
+      mount(tbody, positions.map(p => {
         const price = parseFloat(prices[p.symbol] || 0);
         const upnl = (price - parseFloat(p.burdened_cost_basis)) * parseFloat(p.quantity);
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${p.symbol}</td><td>${fmt(p.quantity)}</td><td>$${fmt(p.burdened_cost_basis)}</td><td>$${fmt(price)}</td><td class="${pnlClass(upnl)}">${upnl >= 0 ? '+' : ''}$${fmt(Math.abs(upnl))}</td>`;
-        tbody.appendChild(tr);
-      });
+        return el('tr', {},
+          el('td', {}, p.symbol || ''),
+          el('td', {}, fmt(p.quantity)),
+          el('td', {}, '$', fmt(p.burdened_cost_basis)),
+          el('td', {}, '$', fmt(price)),
+          el('td', {class: pnlClass(upnl)},
+            (upnl >= 0 ? '+' : ''), '$', fmt(Math.abs(upnl)),
+          ),
+        );
+      }));
     }
     if (nopos) nopos.style.display = positions.length ? 'none' : 'block';
   }
@@ -617,18 +665,28 @@
     const pricesList = $('prices-list');
     const symbols = Object.keys(prices).sort();
     if (symbols.length > 0) {
-      pricesList.innerHTML = symbols.map(sym =>
-        `<div class="metric"><span class="label">${sym}</span><span class="value">$${fmt(prices[sym])}</span></div>`
-      ).join('');
+      // Symbol labels are user-authored (strategy.symbols). Text-node
+      // only so a symbol like "<img ...>" would render literally
+      // rather than execute.
+      mount(pricesList, symbols.map(sym =>
+        el('div', {class: 'metric'},
+          el('span', {class: 'label'}, sym),
+          el('span', {class: 'value'}, '$', fmt(prices[sym])),
+        ),
+      ));
       ensurePriceCharts(symbols);
     } else {
-      pricesList.innerHTML = '<span style="color:var(--dim)">No price data</span>';
+      mount(pricesList, el('span',
+        {style: 'color:var(--dim);'}, 'No price data'));
     }
 
     if (botIds.length === 0) {
       const container = $('strategy-sections');
       if (!container.querySelector('.strategy-section')) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">No strategies running. Submit a strategy to get started.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;padding:16px;'},
+          'No strategies running. Submit a strategy to get started.',
+        ));
       }
     }
 
@@ -658,14 +716,28 @@
 
   function addTradeEvent(ev) {
     const feed = $('trade-feed');
-    if (tradeFeedItems.length === 0) feed.innerHTML = '';
+    if (tradeFeedItems.length === 0) clear(feed);
 
-    const div = document.createElement('div');
     const isExec = ev.event_type === 'trade.executed';
-    div.className = 'feed-item ' + (isExec ? 'executed' : 'rejected');
     const d = ev.data || {};
-    div.innerHTML = `<div class="time">${timeStr(ev.timestamp)} ${d.bot_id || ''}</div>
-      <div>${isExec ? 'EXEC' : 'REJECT'} ${d.action || ''} ${d.quantity || ''} ${d.symbol || ''}${d.reason ? ' - ' + d.reason : ''}${d.rationale ? ' - ' + d.rationale : ''}</div>`;
+    // Every d.* field could carry operator-authored strings
+    // (bot_id, action, symbol, rationale) or LLM-derived rationale.
+    // Compose via el() so nothing gets parsed as HTML.
+    const trailing = [];
+    if (d.reason) { trailing.push(' - '); trailing.push(d.reason); }
+    if (d.rationale) { trailing.push(' - '); trailing.push(d.rationale); }
+
+    const div = el('div',
+      {class: 'feed-item ' + (isExec ? 'executed' : 'rejected')},
+      el('div', {class: 'time'},
+        timeStr(ev.timestamp), ' ', d.bot_id || '',
+      ),
+      el('div', {},
+        isExec ? 'EXEC' : 'REJECT', ' ',
+        d.action || '', ' ', d.quantity || '', ' ', d.symbol || '',
+        ...trailing,
+      ),
+    );
     feed.prepend(div);
     tradeFeedItems.unshift(ev);
     if (tradeFeedItems.length > 50) {
@@ -676,12 +748,14 @@
 
   function addKillSwitchEvent(ev) {
     const feed = $('killswitch-feed');
-    if (ksItems.length === 0) feed.innerHTML = '';
+    if (ksItems.length === 0) clear(feed);
 
-    const div = document.createElement('div');
     const verb = (ev.data && ev.data.verb) || 'unknown';
-    div.className = 'feed-item severity-' + verb;
-    div.innerHTML = `<div class="time">${timeStr(ev.timestamp)}</div><div>${verb}: ${(ev.data && ev.data.reason) || ''}</div>`;
+    const reason = (ev.data && ev.data.reason) || '';
+    const div = el('div', {class: 'feed-item severity-' + verb},
+      el('div', {class: 'time'}, timeStr(ev.timestamp)),
+      el('div', {}, verb, ': ', reason),
+    );
     feed.prepend(div);
     ksItems.unshift(ev);
   }
