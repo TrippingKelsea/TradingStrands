@@ -51,6 +51,12 @@ jobs:
           #   p/secrets         — hardcoded tokens / keys
           #   p/owasp-top-ten   — broad OWASP coverage
           #   p/default         — Semgrep's curated baseline
+          #
+          # No --error: findings land in the Security tab for triage;
+          # job success reports "scan ran clean" not "zero findings".
+          # Block merges on open alerts via branch protection, not on
+          # the job status — gives reviewers the chance to dismiss-
+          # with-justification without re-running CI.
           semgrep scan \
             --config p/python \
             --config p/ci \
@@ -58,8 +64,7 @@ jobs:
             --config p/secrets \
             --config p/owasp-top-ten \
             --config p/default \
-            --sarif --output semgrep.sarif \
-            --error
+            --sarif --output semgrep.sarif
 
       - name: Upload SARIF
         # Always upload even if semgrep found issues (--error exits
