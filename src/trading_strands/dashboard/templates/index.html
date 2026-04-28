@@ -3212,33 +3212,52 @@
         sumEl.textContent = resp.status === 400
           ? 'Select an organization to see token usage.'
           : 'Unavailable';
-        if (perEl) perEl.innerHTML = '';
+        if (perEl) clear(perEl);
         return;
       }
       const data = await resp.json();
       const t = data.total || {};
       const cost = parseFloat(t.cost_usd_est || 0);
-      sumEl.innerHTML = `
-        <div class="metric"><span class="label">Cost today (est)</span><span class="value">$${cost.toFixed(4)}</span></div>
-        <div class="metric"><span class="label">Invocations</span><span class="value">${t.invocations || 0}</span></div>
-        <div class="metric"><span class="label">Input tokens</span><span class="value">${(t.input_tokens || 0).toLocaleString()}</span></div>
-        <div class="metric"><span class="label">Output tokens</span><span class="value">${(t.output_tokens || 0).toLocaleString()}</span></div>
-      `;
+
+      const metric = (label, value) => el('div', {class: 'metric'},
+        el('span', {class: 'label'}, label),
+        el('span', {class: 'value'}, value),
+      );
+      mount(sumEl,
+        metric('Cost today (est)', '$' + cost.toFixed(4)),
+        metric('Invocations', String(t.invocations || 0)),
+        metric('Input tokens', (t.input_tokens || 0).toLocaleString()),
+        metric('Output tokens', (t.output_tokens || 0).toLocaleString()),
+      );
+
       const per = data.per_agent || [];
-      if (per.length === 0) {
-        if (perEl) perEl.innerHTML = '<div style="color:var(--dim);font-size:0.72rem;">No per-agent data yet.</div>';
-      } else {
-        const rows = per.slice(0, 5).map(a => {
-          const c = parseFloat(a.cost_usd_est || 0);
-          return `
-            <div class="metric">
-              <span class="label" style="font-size:0.72rem;">${escapeHtml(a.agent_id)} <span style="color:var(--dim);">${escapeHtml(a.agent_type)}</span></span>
-              <span class="value" style="font-size:0.75rem;">$${c.toFixed(4)}</span>
-            </div>`;
-        }).join('');
-        if (perEl) {
-          perEl.innerHTML =
-            '<div style="font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Top agents</div>' + rows;
+      if (perEl) {
+        if (per.length === 0) {
+          mount(perEl, el('div',
+            {style: 'color:var(--dim);font-size:0.72rem;'},
+            'No per-agent data yet.',
+          ));
+        } else {
+          // agent_id and agent_type are server-derived but rendered
+          // as text nodes regardless. Previously used escapeHtml()
+          // before interpolation; now the escape is by construction.
+          mount(perEl,
+            el('div', {
+              style: 'font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;',
+            }, 'Top agents'),
+            ...per.slice(0, 5).map(a => {
+              const c = parseFloat(a.cost_usd_est || 0);
+              return el('div', {class: 'metric'},
+                el('span', {class: 'label', style: 'font-size:0.72rem;'},
+                  a.agent_id || '', ' ',
+                  el('span', {style: 'color:var(--dim);'},
+                    a.agent_type || ''),
+                ),
+                el('span', {class: 'value', style: 'font-size:0.75rem;'},
+                  '$', c.toFixed(4)),
+              );
+            }),
+          );
         }
       }
     } catch(e) {
@@ -3268,19 +3287,39 @@
       }
     }
 
-    // Create canvases for newly-watched symbols.
+    // Create canvases for newly-watched symbols. sym is user-authored
+    // (strategy.symbols); goes through el() as text. Note: sym is
+    // also used as an id suffix — the server validates symbols as
+    // ^[A-Z0-9.\-]{1,10}$ (see StrategyCreate validator) so id
+    // collisions / selector escaping are bounded at the API.
     for (const sym of symbols) {
       if (!_chartState[sym]) {
-        const wrap = document.createElement('div');
-        wrap.id = 'pchart-' + sym;
-        wrap.style.cssText = 'margin-top:8px; padding-top:8px; border-top: 1px dashed var(--border);';
-        wrap.innerHTML = `
-          <div style="display:flex; justify-content:space-between; font-size:0.7rem; color:var(--dim); margin-bottom:4px;">
-            <span><b style="color:var(--blue);">${sym}</b> <span id="pchart-${sym}-range" style="color:var(--dim);"></span></span>
-            <span id="pchart-${sym}-status" style="color:var(--dim); font-size:0.65rem;">loading…</span>
-          </div>
-          <canvas id="pchart-${sym}-canvas" height="60" style="width:100%; display:block; border: 1px solid var(--border); border-radius: 3px; background: var(--bg);"></canvas>
-        `;
+        const wrap = el('div', {
+          id: 'pchart-' + sym,
+          style: 'margin-top:8px;padding-top:8px;border-top:1px dashed var(--border);',
+        },
+          el('div', {
+            style: 'display:flex;justify-content:space-between;font-size:0.7rem;color:var(--dim);margin-bottom:4px;',
+          },
+            el('span', {},
+              el('b', {style: 'color:var(--blue);'}, sym),
+              ' ',
+              el('span', {
+                id: 'pchart-' + sym + '-range',
+                style: 'color:var(--dim);',
+              }),
+            ),
+            el('span', {
+              id: 'pchart-' + sym + '-status',
+              style: 'color:var(--dim);font-size:0.65rem;',
+            }, 'loading…'),
+          ),
+          el('canvas', {
+            id: 'pchart-' + sym + '-canvas',
+            height: '60',
+            style: 'width:100%;display:block;border:1px solid var(--border);border-radius:3px;background:var(--bg);',
+          }),
+        );
         container.appendChild(wrap);
         const canvas = document.getElementById('pchart-' + sym + '-canvas');
         _chartState[sym] = {
@@ -3408,8 +3447,12 @@
     const rangeEl = document.getElementById('pchart-' + sym + '-range');
     if (rangeEl) {
       const pct = ((last - first) / first) * 100;
-      rangeEl.innerHTML = ` · $${yMin.toFixed(2)}–$${yMax.toFixed(2)} ` +
-        `<span style="color: ${lineColor};">(${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)</span>`;
+      mount(rangeEl,
+        ' · $', yMin.toFixed(2), '–$', yMax.toFixed(2), ' ',
+        el('span', {style: {color: lineColor}},
+          '(', pct >= 0 ? '+' : '', pct.toFixed(2), '%)',
+        ),
+      );
     }
   }
 
