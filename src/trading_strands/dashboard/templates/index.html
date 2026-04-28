@@ -969,14 +969,17 @@
   async function populateModelSelect(selectEl, descEl, selectedId) {
     const models = await fetchModels();
     const current = selectedId || '';
-    let html = '<option value="">(use platform default)</option>';
-    for (const m of models) {
-      const tag = m.is_default === 'true' ? ' ★' : '';
-      const sel = (current === m.id) ? ' selected' : '';
-      html += '<option value="' + m.id + '"' + sel + '>' + m.label + tag + '</option>';
-    }
-    selectEl.innerHTML = html;
-    // Surface the description for the current selection, if any.
+    // Model id/label come from /api/models which is server-controlled
+    // (ModelChoice rows), but route through el() anyway so the
+    // render path is uniform. setAttribute on 'selected' handles the
+    // boolean-attribute semantics correctly.
+    mount(selectEl,
+      el('option', {value: ''}, '(use platform default)'),
+      ...models.map(m => el('option', {
+        value: m.id,
+        ...(current === m.id ? {selected: 'selected'} : {}),
+      }, m.label + (m.is_default === 'true' ? ' ★' : ''))),
+    );
     const updateDesc = () => {
       const chosen = models.find(m => m.id === selectEl.value);
       descEl.textContent = chosen ? chosen.description : '';
@@ -1444,8 +1447,8 @@
   window.openEditStrategy = openEditStrategy;
 
   async function renderToolsPanel(sid) {
-    const el = $('edit-strat-tools');
-    if (!el || !_editedStrategy) return;
+    const container = $('edit-strat-tools');
+    if (!container || !_editedStrategy) return;
 
     // Load org-level tool availability. Absence of a row = not
     // explicitly enabled by org.
@@ -1459,41 +1462,77 @@
 
     const stratTools = _editedStrategy.tools || {};
 
-    let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">';
-    html += '<tr style="text-align:left;color:var(--dim);font-size:0.7rem;text-transform:uppercase;">';
-    html += '<th style="padding:4px;">Tool</th><th style="padding:4px;">Enabled</th><th style="padding:4px;">Daily quota</th><th style="padding:4px;">Notes</th></tr>';
-    _TOOL_INVENTORY.forEach(tool => {
+    // Tools are server-enumerated via _TOOL_INVENTORY (not user input),
+    // but route through el() for render consistency — a future "let
+    // orgs register custom tools" feature would break the implicit
+    // trust boundary if we kept the string-concat path.
+    const rows = _TOOL_INVENTORY.map(tool => {
       const orgCfg = orgToolMap[tool.name];
       const orgEnabled = !!(orgCfg && orgCfg.enabled);
       const stratCfg = stratTools[tool.name] || {};
       const selectable = orgEnabled;
       const reason = orgCfg
         ? (orgEnabled ? '' : 'Org disabled this tool')
-        : 'Org hasn\'t enabled this tool';
-      html += '<tr style="border-top:1px solid var(--border);">';
-      html += '<td style="padding:6px;"><strong>' + tool.label + '</strong><div style="font-size:0.7rem;color:var(--dim);">' + tool.description + '</div></td>';
-      html += '<td style="padding:6px;">';
-      html += '<input type="checkbox" data-tool-enabled="' + tool.name + '"' +
-        (stratCfg.enabled ? ' checked' : '') +
-        (selectable ? '' : ' disabled') + '>';
-      if (!selectable) {
-        html += '<div style="font-size:0.7rem;color:var(--amber,#d4a017);">' + reason + '</div>';
-      }
-      html += '</td>';
-      html += '<td style="padding:6px;">';
-      html += '<input type="number" min="0" max="10000" data-tool-quota="' + tool.name + '" value="' + (stratCfg.daily_quota || 0) + '" style="width:80px;"' + (selectable ? '' : ' disabled') + '>';
-      html += '</td>';
-      html += '<td style="padding:6px;font-size:0.75rem;color:var(--dim);">' + (tool.kind === 'context' ? 'Auto-injected' : '') + '</td>';
-      html += '</tr>';
+        : "Org hasn't enabled this tool";
+
+      const enabledAttrs = {
+        type: 'checkbox',
+        'data-tool-enabled': tool.name,
+      };
+      if (stratCfg.enabled) enabledAttrs.checked = 'checked';
+      if (!selectable) enabledAttrs.disabled = 'disabled';
+
+      const quotaAttrs = {
+        type: 'number',
+        min: '0', max: '10000',
+        'data-tool-quota': tool.name,
+        value: String(stratCfg.daily_quota || 0),
+        style: 'width:80px;',
+      };
+      if (!selectable) quotaAttrs.disabled = 'disabled';
+
+      return el('tr', {style: 'border-top:1px solid var(--border);'},
+        el('td', {style: 'padding:6px;'},
+          el('strong', {}, tool.label),
+          el('div',
+            {style: 'font-size:0.7rem;color:var(--dim);'},
+            tool.description),
+        ),
+        el('td', {style: 'padding:6px;'},
+          el('input', enabledAttrs),
+          selectable ? null : el('div',
+            {style: 'font-size:0.7rem;color:var(--amber,#d4a017);'},
+            reason),
+        ),
+        el('td', {style: 'padding:6px;'},
+          el('input', quotaAttrs),
+        ),
+        el('td',
+          {style: 'padding:6px;font-size:0.75rem;color:var(--dim);'},
+          tool.kind === 'context' ? 'Auto-injected' : '',
+        ),
+      );
     });
-    html += '</table>';
-    el.innerHTML = html;
+
+    mount(container,
+      el('table',
+        {style: 'width:100%;border-collapse:collapse;font-size:0.85rem;'},
+        el('tr',
+          {style: 'text-align:left;color:var(--dim);font-size:0.7rem;text-transform:uppercase;'},
+          el('th', {style: 'padding:4px;'}, 'Tool'),
+          el('th', {style: 'padding:4px;'}, 'Enabled'),
+          el('th', {style: 'padding:4px;'}, 'Daily quota'),
+          el('th', {style: 'padding:4px;'}, 'Notes'),
+        ),
+        rows,
+      ),
+    );
   }
   window.renderToolsPanel = renderToolsPanel;
 
   async function renderSkillsPanel(sid) {
-    const el = $('edit-strat-skills');
-    if (!el || !_editedStrategy) return;
+    const container = $('edit-strat-skills');
+    if (!container || !_editedStrategy) return;
 
     let orgSkills = [];
     try {
@@ -1504,21 +1543,40 @@
     const selected = _editedStrategy.skills || [];
 
     if (orgSkills.length === 0) {
-      el.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;">No skills authored yet for this org. Orgadmins can add them via Admin &rarr; Skills.</div>';
+      mount(container, el('div',
+        {style: 'color:var(--dim);font-size:0.85rem;'},
+        // Keep the arrow readable without HTML entity substitution.
+        'No skills authored yet for this org. Orgadmins can add them via Admin → Skills.',
+      ));
       return;
     }
 
-    let html = '<div style="display:flex;flex-direction:column;gap:4px;">';
-    orgSkills.forEach(s => {
-      const isSelected = selected.includes(s.skill_name);
-      const preview = (s.markdown || '').split('\n').slice(0, 2).join(' | ').slice(0, 120);
-      html += '<label style="display:flex;align-items:flex-start;gap:8px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;cursor:pointer;">';
-      html += '<input type="checkbox" data-skill="' + s.skill_name + '"' + (isSelected ? ' checked' : '') + ' style="margin-top:3px;">';
-      html += '<div><div style="font-weight:bold;">' + s.skill_name + '</div><div style="font-size:0.72rem;color:var(--dim);">' + preview + '</div></div>';
-      html += '</label>';
-    });
-    html += '</div>';
-    el.innerHTML = html;
+    // skill_name and markdown are user-authored (orgadmin). Must go
+    // through el() — the preview slicing does NOT sanitize.
+    mount(container,
+      el('div', {style: 'display:flex;flex-direction:column;gap:4px;'},
+        orgSkills.map(s => {
+          const isSelected = selected.includes(s.skill_name);
+          const preview = (s.markdown || '').split('\n').slice(0, 2).join(' | ').slice(0, 120);
+          const checkboxAttrs = {
+            type: 'checkbox',
+            'data-skill': s.skill_name,
+            style: 'margin-top:3px;',
+          };
+          if (isSelected) checkboxAttrs.checked = 'checked';
+          return el('label',
+            {style: 'display:flex;align-items:flex-start;gap:8px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;cursor:pointer;'},
+            el('input', checkboxAttrs),
+            el('div', {},
+              el('div', {style: 'font-weight:bold;'}, s.skill_name),
+              el('div',
+                {style: 'font-size:0.72rem;color:var(--dim);'},
+                preview),
+            ),
+          );
+        }),
+      ),
+    );
   }
   window.renderSkillsPanel = renderSkillsPanel;
 
