@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import structlog
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
@@ -52,6 +53,8 @@ from trading_strands.strategies_store.store import (
     resource_for,
 )
 from trading_strands.tenancy.store import NotFoundError, TenancyStore
+
+logger = structlog.get_logger()
 
 app = FastAPI(title="TradingStrands Dashboard")
 
@@ -1603,9 +1606,10 @@ async def get_strategy_tool_calls(
             limit=clamped_limit,
         )
     except Exception as exc:
+        logger.exception("api.tool_calls.start_query_failed")
         raise HTTPException(
             status_code=503,
-            detail=f"cloudwatch logs unavailable: {exc}",
+            detail="cloudwatch logs unavailable",
         ) from exc
 
     query_id = start_resp["queryId"]
@@ -1969,7 +1973,12 @@ async def deploys_recent(request: Request) -> dict[str, Any]:
                 raise ValueError("unreasonable deploy timestamp")
             deploys.append({"ts": ts, "commit": sha[:7] if sha else ""})
         except ValueError:
-            pass
+            # Misconfigured CI that stamps a non-numeric or
+            # implausible DEPLOY_TIMESTAMP — log once per request so
+            # an operator can see it without the dashboard crashing.
+            logger.warning(
+                "api.deploys_recent.bad_timestamp", deploy_timestamp=ts_env,
+            )
     return {"deploys": deploys}
 
 
@@ -2079,9 +2088,10 @@ async def metrics_query(
             ScanBy="TimestampAscending",
         )
     except Exception as exc:
+        logger.exception("api.metrics_query.cloudwatch_failed")
         raise HTTPException(
             status_code=503,
-            detail=f"cloudwatch unavailable: {exc}",
+            detail="cloudwatch unavailable",
         ) from exc
 
     results = resp.get("MetricDataResults", []) or []
@@ -2118,9 +2128,10 @@ async def supervisor_alarms(request: Request) -> dict[str, Any]:
     try:
         resp = cw.describe_alarms(MaxRecords=100)
     except Exception as exc:
+        logger.exception("api.supervisor_alarms.describe_failed")
         raise HTTPException(
             status_code=503,
-            detail=f"alarm state unavailable: {exc}",
+            detail="alarm state unavailable",
         ) from exc
 
     metric_alarms = resp.get("MetricAlarms", []) or []
@@ -2230,8 +2241,9 @@ async def telemetry(request: Request) -> dict[str, Any]:
             "item_count": tbl.get("ItemCount", 0),
             "size_bytes": tbl.get("TableSizeBytes", 0),
         }
-    except Exception as exc:
-        result["dynamodb"] = {"status": "error", "error": str(exc)}
+    except Exception:
+        logger.exception("api.telemetry.dynamodb_describe_failed")
+        result["dynamodb"] = {"status": "error"}
 
     try:
         resp = table.get_item(Key={"pk": "SNAPSHOT"})
@@ -2252,8 +2264,9 @@ async def telemetry(request: Request) -> dict[str, Any]:
                 "last_tick": None,
                 "telemetry": {},
             }
-    except Exception as exc:
-        result["trading_service"] = {"status": "error", "error": str(exc)}
+    except Exception:
+        logger.exception("api.telemetry.snapshot_read_failed")
+        result["trading_service"] = {"status": "error"}
 
     try:
         from boto3.dynamodb.conditions import Attr as _Attr
@@ -2267,8 +2280,9 @@ async def telemetry(request: Request) -> dict[str, Any]:
             st = s.get("status", "unknown")
             counts[st] = counts.get(st, 0) + 1
         result["strategies"] = {"total": len(strategies), "by_status": counts}
-    except Exception as exc:
-        result["strategies"] = {"status": "error", "error": str(exc)}
+    except Exception:
+        logger.exception("api.telemetry.strategies_scan_failed")
+        result["strategies"] = {"status": "error"}
 
     try:
         from boto3.dynamodb.conditions import Attr as _Attr2
@@ -2278,8 +2292,9 @@ async def telemetry(request: Request) -> dict[str, Any]:
             table, _Attr2("pk").begins_with("EVENT#"),
         )
         result["events"] = {"recent_count": len(events_items)}
-    except Exception as exc:
-        result["events"] = {"status": "error", "error": str(exc)}
+    except Exception:
+        logger.exception("api.telemetry.events_scan_failed")
+        result["events"] = {"status": "error"}
 
     result["dashboard"] = {
         "status": "ok",
@@ -2441,7 +2456,12 @@ async def cost_summary(request: Request) -> dict[str, Any]:
             "task_allocation": task_allocation,
             "source": "aws_cost_explorer",
         }
-    except Exception as exc:
+    except Exception:
+        # Cost Explorer failures frequently carry IAM role ARNs,
+        # account IDs, and internal paths in their messages — those
+        # don't belong on the wire to the dashboard client. Log
+        # server-side with full detail; surface a generic message.
+        logger.exception("api.costs.failed")
         return {
             "period": period,
             "total_cost": 0,
@@ -2450,7 +2470,7 @@ async def cost_summary(request: Request) -> dict[str, Any]:
             "by_service": [],
             "ecs_breakdown": [],
             "task_allocation": [],
-            "error": str(exc),
+            "error": "Cost Explorer unavailable. See server logs.",
         }
 
 

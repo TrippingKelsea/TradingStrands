@@ -37,10 +37,15 @@ TEMPLATE_DIR = (
 # (those are stripped below).
 _INNERHTML_ASSIGN_RE = re.compile(r"\.innerHTML\s*(?:\+=|=)(?!=)")
 
-# Pull <script>…</script> blocks from a template. Case-insensitive to
-# be forgiving; dotall so newlines inside the block are captured.
+# Pull <script>…</script> blocks from a template. Case-insensitive
+# to be forgiving; dotall so newlines inside the block are captured.
+# Closing tag uses `\b[^>]*>` (matching anything up to the next `>`)
+# rather than `\s*>` — HTML parsers accept whitespace and attributes
+# on closing tags, and CodeQL's py/bad-tag-filter correctly flags
+# the narrower `\s*>` form as a filter that could be bypassed by
+# tabs / newlines / extra content inside the closer.
 _SCRIPT_TAG_RE = re.compile(
-    r"<script\b[^>]*>(.*?)</script\s*>",
+    r"<script\b[^>]*>(.*?)</script\b[^>]*>",
     re.DOTALL | re.IGNORECASE,
 )
 

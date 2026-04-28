@@ -462,15 +462,17 @@ Security tab so triage lives in one place.
   dataflow might not reach. Adding `SEMGREP_APP_TOKEN` as a repo
   secret enables the semgrep.dev dashboard, but is not required
   for local operation.
-- **Socket** (`.github/workflows/socket.yml`) — Supply-chain risk
-  scoring on dependency PRs. Evaluates new packages for known
-  red flags: install scripts, suspicious postinstall network
-  access, obfuscated code, typo-squats, young packages. Runs
-  only on PRs that touch `pyproject.toml` / `uv.lock` /
-  `infra/requirements.txt` / `package*.json` / `yarn.lock` —
-  supply-chain risk is decided at dep-introduction time, not on
-  every push. Operates report-only without `SOCKET_SECURITY_API_KEY`;
-  add it to enable org-policy gating.
+- **Socket** (GitHub App, not a workflow) — Supply-chain risk
+  scoring on dependency PRs. Install
+  `github.com/marketplace/socket-security` against this repo for
+  the fully-automated flow: Socket's App posts PR comments with
+  package-level risk scores (install scripts, suspicious
+  postinstall network access, obfuscated code, typo-squats, young
+  packages) and can be configured to block merges at a severity
+  threshold. No workflow file needed. SocketDev's GitHub Action
+  (`SocketDev/action`) is for install-time firewalling in CI, a
+  different shape than what we want here; the App covers the
+  dependency-review use case directly.
 
 ### When each fires
 
@@ -478,12 +480,12 @@ Security tab so triage lives in one place.
 |----------|---------------|----------------|--------|---------|
 | CodeQL   | ✓             | ✓              | ✓      |         |
 | Semgrep  | ✓             | ✓              | ✓      |         |
-| Socket   |               |                |        | ✓ (deps) |
+| Socket (App) | — | ✓ (deps) | — | — |
 
 Dependabot PRs are skipped by Semgrep (they rarely flag new
 SAST issues and would clutter the PR review) but run through
-CodeQL + Socket because both have legitimate signal to add on
-dep changes.
+CodeQL and Socket App (once installed) because both have
+legitimate signal to add on dep changes.
 
 ### Triage model
 
