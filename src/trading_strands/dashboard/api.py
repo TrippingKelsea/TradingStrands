@@ -22,11 +22,12 @@ import boto3
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from trading_strands.alpaca_secrets.store import AlpacaSecretsStore
 from trading_strands.authz.model import Action, Principal, Resource, ResourceType, Role
 from trading_strands.authz.policy import Unauthorized, require
+from trading_strands.dashboard import validators as dv
 from trading_strands.dashboard.auth import (
     CHALLENGE_NEW_PASSWORD_REQUIRED,
     SESSION_COOKIE,
@@ -632,6 +633,35 @@ class StrategyCreate(BaseModel):
     # the store; surfaces as 400 here on unknown ids.
     model_id: str = ""
 
+    # Pydantic field validators run at request-body parsing time —
+    # a bad input produces a 422 with a structured error message
+    # before the endpoint body runs. Each rule is documented in
+    # trading_strands.dashboard.validators.
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return dv.validate_name(v, field="name")
+
+    @field_validator("markdown")
+    @classmethod
+    def _check_markdown(cls, v: str) -> str:
+        return dv.validate_markdown(v, field="markdown")
+
+    @field_validator("symbols")
+    @classmethod
+    def _check_symbols(cls, v: list[str]) -> list[str]:
+        return dv.validate_symbols_list(v)
+
+    @field_validator("capital")
+    @classmethod
+    def _check_capital(cls, v: str) -> str:
+        return dv.validate_capital(v)
+
+    @field_validator("skills")
+    @classmethod
+    def _check_skills(cls, v: list[str]) -> list[str]:
+        return [dv.validate_ident(s, field="skill_name") for s in v]
+
 
 class StrategyUpdate(BaseModel):
     name: str | None = None
@@ -642,6 +672,33 @@ class StrategyUpdate(BaseModel):
     tools: dict[str, dict[str, Any]] | None = None
     skills: list[str] | None = None
     model_id: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str | None) -> str | None:
+        return dv.validate_name(v, field="name") if v is not None else None
+
+    @field_validator("markdown")
+    @classmethod
+    def _check_markdown(cls, v: str | None) -> str | None:
+        return dv.validate_markdown(v, field="markdown") if v is not None else None
+
+    @field_validator("symbols")
+    @classmethod
+    def _check_symbols(cls, v: list[str] | None) -> list[str] | None:
+        return dv.validate_symbols_list(v) if v is not None else None
+
+    @field_validator("capital")
+    @classmethod
+    def _check_capital(cls, v: str | None) -> str | None:
+        return dv.validate_capital(v) if v is not None else None
+
+    @field_validator("skills")
+    @classmethod
+    def _check_skills(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return None
+        return [dv.validate_ident(s, field="skill_name") for s in v]
 
 
 @app.get("/api/strategies")
@@ -1167,6 +1224,11 @@ async def set_org_tool(
 
 class SkillBody(BaseModel):
     markdown: str
+
+    @field_validator("markdown")
+    @classmethod
+    def _check_markdown(cls, v: str) -> str:
+        return dv.validate_markdown(v, field="skill markdown")
 
 
 @app.get("/api/orgs/{org_id}/skills")
@@ -2393,10 +2455,32 @@ def _get_user_pool_id() -> str:
 class OrgCreate(BaseModel):
     name: str
 
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        return dv.validate_name(v, field="org name")
+
 
 class OrgUpdate(BaseModel):
     name: str | None = None
     session_max_age: int | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str | None) -> str | None:
+        return dv.validate_name(v, field="org name") if v is not None else None
+
+    @field_validator("session_max_age")
+    @classmethod
+    def _check_session_max_age(cls, v: int | None) -> int | None:
+        if v is None:
+            return None
+        # Clamp to 5 min .. 30 days. Anything outside is either a
+        # typo or an attempted session-fixation trick.
+        if v < 300 or v > 30 * 24 * 3600:
+            msg = f"session_max_age out of range: {v}"
+            raise ValueError(msg)
+        return v
 
 
 @app.get("/api/admin/orgs")
@@ -2512,6 +2596,34 @@ class UserCreate(BaseModel):
     email: str
     role: str = "viewer"
     org_id: str = ""  # if empty, user is created without any memberships
+
+    @field_validator("email")
+    @classmethod
+    def _check_email(cls, v: str) -> str:
+        # Very loose RFC-ish check — rejects HTML-dangerous glyphs,
+        # control chars, and obvious non-emails. Cognito will do the
+        # strict RFC check on its side; we just stop obvious payloads
+        # from reaching DDB or CloudWatch logs.
+        v = v.strip()
+        if not v or "@" not in v:
+            msg = "email must contain '@'"
+            raise ValueError(msg)
+        if len(v) > 254:
+            msg = "email exceeds 254 characters"
+            raise ValueError(msg)
+        if dv._has_control_chars(v):
+            msg = "email contains control characters"
+            raise ValueError(msg)
+        for bad in ("<", ">", '"', "'"):
+            if bad in v:
+                msg = f"email contains disallowed character {bad!r}"
+                raise ValueError(msg)
+        return v
+
+    # No pydantic validator on `role`. The endpoint handler already
+    # returns a 400 on unknown role; adding a pydantic check here
+    # would change the status to 422 and break existing client
+    # expectations. The endpoint check is authoritative.
 
 
 class UserPasswordReset(BaseModel):
