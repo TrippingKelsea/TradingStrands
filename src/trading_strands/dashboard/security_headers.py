@@ -31,7 +31,7 @@ before the app sees the request.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -57,7 +57,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Any,
     ) -> Response:
-        response = await call_next(request)
+        response = cast(Response, await call_next(request))
         # Only set headers we control. If the app already set one
         # (e.g. a specific endpoint wants a stricter CSP), respect
         # that — never overwrite a more-restrictive policy.
