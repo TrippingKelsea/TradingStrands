@@ -2042,9 +2042,20 @@
 
   // ── Telemetry ─────────────────────────────────────────────────────────
 
+  // Small helper for telem-row construction — used repeatedly below.
+  function _telemRow(key, val, valClass) {
+    return el('div', {class: 'telem-row'},
+      el('span', {class: 'telem-key'}, key),
+      el('span', {class: 'telem-val' + (valClass ? ' ' + valClass : '')}, val),
+    );
+  }
+
   async function loadTelemetry() {
     const container = $('telemetry-content');
-    container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">Loading telemetry...</div>';
+    mount(container, el('div',
+      {style: 'color:var(--dim);font-size:0.85rem;padding:16px;'},
+      'Loading telemetry...',
+    ));
 
     try {
       const resp = await fetch('/api/telemetry');
@@ -2056,72 +2067,105 @@
       const dash = t.dashboard || {};
       const events = t.events || {};
 
-      container.innerHTML = `
-        <div class="telem-grid">
-          <div class="telem-service">
-            <h3>Trading Service <span class="badge badge-${ts.status || 'unknown'}">${ts.status || 'unknown'}</span></h3>
-            <div class="telem-row"><span class="telem-key">Uptime</span><span class="telem-val">${fmtDuration(telem.uptime_seconds)}</span></div>
-            <div class="telem-row"><span class="telem-key">Tick Rate</span><span class="telem-val">${telem.tick_rate_per_min || '-'} / min</span></div>
-            <div class="telem-row"><span class="telem-key">Tick Interval</span><span class="telem-val">${telem.tick_interval || '-'}s</span></div>
-            <div class="telem-row"><span class="telem-key">Last Tick</span><span class="telem-val">#${ts.last_tick != null ? ts.last_tick : '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Snapshot Age</span><span class="telem-val">${ts.last_snapshot_age_seconds != null ? ts.last_snapshot_age_seconds + 's' : '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Active Bots</span><span class="telem-val">${telem.active_bots != null ? telem.active_bots : '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Watched Symbols</span><span class="telem-val">${(telem.watched_symbols || []).join(', ') || '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Trades Executed</span><span class="telem-val positive">${telem.trades_executed != null ? telem.trades_executed : '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Trades Rejected</span><span class="telem-val negative">${telem.trades_rejected != null ? telem.trades_rejected : '-'}</span></div>
-          </div>
+      const tradingBadge = el('span',
+        {class: 'badge badge-' + (ts.status || 'unknown')},
+        ts.status || 'unknown');
+      const brokerBadgeClass = telem.broker_status === 'connected'
+        ? 'badge-ok' : 'badge-' + (telem.broker_status || 'unknown');
+      const brokerBadge = el('span',
+        {class: 'badge ' + brokerBadgeClass},
+        telem.broker_status || 'unknown');
 
-          <div class="telem-service">
-            <h3>Broker (Alpaca) <span class="badge badge-${telem.broker_status === 'connected' ? 'ok' : telem.broker_status || 'unknown'}">${telem.broker_status || 'unknown'}</span></h3>
-            <div class="telem-row"><span class="telem-key">Status</span><span class="telem-val">${telem.broker_status || 'unknown'}</span></div>
-            ${telem.broker_last_error ? `<div class="telem-row"><span class="telem-key">Last Error</span><span class="telem-val negative">${telem.broker_last_error}</span></div>` : '<div class="telem-row"><span class="telem-key">Last Error</span><span class="telem-val dim">None</span></div>'}
-          </div>
+      // Watched symbols are user-authored; rendered via text node.
+      const watchedLabel = (telem.watched_symbols || []).join(', ') || '-';
 
-          <div class="telem-service">
-            <h3>DynamoDB <span class="badge badge-${db.status || 'unknown'}">${db.status || 'unknown'}</span></h3>
-            <div class="telem-row"><span class="telem-key">Table</span><span class="telem-val">${db.table_name || '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Table Status</span><span class="telem-val">${db.table_status || '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Item Count</span><span class="telem-val">${db.item_count != null ? db.item_count : '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Size</span><span class="telem-val">${db.size_bytes != null ? (db.size_bytes / 1024).toFixed(1) + ' KB' : '-'}</span></div>
-          </div>
+      // strats.by_status keys are StrategyStatus enum values (server
+      // enum), but still rendered via el() for uniformity.
+      const statusRows = strats.by_status
+        ? Object.entries(strats.by_status).map(([k, v]) => _telemRow(k, String(v)))
+        : [];
 
-          <div class="telem-service">
-            <h3>Dashboard <span class="badge badge-ok">ok</span></h3>
-            <div class="telem-row"><span class="telem-key">Region</span><span class="telem-val">${dash.region || '-'}</span></div>
-            <div class="telem-row"><span class="telem-key">Table</span><span class="telem-val">${dash.table_name || '-'}</span></div>
-          </div>
-
-          <div class="telem-service">
-            <h3>Strategies</h3>
-            <div class="telem-row"><span class="telem-key">Total</span><span class="telem-val">${strats.total != null ? strats.total : '-'}</span></div>
-            ${strats.by_status ? Object.entries(strats.by_status).map(([k,v]) =>
-              `<div class="telem-row"><span class="telem-key">${k}</span><span class="telem-val">${v}</span></div>`
-            ).join('') : ''}
-          </div>
-
-          <div class="telem-service">
-            <h3>Events</h3>
-            <div class="telem-row"><span class="telem-key">Recent Events</span><span class="telem-val">${events.recent_count != null ? events.recent_count : '-'}</span></div>
-          </div>
-        </div>
-
-        <div id="metric-charts-panel" style="margin-top:12px;"></div>
-        <div id="cost-panel" style="margin-top:12px;"></div>
-
-        <div style="text-align:right;padding:8px 0;font-size:0.7rem;color:var(--dim)">
-          Last refreshed: ${new Date().toLocaleTimeString()}
-          <button class="btn" style="margin-left:8px;padding:2px 8px;font-size:0.7rem;" onclick="loadTelemetry()">Refresh</button>
-        </div>`;
+      mount(container,
+        el('div', {class: 'telem-grid'},
+          el('div', {class: 'telem-service'},
+            el('h3', {}, 'Trading Service ', tradingBadge),
+            _telemRow('Uptime', fmtDuration(telem.uptime_seconds)),
+            _telemRow('Tick Rate', (telem.tick_rate_per_min || '-') + ' / min'),
+            _telemRow('Tick Interval', (telem.tick_interval || '-') + 's'),
+            _telemRow('Last Tick', '#' + (ts.last_tick != null ? ts.last_tick : '-')),
+            _telemRow('Snapshot Age',
+              ts.last_snapshot_age_seconds != null
+                ? ts.last_snapshot_age_seconds + 's' : '-'),
+            _telemRow('Active Bots',
+              telem.active_bots != null ? String(telem.active_bots) : '-'),
+            _telemRow('Watched Symbols', watchedLabel),
+            _telemRow('Trades Executed',
+              telem.trades_executed != null ? String(telem.trades_executed) : '-',
+              'positive'),
+            _telemRow('Trades Rejected',
+              telem.trades_rejected != null ? String(telem.trades_rejected) : '-',
+              'negative'),
+          ),
+          el('div', {class: 'telem-service'},
+            el('h3', {}, 'Broker (Alpaca) ', brokerBadge),
+            _telemRow('Status', telem.broker_status || 'unknown'),
+            telem.broker_last_error
+              ? _telemRow('Last Error', telem.broker_last_error, 'negative')
+              : _telemRow('Last Error', 'None', 'dim'),
+          ),
+          el('div', {class: 'telem-service'},
+            el('h3', {}, 'DynamoDB ', el('span',
+              {class: 'badge badge-' + (db.status || 'unknown')},
+              db.status || 'unknown')),
+            _telemRow('Table', db.table_name || '-'),
+            _telemRow('Table Status', db.table_status || '-'),
+            _telemRow('Item Count',
+              db.item_count != null ? String(db.item_count) : '-'),
+            _telemRow('Size',
+              db.size_bytes != null
+                ? (db.size_bytes / 1024).toFixed(1) + ' KB' : '-'),
+          ),
+          el('div', {class: 'telem-service'},
+            el('h3', {}, 'Dashboard ',
+              el('span', {class: 'badge badge-ok'}, 'ok')),
+            _telemRow('Region', dash.region || '-'),
+            _telemRow('Table', dash.table_name || '-'),
+          ),
+          el('div', {class: 'telem-service'},
+            el('h3', {}, 'Strategies'),
+            _telemRow('Total',
+              strats.total != null ? String(strats.total) : '-'),
+            ...statusRows,
+          ),
+          el('div', {class: 'telem-service'},
+            el('h3', {}, 'Events'),
+            _telemRow('Recent Events',
+              events.recent_count != null ? String(events.recent_count) : '-'),
+          ),
+        ),
+        el('div', {id: 'metric-charts-panel', style: 'margin-top:12px;'}),
+        el('div', {id: 'cost-panel', style: 'margin-top:12px;'}),
+        el('div', {
+          style: 'text-align:right;padding:8px 0;font-size:0.7rem;color:var(--dim);',
+        },
+          'Last refreshed: ', new Date().toLocaleTimeString(), ' ',
+          el('button', {
+            class: 'btn',
+            style: 'margin-left:8px;padding:2px 8px;font-size:0.7rem;',
+            onClick: () => loadTelemetry(),
+          }, 'Refresh'),
+        ),
+      );
       // Costs are sysadmin-only. The endpoint returns 403 for other users,
       // which we surface as a muted notice rather than an error.
       loadCosts();
       // Metric charts pull from /api/metrics/query (EMF → CloudWatch).
-      // Last 1h, 1-minute buckets. Failures render inline as a muted
-      // placeholder rather than an error — same pattern as other
-      // optional telemetry panels.
       loadMetricCharts();
     } catch(e) {
-      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:16px;">Failed to load telemetry: ' + e.message + '</div>';
+      mount(container, el('div',
+        {style: 'color:var(--red);font-size:0.85rem;padding:16px;'},
+        'Failed to load telemetry: ', String(e.message || e),
+      ));
     }
   }
 
@@ -2226,32 +2270,41 @@
   async function loadMetricCharts() {
     const panel = $('metric-charts-panel');
     if (!panel) return;
-    panel.innerHTML = `<div class="telem-service telem-full">
-      <h3>Metric charts (EMF, last 1h)
-        <span class="badge badge-active" style="font-size:0.65rem;">
-          CloudWatch
-        </span>
-      </h3>
-      <div style="font-size:0.7rem;color:var(--dim);margin-bottom:8px;">
-        Decision latency + broker intent throughput. Deploy markers
-        (vertical amber dashes) overlay CI pushes so a latency regression
-        lines up with the deploy that caused it.
-      </div>
-      <div class="grid" style="gap:12px;grid-template-columns:1fr 1fr;">
-        <div>
-          <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
-            agent.decision.latency_ms — strategy agents, p95
-          </div>
-          <canvas id="chart-latency" style="width:100%;height:140px;"></canvas>
-        </div>
-        <div>
-          <div style="font-size:0.7rem;color:var(--dim);margin-bottom:4px;">
-            broker.intent.received.count — all orgs, per min
-          </div>
-          <canvas id="chart-intent" style="width:100%;height:140px;"></canvas>
-        </div>
-      </div>
-    </div>`;
+    mount(panel, el('div', {class: 'telem-service telem-full'},
+      el('h3', {},
+        'Metric charts (EMF, last 1h) ',
+        el('span', {class: 'badge badge-active', style: 'font-size:0.65rem;'},
+          'CloudWatch'),
+      ),
+      el('div', {style: 'font-size:0.7rem;color:var(--dim);margin-bottom:8px;'},
+        'Decision latency + broker intent throughput. Deploy markers ',
+        '(vertical amber dashes) overlay CI pushes so a latency regression ',
+        'lines up with the deploy that caused it.',
+      ),
+      el('div', {
+        class: 'grid',
+        style: 'gap:12px;grid-template-columns:1fr 1fr;',
+      },
+        el('div', {},
+          el('div',
+            {style: 'font-size:0.7rem;color:var(--dim);margin-bottom:4px;'},
+            'agent.decision.latency_ms — strategy agents, p95'),
+          el('canvas', {
+            id: 'chart-latency',
+            style: 'width:100%;height:140px;',
+          }),
+        ),
+        el('div', {},
+          el('div',
+            {style: 'font-size:0.7rem;color:var(--dim);margin-bottom:4px;'},
+            'broker.intent.received.count — all orgs, per min'),
+          el('canvas', {
+            id: 'chart-intent',
+            style: 'width:100%;height:140px;',
+          }),
+        ),
+      ),
+    ));
 
     const [latency, intent, deploys] = await Promise.all([
       _queryMetric(
@@ -2283,15 +2336,20 @@
     try {
       const resp = await fetch('/api/costs');
       if (resp.status === 403) {
-        panel.innerHTML = '<div style="color:var(--dim);font-size:0.75rem;padding:8px 0;">Infrastructure cost is sysadmin-only.</div>';
+        mount(panel, el('div',
+          {style: 'color:var(--dim);font-size:0.75rem;padding:8px 0;'},
+          'Infrastructure cost is sysadmin-only.',
+        ));
         return;
       }
       const data = await resp.json();
       if (data.error) {
-        panel.innerHTML = `<div class="telem-service telem-full">
-          <h3>Infrastructure Cost <span class="badge badge-error">error</span></h3>
-          <div style="color:var(--red);font-size:0.8rem;">${escapeHtml(data.error)}</div>
-        </div>`;
+        mount(panel, el('div', {class: 'telem-service telem-full'},
+          el('h3', {}, 'Infrastructure Cost ',
+            el('span', {class: 'badge badge-error'}, 'error')),
+          el('div', {style: 'color:var(--red);font-size:0.8rem;'},
+            String(data.error)),
+        ));
         return;
       }
       const daily = data.daily || [];
@@ -2300,73 +2358,113 @@
       const ecsBreakdown = data.ecs_breakdown || [];
       const taskAlloc = data.task_allocation || [];
 
-      // Daily trend bars.
+      const sectionHeader = (text) => el('div', {
+        style: 'margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;',
+      }, text);
+
+      // Daily trend bars. daily[i].date is a server-derived YYYY-MM-DD
+      // string but still rendered as text.
       const maxDay = Math.max(...daily.map(d => d.total || 0), 0.001);
-      const bars = daily.map(d => {
-        const pct = Math.max(2, (d.total / maxDay) * 100);
-        return `<div style="display:flex;align-items:center;gap:8px;font-size:0.72rem;padding:1px 0;">
-          <span style="color:var(--dim);min-width:72px;">${d.date}</span>
-          <div style="flex:1;height:10px;background:var(--bg);border-radius:2px;overflow:hidden;">
-            <div style="height:100%;width:${pct}%;background:var(--blue);"></div>
-          </div>
-          <span style="min-width:60px;text-align:right;">$${(d.total || 0).toFixed(2)}</span>
-        </div>`;
-      }).join('');
+      const bars = daily.length
+        ? daily.map(d => {
+            const pct = Math.max(2, (d.total / maxDay) * 100);
+            return el('div', {
+              style: 'display:flex;align-items:center;gap:8px;font-size:0.72rem;padding:1px 0;',
+            },
+              el('span',
+                {style: 'color:var(--dim);min-width:72px;'},
+                d.date || ''),
+              el('div', {
+                style: 'flex:1;height:10px;background:var(--bg);border-radius:2px;overflow:hidden;',
+              },
+                el('div', {
+                  style: `height:100%;width:${pct}%;background:var(--blue);`,
+                }),
+              ),
+              el('span',
+                {style: 'min-width:60px;text-align:right;'},
+                '$', (d.total || 0).toFixed(2)),
+            );
+          })
+        : [el('div',
+            {style: 'color:var(--dim);font-size:0.72rem;'},
+            'No data yet.')];
 
-      // By-service table. Limit to top 8 to keep the panel compact.
-      const svcRows = byService.slice(0, 8).map(row => {
-        const pct = total > 0 ? (row.cost / total * 100) : 0;
-        return `<div class="telem-row" style="gap:8px;">
-          <span class="telem-key" style="flex:1;">${escapeHtml(row.service)}</span>
-          <span class="telem-val" style="min-width:70px; text-align:right;">$${row.cost.toFixed(2)}</span>
-          <span style="color:var(--dim); min-width:40px; text-align:right; font-size:0.72rem;">${pct.toFixed(1)}%</span>
-        </div>`;
-      }).join('');
+      // By-service, top 8. row.service is a string like "Amazon DynamoDB".
+      const svcRows = byService.length
+        ? byService.slice(0, 8).map(row => {
+            const pct = total > 0 ? (row.cost / total * 100) : 0;
+            return el('div', {class: 'telem-row', style: 'gap:8px;'},
+              el('span', {class: 'telem-key', style: 'flex:1;'},
+                row.service || ''),
+              el('span', {
+                class: 'telem-val',
+                style: 'min-width:70px;text-align:right;',
+              }, '$', row.cost.toFixed(2)),
+              el('span', {
+                style: 'color:var(--dim);min-width:40px;text-align:right;font-size:0.72rem;',
+              }, pct.toFixed(1), '%'),
+            );
+          })
+        : [el('div',
+            {style: 'color:var(--dim);font-size:0.72rem;'},
+            'No services billed yet.')];
 
-      // ECS usage-type breakdown.
-      const ecsRows = ecsBreakdown.map(row => `
-        <div class="telem-row">
-          <span class="telem-key" style="font-size:0.72rem;">${escapeHtml(row.usage_type)}</span>
-          <span class="telem-val" style="font-size:0.75rem;">$${row.cost.toFixed(2)}</span>
-        </div>
-      `).join('');
+      const ecsRows = ecsBreakdown.map(row => el('div', {class: 'telem-row'},
+        el('span', {class: 'telem-key', style: 'font-size:0.72rem;'},
+          row.usage_type || ''),
+        el('span', {class: 'telem-val', style: 'font-size:0.75rem;'},
+          '$', row.cost.toFixed(2)),
+      ));
 
-      // Task allocation — clearly flagged as estimate.
-      const allocRows = taskAlloc.map(row => `
-        <div class="telem-row">
-          <span class="telem-key">${escapeHtml(row.component)} <span style="color:var(--yellow);font-size:0.65rem;">est</span></span>
-          <span class="telem-val">$${row.total.toFixed(2)}</span>
-        </div>
-      `).join('');
+      const allocRows = taskAlloc.map(row => el('div', {class: 'telem-row'},
+        el('span', {class: 'telem-key'},
+          row.component || '', ' ',
+          el('span',
+            {style: 'color:var(--yellow);font-size:0.65rem;'},
+            'est'),
+        ),
+        el('span', {class: 'telem-val'}, '$', row.total.toFixed(2)),
+      ));
 
-      panel.innerHTML = `<div class="telem-service telem-full">
-        <h3>Infrastructure Cost (30d) <span class="badge badge-active">AWS billed</span></h3>
-        <div class="telem-row"><span class="telem-key">Total (30d)</span><span class="telem-val">$${total.toFixed(2)}</span></div>
-        <div class="telem-row"><span class="telem-key">Source</span><span class="telem-val" style="font-size:0.7rem;">Cost Explorer (authoritative)</span></div>
-
-        <div style="margin-top:12px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">Daily trend</div>
-        <div style="margin-top:4px;">${bars || '<div style="color:var(--dim);font-size:0.72rem;">No data yet.</div>'}</div>
-
-        <div style="margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">By AWS service</div>
-        <div style="margin-top:4px;">${svcRows || '<div style="color:var(--dim);font-size:0.72rem;">No services billed yet.</div>'}</div>
-
-        ${ecsBreakdown.length ? `
-          <div style="margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">ECS detail</div>
-          <div style="margin-top:4px;">${ecsRows}</div>
-        ` : ''}
-
-        ${taskAlloc.length ? `
-          <div style="margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">
-            Task-def allocation
-            <span style="color:var(--yellow);text-transform:none;letter-spacing:0;">
-              · est (derived from CDK CPU/memory specs — not from tags)
-            </span>
-          </div>
-          <div style="margin-top:4px;">${allocRows}</div>
-        ` : ''}
-      </div>`;
+      mount(panel, el('div', {class: 'telem-service telem-full'},
+        el('h3', {}, 'Infrastructure Cost (30d) ',
+          el('span', {class: 'badge badge-active'}, 'AWS billed'),
+        ),
+        _telemRow('Total (30d)', '$' + total.toFixed(2)),
+        el('div', {class: 'telem-row'},
+          el('span', {class: 'telem-key'}, 'Source'),
+          el('span',
+            {class: 'telem-val', style: 'font-size:0.7rem;'},
+            'Cost Explorer (authoritative)'),
+        ),
+        el('div', {
+          style: 'margin-top:12px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;',
+        }, 'Daily trend'),
+        el('div', {style: 'margin-top:4px;'}, bars),
+        sectionHeader('By AWS service'),
+        el('div', {style: 'margin-top:4px;'}, svcRows),
+        ecsBreakdown.length ? sectionHeader('ECS detail') : null,
+        ecsBreakdown.length ? el('div', {style: 'margin-top:4px;'}, ecsRows) : null,
+        taskAlloc.length
+          ? el('div', {
+              style: 'margin-top:14px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;',
+            },
+              'Task-def allocation ',
+              el('span', {
+                style: 'color:var(--yellow);text-transform:none;letter-spacing:0;',
+              }, '· est (derived from CDK CPU/memory specs — not from tags)'),
+            )
+          : null,
+        taskAlloc.length
+          ? el('div', {style: 'margin-top:4px;'}, allocRows)
+          : null,
+      ));
     } catch(e) {
-      panel.innerHTML = '<div style="color:var(--red);font-size:0.75rem;">Failed to load cost: ' + escapeHtml(e.message) + '</div>';
+      mount(panel, el('div',
+        {style: 'color:var(--red);font-size:0.75rem;'},
+        'Failed to load cost: ', String(e.message || e),
+      ));
     }
   }
   window.loadCosts = loadCosts;
