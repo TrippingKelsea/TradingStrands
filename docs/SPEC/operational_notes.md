@@ -438,6 +438,41 @@ Four defenses land together, each independently closing the bug class:
   used the same "one helper + AST guard" shape, chosen deliberately
   so the two hardening patterns are recognizable by future operators.
 
+## Dependency updates (Dependabot)
+
+`.github/dependabot.yml` enables weekly dependency updates in two
+ecosystems: Python (pip) and GitHub Actions. Security advisories fire
+immediately regardless of the schedule — the weekly cadence only
+governs non-security feature bumps.
+
+**Grouping.** Related packages batch into one PR so review + CI run
+once per logical upgrade rather than once per package:
+
+- `aws-deps` — boto3, botocore, awslambdaric, moto, mypy-boto3-*
+- `llm-deps` — strands-agents, bedrock-agentcore, anthropic
+- `broker-deps` — alpaca-py, robin-stocks, yfinance
+- `dev-deps` — pytest, pytest-*, ruff, mypy
+- `web-deps` — fastapi, uvicorn, starlette, jinja2, etc.
+- `ci-actions` — every GitHub Action we use
+
+A dep not covered by any group gets its own PR. Major bumps always
+get individual PRs regardless of group so they get a deliberate
+review (per-group `update-types` only covers minor + patch).
+
+**Review expectations.** Dependabot PRs go through the same CI as
+everything else (lint, type-check, test, deploy). A green dependabot
+PR is mergeable; a red one blocks on the usual debug path. The
+point of grouping is that a red CI on a group PR tells you "one of
+these five deps broke something" — bisect by reverting one package
+at a time in the branch.
+
+**SHA pinning for Actions.** The `github-actions` ecosystem
+automatically rewrites `@v4` / `@v6` tag pins to full commit SHAs.
+This is the recommended posture — a compromised-tag supply-chain
+attack on a popular action (e.g. someone moves `@v4` to a malicious
+SHA) cannot affect CI because we pin by SHA. Readability cost is
+small; security value is substantial.
+
 ## References
 
 - [multi_tenancy.md](./multi_tenancy.md) — authz and schema-evolution rules

@@ -1,0 +1,113 @@
+# Dependabot configuration.
+#
+# Two ecosystems: Python package deps (pip, driven by pyproject.toml
+# + uv.lock) and the GitHub Actions we use in .github/workflows.
+#
+# Grouped updates batch related deps into single PRs so review + CI
+# happen once per logical upgrade rather than once per package. A
+# dep not covered by any group gets its own PR.
+#
+# Security updates are always immediate regardless of schedule — this
+# file controls the cadence of *feature* bumps. See
+# https://docs.github.com/en/code-security/dependabot/dependabot-security-updates
+# for the separate security-alert flow.
+
+version: 2
+updates:
+  # ── Python dependencies ────────────────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      # Pick a minute Dependabot's fleet doesn't all land on at once.
+      time: "07:13"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 10
+    # Conservative versioning posture for trading infrastructure.
+    # Minor + patch bumps batch per group below; major bumps land as
+    # individual PRs so they get a deliberate review.
+    groups:
+      aws-deps:
+        patterns:
+          - "boto3*"
+          - "botocore*"
+          - "awslambdaric*"
+          - "moto*"
+          - "mypy-boto3-*"
+          - "types-boto3*"
+        update-types:
+          - "minor"
+          - "patch"
+      llm-deps:
+        patterns:
+          - "strands-agents*"
+          - "bedrock-agentcore*"
+          - "anthropic*"
+        update-types:
+          - "minor"
+          - "patch"
+      broker-deps:
+        patterns:
+          - "alpaca-py"
+          - "robin-stocks"
+          - "yfinance"
+        update-types:
+          - "minor"
+          - "patch"
+      dev-deps:
+        patterns:
+          - "pytest*"
+          - "ruff"
+          - "mypy*"
+          - "pytest-*"
+        update-types:
+          - "minor"
+          - "patch"
+      web-deps:
+        patterns:
+          - "fastapi*"
+          - "uvicorn*"
+          - "starlette*"
+          - "jinja2"
+          - "python-multipart"
+          - "itsdangerous"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+
+  # ── GitHub Actions ────────────────────────────────────────────────
+  # CI pipeline actions. Our workflow pins them by major tag today
+  # (actions/checkout@v4, astral-sh/setup-uv@v6,
+  # aws-actions/configure-aws-credentials@v4, amazon-ecr-login@v2).
+  # Dependabot will rewrite these to SHA pins, which is the
+  # recommended security practice for third-party actions — a
+  # compromised-tag supply-chain attack against a popular action
+  # cannot then affect our CI.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:17"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    groups:
+      ci-actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci-deps"
+      include: "scope"
