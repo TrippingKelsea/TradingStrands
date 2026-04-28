@@ -708,44 +708,78 @@
       const strategies = await resp.json();
 
       if (strategies.length === 0) {
-        container.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:16px;">No strategies deployed yet.</div>';
+        mount(container, el('div',
+          {style: 'color:var(--dim);font-size:0.85rem;padding:16px;'},
+          'No strategies deployed yet.',
+        ));
         return;
       }
 
-      container.innerHTML = '';
-      strategies.forEach(s => {
-        const card = document.createElement('div');
-        card.className = 'strategy-card';
-        card.style.cursor = 'pointer';
-        const statusClass = s.status === 'active' ? 'badge-active' : s.status === 'paused' ? 'badge-paused' : 'badge-stopped';
+      clear(container);
+      for (const s of strategies) {
+        const statusClass = s.status === 'active' ? 'badge-active'
+          : s.status === 'paused' ? 'badge-paused' : 'badge-stopped';
         const syms = (s.symbols || []);
-        const symsLabel = syms.length ? syms.map(sym => '<span>' + sym + '</span>').join('') : '<span style="color:var(--dim);font-style:italic">dynamic selection</span>';
-        card.innerHTML = `
-          <div class="strat-header">
-            <div>
-              <span class="strat-name">${s.name}</span>
-              <span class="badge ${statusClass}">${s.status}</span>
-              <span class="badge svc-badge" data-sid="${s.strategy_id}" style="background:var(--border);color:var(--dim)">service: …</span>
-            </div>
-            <div class="strat-actions">
-              ${s.status === 'active' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','paused')">Pause</button>` : ''}
-              ${s.status === 'paused' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','active')">Resume</button>` : ''}
-              ${s.status !== 'stopped' ? `<button onclick="event.stopPropagation();stratAction('${s.strategy_id}','stopped')">Stop</button>` : ''}
-              <button class="danger" onclick="event.stopPropagation();stratDelete('${s.strategy_id}')">Delete</button>
-            </div>
-          </div>
-          <div class="strat-meta">Capital: $${s.capital} | Created: ${new Date(s.created_at * 1000).toLocaleDateString()}</div>
-          <div class="strat-symbols">${symsLabel}</div>`;
-        card.addEventListener('click', () => openStrategyDetail(s.strategy_id));
+
+        // Buttons per-status; closures capture s.strategy_id by
+        // reference so the id never needs string-escaping.
+        const actionButtons = [];
+        if (s.status === 'active') actionButtons.push(el('button', {
+          onClick: (e) => { e.stopPropagation(); stratAction(s.strategy_id, 'paused'); },
+        }, 'Pause'));
+        if (s.status === 'paused') actionButtons.push(el('button', {
+          onClick: (e) => { e.stopPropagation(); stratAction(s.strategy_id, 'active'); },
+        }, 'Resume'));
+        if (s.status !== 'stopped') actionButtons.push(el('button', {
+          onClick: (e) => { e.stopPropagation(); stratAction(s.strategy_id, 'stopped'); },
+        }, 'Stop'));
+        actionButtons.push(el('button', {
+          class: 'danger',
+          onClick: (e) => { e.stopPropagation(); stratDelete(s.strategy_id); },
+        }, 'Delete'));
+
+        const card = el('div', {
+          class: 'strategy-card',
+          style: 'cursor:pointer;',
+          onClick: () => openStrategyDetail(s.strategy_id),
+        },
+          el('div', {class: 'strat-header'},
+            el('div', {},
+              el('span', {class: 'strat-name'}, s.name || ''),
+              ' ',
+              el('span', {class: 'badge ' + statusClass}, s.status || ''),
+              ' ',
+              el('span', {
+                class: 'badge svc-badge',
+                'data-sid': s.strategy_id,
+                style: 'background:var(--border);color:var(--dim);',
+              }, 'service: …'),
+            ),
+            el('div', {class: 'strat-actions'}, actionButtons),
+          ),
+          el('div', {class: 'strat-meta'},
+            'Capital: $', s.capital || '',
+            ' | Created: ',
+            new Date(s.created_at * 1000).toLocaleDateString(),
+          ),
+          el('div', {class: 'strat-symbols'},
+            syms.length
+              ? syms.map(sym => el('span', {}, sym))
+              : el('span', {style: 'color:var(--dim);font-style:italic;'}, 'dynamic selection'),
+          ),
+        );
         container.appendChild(card);
-      });
+      }
 
       // Fire-and-forget service-state fetches per card. Kept out of the
       // initial render so slow ECS calls don't block the strategies
       // list from appearing.
-      strategies.forEach(s => fetchServiceState(s.strategy_id));
+      for (const s of strategies) fetchServiceState(s.strategy_id);
     } catch(e) {
-      container.innerHTML = '<div style="color:var(--red);font-size:0.85rem;padding:16px;">Failed to load strategies.</div>';
+      mount(container, el('div',
+        {style: 'color:var(--red);font-size:0.85rem;padding:16px;'},
+        'Failed to load strategies.',
+      ));
     }
   }
 
@@ -1026,46 +1060,51 @@
   }
 
   async function loadToolCalls(sid, start, end) {
-    const el = $('detail-tool-calls');
-    el.textContent = 'Loading…';
+    const container = $('detail-tool-calls');
+    container.textContent = 'Loading…';
     try {
       const resp = await fetch(
         '/api/strategies/' + sid + '/tool-calls?start=' + start + '&end=' + end,
       );
       if (!resp.ok) {
-        el.textContent = 'Tool-call feed unavailable (' + resp.status + ').';
+        container.textContent = 'Tool-call feed unavailable (' + resp.status + ').';
         return;
       }
       const body = await resp.json();
       const calls = body.calls || [];
       if (!calls.length) {
-        el.textContent = 'No tool calls in this range.';
+        container.textContent = 'No tool calls in this range.';
         return;
       }
-      el.innerHTML = calls.map(c => {
-        const outcomeColor = c.outcome === 'ok' ? 'var(--green)' :
-          c.outcome === 'cache_hit' ? 'var(--blue)' :
-          c.outcome === 'quota_exceeded' ? 'var(--yellow)' :
-          'var(--red)';
-        return '<div style="display:flex;gap:6px;padding:3px 0;border-bottom:1px solid var(--border);font-size:0.72rem;">'
-          + '<span style="color:var(--dim);min-width:108px;">' + (c.ts || '') + '</span>'
-          + '<span style="font-weight:bold;min-width:60px;">' + (c.tool || '') + '</span>'
-          + '<span style="color:var(--dim);min-width:48px;">' + (c.symbol || '') + '</span>'
-          + '<span style="color:' + outcomeColor + ';">' + (c.outcome || '') + '</span>'
-          + '</div>';
-      }).join('');
+      // All four fields (ts, tool, symbol, outcome) are user-derived —
+      // `symbol` comes from a strategy's symbols list and can carry any
+      // string an operator typed. Render via el(), which emits text
+      // nodes for strings and auto-escapes them.
+      mount(container, calls.map(c => {
+        const outcomeColor = c.outcome === 'ok' ? 'var(--green)'
+          : c.outcome === 'cache_hit' ? 'var(--blue)'
+          : c.outcome === 'quota_exceeded' ? 'var(--yellow)'
+          : 'var(--red)';
+        return el('div',
+          {style: 'display:flex;gap:6px;padding:3px 0;border-bottom:1px solid var(--border);font-size:0.72rem;'},
+          el('span', {style: 'color:var(--dim);min-width:108px;'}, c.ts || ''),
+          el('span', {style: 'font-weight:bold;min-width:60px;'}, c.tool || ''),
+          el('span', {style: 'color:var(--dim);min-width:48px;'}, c.symbol || ''),
+          el('span', {style: {color: outcomeColor}}, c.outcome || ''),
+        );
+      }));
     } catch(e) {
-      el.textContent = 'Tool-call fetch failed.';
+      container.textContent = 'Tool-call fetch failed.';
     }
   }
 
   async function loadLedgerSummary(sid) {
-    const el = $('detail-ledger');
-    el.textContent = 'Loading…';
+    const container = $('detail-ledger');
+    container.textContent = 'Loading…';
     try {
       const resp = await fetch('/api/snapshot');
       if (!resp.ok) {
-        el.textContent = 'Ledger snapshot unavailable.';
+        container.textContent = 'Ledger snapshot unavailable.';
         return;
       }
       const snap = await resp.json();
@@ -1073,24 +1112,46 @@
       const ledgers = snap.ledgers || {};
       const l = ledgers[botId];
       if (!l) {
-        el.textContent = 'No ledger snapshot for this bot yet.';
+        container.textContent = 'No ledger snapshot for this bot yet.';
         return;
       }
       const positions = (l.open_positions || []);
-      const posHtml = positions.length
-        ? positions.map(p =>
-            '<div class="telem-row"><span class="telem-key">' + p.symbol + '</span>'
-            + '<span class="telem-val">' + p.quantity + ' @ $' + p.burdened_cost_basis + '</span></div>'
-          ).join('')
-        : '<div style="color:var(--dim);font-size:0.72rem;">No open positions.</div>';
-      el.innerHTML =
-        '<div class="telem-row"><span class="telem-key">Equity</span><span class="telem-val">$' + (l.equity || '?') + '</span></div>'
-        + '<div class="telem-row"><span class="telem-key">Realized PnL</span><span class="telem-val">$' + (l.realized_pnl || '0') + '</span></div>'
-        + '<div class="telem-row"><span class="telem-key">Drawdown</span><span class="telem-val">' + (l.drawdown_pct ? (parseFloat(l.drawdown_pct) * 100).toFixed(2) + '%' : '0%') + '</span></div>'
-        + '<div style="margin-top:6px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;">Positions</div>'
-        + posHtml;
+      // position.symbol traces back to strategy.symbols (user-authored).
+      // el() auto-escapes the text.
+      const positionsSection = positions.length
+        ? positions.map(p => el('div', {class: 'telem-row'},
+            el('span', {class: 'telem-key'}, p.symbol || ''),
+            el('span', {class: 'telem-val'},
+              p.quantity || '', ' @ $', p.burdened_cost_basis || '',
+            ),
+          ))
+        : el('div', {style: 'color:var(--dim);font-size:0.72rem;'},
+            'No open positions.');
+
+      mount(container,
+        el('div', {class: 'telem-row'},
+          el('span', {class: 'telem-key'}, 'Equity'),
+          el('span', {class: 'telem-val'}, '$', (l.equity || '?')),
+        ),
+        el('div', {class: 'telem-row'},
+          el('span', {class: 'telem-key'}, 'Realized PnL'),
+          el('span', {class: 'telem-val'}, '$', (l.realized_pnl || '0')),
+        ),
+        el('div', {class: 'telem-row'},
+          el('span', {class: 'telem-key'}, 'Drawdown'),
+          el('span', {class: 'telem-val'},
+            l.drawdown_pct
+              ? (parseFloat(l.drawdown_pct) * 100).toFixed(2) + '%'
+              : '0%',
+          ),
+        ),
+        el('div',
+          {style: 'margin-top:6px;font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px;'},
+          'Positions'),
+        positionsSection,
+      );
     } catch(e) {
-      el.textContent = 'Ledger fetch failed.';
+      container.textContent = 'Ledger fetch failed.';
     }
   }
 
@@ -1182,25 +1243,56 @@
       }
       const proposals = await pr.json();
       if (!proposals.length) {
-        propsEl.innerHTML = '<div style="color:var(--dim);font-size:0.72rem;">No proposals yet.</div>';
+        mount(propsEl, el('div',
+          {style: 'color:var(--dim);font-size:0.72rem;'},
+          'No proposals yet.',
+        ));
         return;
       }
-      propsEl.innerHTML = proposals.map(p => {
-        const pendingControls = p.status === 'pending'
-          ? '<button class="btn" onclick="applyProposal(\'' + s.strategy_id + '\',\'' + p.proposal_id + '\')" style="padding:2px 8px;font-size:0.7rem;">Apply</button>'
-            + ' <button class="btn" onclick="rejectProposal(\'' + s.strategy_id + '\',\'' + p.proposal_id + '\')" style="padding:2px 8px;font-size:0.7rem;">Reject</button>'
-          : '';
-        return '<div style="border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:8px;">'
-          + '<div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;">'
-          + '<span class="badge ' + (p.status === 'pending' ? 'badge-paused' : p.status === 'applied' ? 'badge-active' : 'badge-stopped') + '">' + p.status + '</span>'
-          + '<span style="color:var(--dim);font-size:0.7rem;">' + _fmtTs(p.created_at) + '</span>'
-          + '<span style="flex:1;"></span>'
-          + pendingControls
-          + '</div>'
-          + '<div style="font-size:0.72rem;color:var(--dim);margin-bottom:4px;">' + (p.rationale || '') + '</div>'
-          + '<pre style="white-space:pre-wrap;background:var(--surface);padding:6px;font-size:0.72rem;margin:0;">' + (p.proposed_markdown || '') + '</pre>'
-          + '</div>';
-      }).join('');
+      // Proposals carry LLM-generated rationale + proposed_markdown
+      // that the self-critique agent wrote. Both are hostile input;
+      // el() emits text nodes so raw HTML can never execute.
+      // Apply/reject buttons close over the ids, so nothing about
+      // the strategy_id or proposal_id needs string-escaping.
+      mount(propsEl, proposals.map(p => {
+        const badgeClass = 'badge ' + (
+          p.status === 'pending' ? 'badge-paused'
+          : p.status === 'applied' ? 'badge-active'
+          : 'badge-stopped'
+        );
+        const controls = [];
+        if (p.status === 'pending') {
+          controls.push(el('button', {
+            class: 'btn',
+            style: 'padding:2px 8px;font-size:0.7rem;',
+            onClick: () => applyProposal(s.strategy_id, p.proposal_id),
+          }, 'Apply'));
+          controls.push(' ');
+          controls.push(el('button', {
+            class: 'btn',
+            style: 'padding:2px 8px;font-size:0.7rem;',
+            onClick: () => rejectProposal(s.strategy_id, p.proposal_id),
+          }, 'Reject'));
+        }
+        return el('div',
+          {style: 'border:1px solid var(--border);border-radius:4px;padding:8px;margin-bottom:8px;'},
+          el('div',
+            {style: 'display:flex;gap:8px;align-items:center;margin-bottom:4px;'},
+            el('span', {class: badgeClass}, p.status || ''),
+            el('span', {style: 'color:var(--dim);font-size:0.7rem;'}, _fmtTs(p.created_at)),
+            el('span', {style: 'flex:1;'}),
+            controls,
+          ),
+          el('div',
+            {style: 'font-size:0.72rem;color:var(--dim);margin-bottom:4px;'},
+            p.rationale || '',
+          ),
+          el('pre',
+            {style: 'white-space:pre-wrap;background:var(--surface);padding:6px;font-size:0.72rem;margin:0;'},
+            p.proposed_markdown || '',
+          ),
+        );
+      }));
     } catch(e) {
       propsEl.textContent = 'Proposals fetch failed.';
     }
