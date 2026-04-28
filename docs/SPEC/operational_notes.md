@@ -362,6 +362,82 @@ the table is single-PK and the access patterns are narrow enough
 that a thin helper plus a CI check closes the door without paying
 for indirection on every row read.
 
+## Dashboard XSS hardening (render helpers + CSP + input validators)
+
+### Background
+
+A security review of this session's commits turned up three stored-XSS
+sites where user-derived fields were concatenated into `innerHTML`
+string templates without escaping: the Proposals list, the Tool-calls
+feed, and the Ledger positions panel, all on the per-strategy detail
+view. The injection vectors were:
+
+- `symbols` on a strategy (no server-side format validation; echoed by
+  the bot into EMF tool-call records, rendered back via the feed)
+- `rationale` / `proposed_markdown` on self-critique proposals (LLM
+  output from Bedrock, written verbatim into DDB)
+- position `symbol` on the ledger panel (same provenance as above)
+
+Same-org exploitation is real: operator-role users can author
+strategies; orgadmin / auditor / sysadmin users view the same detail
+page. An operator XSS executes in a higher-privilege user's
+authenticated session.
+
+### Hardening layers
+
+Four defenses land together, each independently closing the bug class:
+
+1. **DOM render helpers** (`dashboard/templates/base.html`'s script
+   block): `el(tag, attrs, ...children)`, `frag(...)`, `mount(container,
+   ...)`, `clear(container)`. Strings in `children` become text nodes
+   (auto-escaped); numbers stringify; other nodes mount as children.
+   Event handlers attach as function references via `attrs.onClick`,
+   not as `onclick="foo('<id>')"` strings — eliminates the class of
+   "forgot to escape the id" bugs in handler wiring.
+
+2. **Full conversion**: every `.innerHTML =` assignment in the
+   dashboard templates is replaced with `mount()`. No exceptions on
+   "this content is trusted" — the AST guard below forbids the
+   pattern outright.
+
+3. **Server-side validators** (Pydantic `@field_validator` on the
+   request bodies): `StrategyCreate.symbols` must be `^[A-Z0-9.\-]
+   {1,10}$`; `StrategyCreate.name` length + control-char rules;
+   `StrategyCreate.markdown` size cap; skill names alphanumeric;
+   tool-name path params constrained to the registry-known set. A
+   regressed renderer cannot exploit what the validator never let
+   into storage.
+
+4. **CSP + security headers middleware**: `Content-Security-Policy:
+   default-src 'self'; script-src 'self'; style-src 'self'
+   'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'`
+   plus `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+   `Referrer-Policy: same-origin`. `unsafe-inline` for style is
+   kept for now because the layout uses inline `style="..."`
+   attrs heavily; tightening to hashes/nonces is a later follow-up
+   and does not change the XSS protection posture since `script-src`
+   already forbids inline `<script>` and event-handler attributes
+   like `onerror=`.
+
+### CI guards
+
+- `tests/dashboard/test_no_inner_html.py`: walks every template
+  `<script>` block and fails if it finds `.innerHTML =` or
+  `.innerHTML +=` assignments. Mirrors the DDB `test_no_bare_scan.py`
+  pattern — a future hurried commit cannot re-introduce the bug
+  without the failing test being explicitly skipped.
+
+- `tests/dashboard/test_security_headers.py`: asserts the CSP and
+  companion headers appear on every response from the `/` and `/api/*`
+  endpoints.
+
+### Related
+
+- Security review finding at `af5cf33` motivated this work.
+- The DDB pagination sweep (see §"TODO: DDB scan pagination sweep")
+  used the same "one helper + AST guard" shape, chosen deliberately
+  so the two hardening patterns are recognizable by future operators.
+
 ## References
 
 - [multi_tenancy.md](./multi_tenancy.md) — authz and schema-evolution rules
