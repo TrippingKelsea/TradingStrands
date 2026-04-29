@@ -44,11 +44,15 @@ class MarketDataProvider:
         for symbol in symbols:
             try:
                 prices[symbol] = await self.get_price(symbol)
-            except Exception:
+            except Exception as exc:
+                # No traceback — an unsupported ticker logs on every
+                # tick, so the full stack in the log stream would
+                # drown out everything else. The symbol + exception
+                # class + message is enough for diagnosis.
                 logger.warning(
-                    "marketdata.provider.quote_failed symbol=%s",
+                    "marketdata.provider.quote_failed symbol=%s err=%s",
                     symbol,
-                    exc_info=True,
+                    f"{type(exc).__name__}: {exc}",
                 )
                 continue
         return prices

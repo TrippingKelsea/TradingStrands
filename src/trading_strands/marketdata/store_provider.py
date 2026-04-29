@@ -130,11 +130,13 @@ class StoreBackedMarketDataProvider:
         for sym in misses:
             try:
                 quote = await self._broker.get_quote(sym)
-            except Exception:
+            except Exception as exc:
+                # No traceback — repeated unsupported-symbol errors
+                # would drown out every other log line otherwise.
                 logger.warning(
-                    "store_provider.quote_failed symbol=%s",
+                    "store_provider.quote_failed symbol=%s err=%s",
                     sym,
-                    exc_info=True,
+                    f"{type(exc).__name__}: {exc}",
                 )
                 continue
             price = quote.get("price")
