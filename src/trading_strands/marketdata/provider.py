@@ -5,6 +5,10 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+import structlog
+
+logger = structlog.get_logger()
+
 
 class MarketDataProvider:
     """Aggregates market data from the broker adapter (and future sources).
@@ -25,10 +29,28 @@ class MarketDataProvider:
         return Decimal(str(price))
 
     async def get_prices(self, symbols: set[str]) -> dict[str, Decimal]:
-        """Get current prices for multiple symbols."""
+        """Get current prices for multiple symbols.
+
+        Symbol-level failures don't abort the batch. An unsupported
+        ticker (e.g. XSP on Alpaca, which doesn't carry SPX mini
+        options), a transient network blip, or a malformed quote
+        response on one symbol must not poison every bot watching
+        any other symbol. Missing symbols are omitted from the
+        returned dict; bots and the risk manager treat
+        symbols-without-prices as "no data this tick".
+        """
+
         prices: dict[str, Decimal] = {}
         for symbol in symbols:
-            prices[symbol] = await self.get_price(symbol)
+            try:
+                prices[symbol] = await self.get_price(symbol)
+            except Exception:
+                logger.warning(
+                    "marketdata.provider.quote_failed symbol=%s",
+                    symbol,
+                    exc_info=True,
+                )
+                continue
         return prices
 
     async def get_quote(self, symbol: str) -> dict[str, object]:
