@@ -287,7 +287,17 @@ class StrategyBot:
         self._ta_store = ta_store
         self._ta_enabled = ta_enabled
         self._recent_decisions: list[str] = []
-        self._max_history = 10
+        # Kept at 5 (not 10): each tick's prompt echoes this history,
+        # and Claude's rationale text is frequently 1-2KB per entry.
+        # 5 entries gives enough "what did I just do" context for the
+        # next decision without burning ~20KB/tick of re-sent content.
+        self._max_history = 5
+        # Hard cap on any single rationale stored in-memory. Full
+        # multi-paragraph LLM monologues are interesting for audit
+        # (they land in the durable memory file) but bloat the next
+        # prompt by 10-20x. Truncate here so "recent decisions" stays
+        # a summary, not a transcript.
+        self._rationale_preview_chars = 300
         # Health payload state (docs/SPEC/observability.md §"Health
         # checks"). last_decision_at is set after every successful
         # decide(). _error_ts tracks the timestamps of the last hour
@@ -483,10 +493,16 @@ class StrategyBot:
         )
 
         # Record decision for short-term in-process history (context seed
-        # on next invocation's prompt).
+        # on next invocation's prompt). Rationale is truncated to a
+        # preview so the echoed history doesn't blow up the next
+        # prompt; the full rationale still lands in the durable memory
+        # file for audit.
+        rationale = decision.rationale or ""
+        if len(rationale) > self._rationale_preview_chars:
+            rationale = rationale[: self._rationale_preview_chars] + "…"
         self._recent_decisions.append(
             f"{decision.action} {decision.symbol} x{decision.quantity}: "
-            f"{decision.rationale}"
+            f"{rationale}"
         )
         if len(self._recent_decisions) > self._max_history:
             self._recent_decisions = self._recent_decisions[-self._max_history :]

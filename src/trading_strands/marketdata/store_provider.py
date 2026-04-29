@@ -20,7 +20,7 @@ provider shape matches the broker-backed version exactly.
 from __future__ import annotations
 
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import structlog
@@ -107,8 +107,17 @@ class StoreBackedMarketDataProvider:
         return Decimal(str(price))
 
     async def get_prices(self, symbols: set[str]) -> dict[str, Decimal]:
-        """Batch read. Each symbol independently hits the store, then
-        only the misses go to the broker."""
+        """Batch read. Each symbol independently hits the store; misses
+        go to the broker.
+
+        Symbol-level failures don't abort the batch. An Alpaca KeyError
+        (unsupported ticker), a network blip on a single symbol, or a
+        malformed quote response for one name must not poison every
+        bot that watches any other symbol. Missing symbols are omitted
+        from the returned dict — downstream consumers (bots, risk
+        manager) already treat symbols-without-prices as "no data this
+        tick" rather than crashing.
+        """
 
         prices: dict[str, Decimal] = {}
         misses: list[str] = []
@@ -119,12 +128,30 @@ class StoreBackedMarketDataProvider:
             else:
                 misses.append(sym)
         for sym in misses:
-            quote = await self._broker.get_quote(sym)
+            try:
+                quote = await self._broker.get_quote(sym)
+            except Exception:
+                logger.warning(
+                    "store_provider.quote_failed symbol=%s",
+                    sym,
+                    exc_info=True,
+                )
+                continue
             price = quote.get("price")
-            if isinstance(price, Decimal):
-                prices[sym] = price
-            else:
-                prices[sym] = Decimal(str(price))
+            if price is None:
+                # Broker returned a malformed quote; skip cleanly.
+                continue
+            try:
+                prices[sym] = (
+                    price if isinstance(price, Decimal)
+                    else Decimal(str(price))
+                )
+            except (InvalidOperation, ValueError):
+                logger.warning(
+                    "store_provider.price_unparseable symbol=%s price=%r",
+                    sym, price,
+                )
+                continue
         return prices
 
     async def get_quote(self, symbol: str) -> dict[str, object]:

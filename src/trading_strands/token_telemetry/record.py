@@ -56,8 +56,23 @@ def record_from_result(
         return
 
     try:
-        usage_obj = getattr(result.metrics, "accumulated_usage", None)
+        # CRITICAL: read per-invocation usage, NOT result.metrics.
+        # accumulated_usage. The accumulated field is per-Agent
+        # lifetime cumulative; using it causes each tick to re-record
+        # the running total, so N ticks record ~N² total tokens.
+        # Observed bug: Dumb Trader showed 420B input tokens across
+        # 3.5K ticks (~120M/tick, larger than Claude's 200K context).
+        # The fix is `latest_agent_invocation.usage` — the most recent
+        # invocation only.
+        metrics = getattr(result, "metrics", None)
+        if metrics is None:
+            return
+        invocation = getattr(metrics, "latest_agent_invocation", None)
+        usage_obj = getattr(invocation, "usage", None) if invocation else None
         if usage_obj is None:
+            # Fall-back path for older Strands versions that don't
+            # expose latest_agent_invocation. Better to record zero
+            # and alarm on missing data than to silently over-count.
             return
         # Strands uses a dict-like shape with camelCase keys.
         if isinstance(usage_obj, dict):

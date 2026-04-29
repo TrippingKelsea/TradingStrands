@@ -170,12 +170,24 @@ class AlpacaAdapter:
         ]
 
     async def get_quote(self, symbol: str) -> dict[str, object]:
-        """Get a current quote from Alpaca market data."""
+        """Get a current quote from Alpaca market data.
+
+        Unsupported symbols (futures tickers, index-options like XSP,
+        delisted equities) make Alpaca return a dict that doesn't
+        include the requested symbol; accessing it raises KeyError.
+        Translate to a ValueError with the symbol name so callers
+        don't have to care about Alpaca's specific raise shape.
+        """
+
         request = StockLatestQuoteRequest(symbol_or_symbols=symbol)
         quotes = await anyio.to_thread.run_sync(
             lambda: self._data.get_stock_latest_quote(request),
         )
-        quote = quotes[symbol]
+        try:
+            quote = quotes[symbol]
+        except KeyError as exc:
+            msg = f"symbol not supported by Alpaca data API: {symbol!r}"
+            raise ValueError(msg) from exc
         mid = (Decimal(str(quote.ask_price)) + Decimal(str(quote.bid_price))) / 2
         return {
             "price": mid,
