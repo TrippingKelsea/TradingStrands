@@ -419,6 +419,29 @@ Four defenses land together, each independently closing the bug class:
    already forbids inline `<script>` and event-handler attributes
    like `onerror=`.
 
+### Follow-up: move inline JS to external files
+
+The dashboard's template JS lives in inline `<script>` blocks in
+`base.html` + `index.html`'s `{% block scripts %}`. Today's CSP
+permits `script-src 'self' 'unsafe-inline'` because of this; the
+primary XSS defense (render migration + input validators + AST
+guard) is intact, but CSP's defense-in-depth is degraded on script
+tags (the `unsafe-inline` permits content-injection attacks that
+manage to land `<script>` into the DOM — which our render layer
+stops by construction, but a future regression outside of templates
+wouldn't be caught).
+
+Clean fix: extract both script blocks to `src/trading_strands/
+dashboard/static/dashboard.js`, mount the static dir via
+`app.mount("/static", StaticFiles(...))`, reference as
+`<script src="/static/dashboard.js">`, and tighten CSP to
+`script-src 'self'`. Templates keep only their HTML markup; the JS
+file is cached by the browser, which is also a nice latency win.
+
+Not urgent — the attack surface closed by the tightening is narrow
+given the other layers — but worth doing before we add significantly
+more template JS.
+
 ### CI guards
 
 - `tests/dashboard/test_no_inner_html.py`: walks every template
