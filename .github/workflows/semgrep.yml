@@ -71,7 +71,7 @@ jobs:
         # non-zero). GitHub's SARIF ingest still shows the findings
         # in the Security tab so the reviewer can triage.
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: semgrep.sarif
           category: semgrep
